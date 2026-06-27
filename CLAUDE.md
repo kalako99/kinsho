@@ -92,6 +92,12 @@ The chapter/volume reader is entirely in `templates/chapter_reader.html` (inline
 
 ---
 
+## Coding principles
+
+Follow **YAGNI** (You Aren't Gonna Need It): only build what is explicitly asked for right now. No speculative abstractions, no "we might need this later" helpers, no extra configuration options, no fallback paths for scenarios that don't exist yet. If a feature isn't in the current task, don't touch it.
+
+---
+
 ## Git & GitHub workflow
 
 The project is hosted at **https://github.com/kalako99/kinsho** (private). Always keep the remote in sync.
