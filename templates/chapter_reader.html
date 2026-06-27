@@ -1,0 +1,4063 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="/static/api.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>Reader — KINSHO</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      background: #000;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* ── TOP BAR ── */
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 150;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      background: color-mix(in srgb, var(--color-secondary, #1a1a1a) 70%, transparent);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+    .topbar.visible { opacity: 1; pointer-events: all; }
+
+    .back-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .back-btn:hover { background: rgba(255,255,255,0.1); }
+
+    .topbar-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #f0f0f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /*
+     * ── READER (CONVEYOR BELT) ──
+     * Native scroll on a bounded window of materialized pages.
+     * #reader scrolls normally; page slots are real flowed elements with
+     * heights from dims.json. The window of materialized slots is frozen
+     * during scroll and recentered (via DOM swap + scrollTop correction)
+     * only when scrolling stops.
+     */
+    #reader {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      overflow-y: auto;
+      overflow-x: hidden;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      background: #000;
+    }
+    #reader::-webkit-scrollbar { display: none; }
+
+    .page-slot {
+      width: 100%;
+      background: #000;
+      /* height set per-entry in JS from dims.json; normal block flow */
+    }
+
+    .page-slot img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      /* object-fit: fill keeps the image at exactly the precomputed ratio */
+      object-fit: fill;
+    }
+
+    /* ── PROGRESS BAR ── */
+    .frag-progress {
+      position: fixed;
+      top: 0;
+      height: 100vh;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 4px 0;
+      width: 6px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease, width 0.2s ease;
+      box-sizing: border-box;
+      background: rgba(0,0,0,0.45);
+      border-radius: 3px;
+    }
+    .frag-progress.left  { left: 0; }
+    .frag-progress.right { right: 0; }
+    .frag-progress.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    .frag-progress.visible:hover {
+      width: 18px;
+      opacity: 1 !important;
+    }
+
+    .frag-seg {
+      width: 100%;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.35);
+      transition: background 0.2s;
+      flex-shrink: 0;
+      flex-grow: 1;
+      cursor: pointer;
+      position: relative;
+    }
+    .frag-seg.active {
+      background: var(--theme-primary, #e94560);
+    }
+    .frag-seg:hover {
+      background: var(--theme-primary, #e94560);
+      filter: brightness(1.3);
+    }
+
+    .frag-tooltip {
+      position: fixed;
+      background: rgba(0,0,0,0.7);
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 9px;
+      white-space: nowrap;
+      pointer-events: none;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+      opacity: 0;
+      transition: opacity 0.15s ease;
+      z-index: 200;
+    }
+    .frag-tooltip.pinned {
+      opacity: 1;
+    }
+
+    /* ── BOTTOM BAR ── */
+    .bottombar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 8px 14px;
+      background: rgba(0,0,0,0.82);
+      backdrop-filter: blur(6px);
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      width: 100%;
+    }
+    .bottombar.visible { opacity: 1; pointer-events: all; }
+    /* ── BOTTOM CONTAINER (slider + bar grouped) ── */
+    #bottom-container {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      width: calc(100vw - 48px);
+      max-width: 860px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+    }
+
+    /* row helper — always defined */
+    .bb-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+    }
+    .bb-row-nav     { justify-content: center; }
+    .bb-row-actions { justify-content: center; }
+
+    /* ── BOTTOM BAR: 2-ROW LAYOUT ON MOBILE ── */
+    @media (max-width: 540px) {
+      #bottom-container {
+        bottom: 12px;
+      }
+      .bottombar {
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 14px;
+        align-items: stretch;
+      }
+      .bb-divider    { display: none; }
+      .bb-chap-btn   { max-width: 150px; }
+      .bb-zoom-range { width: 100px; }
+
+      .settings-panel {
+        bottom: 115px;
+      }
+    }
+
+    /* prev / next chapter buttons */
+    .bb-chapbtn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 5px;
+      border-radius: 7px;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    .bb-chapbtn:hover { background: rgba(255,255,255,0.1); }
+    .bb-chapbtn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+    /* chapter dropdown */
+    .bb-chap-dropdown {
+      position: relative;
+    }
+    .bb-chap-btn {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      padding: 5px 10px;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 220px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .bb-chap-btn:hover,
+    .bb-chap-btn.open { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.22); }
+    .bb-chap-btn svg { flex-shrink: 0; opacity: 0.6; }
+
+    .bb-chap-menu {
+      position: absolute;
+      bottom: calc(100% + 16px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      min-width: 260px;
+      max-width: 340px;
+      max-height: 320px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+      z-index: 300;
+      padding: 4px 0;
+      display: none;
+    }
+    .bb-chap-menu.open { display: block; }
+
+    .bb-chap-menu-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: #f0f0f0;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      gap: 10px;
+    }
+    .bb-chap-menu-item:hover { background: rgba(255,255,255,0.07); }
+    .bb-chap-menu-item.active {
+      color: var(--theme-primary, #e94560);
+      background: rgba(255,255,255,0.04);
+    }
+    .bb-chap-menu-item .bb-chap-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bb-chap-menu-item .bb-chap-num {
+      font-size: 0.68rem;
+      color: #555;
+      flex-shrink: 0;
+    }
+    .bb-chap-menu-item.active .bb-chap-num { color: var(--theme-primary, #e94560); opacity: 0.7; }
+
+    /* divider between chapter nav and action controls */
+    .bb-divider {
+      width: 1px;
+      height: 22px;
+      background: rgba(255,255,255,0.1);
+      flex-shrink: 0;
+    }
+
+    /* icon buttons (stretch, settings) */
+    .bb-iconbtn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 5px;
+      border-radius: 7px;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    .bb-iconbtn:hover { background: rgba(255,255,255,0.1); color: #f0f0f0; }
+
+    /* zoom / range slider */
+    .bb-zoom {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-shrink: 0;
+    }
+    .bb-zoom-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 90px;
+      height: 3px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.15);
+      outline: none;
+      cursor: pointer;
+    }
+    .bb-zoom-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      cursor: pointer;
+    }
+    .bb-zoom-range::-moz-range-thumb {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      border: none;
+      cursor: pointer;
+    }
+    .bb-zoom-value {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      color: #888;
+      min-width: 36px;
+      text-align: right;
+    }
+
+    /* active state for stretch / iconbtn toggles */
+    .bb-iconbtn.active {
+      color: var(--theme-primary, #e94560);
+    }
+
+    /* ── SETTINGS PANEL ── */
+    .settings-panel {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 200;
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 16px 18px;
+      min-width: 260px;
+      display: none;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .settings-panel.open { display: flex; }
+
+    .settings-section-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #666;
+      margin-bottom: 4px;
+    }
+
+    /* reading mode selector */
+    .settings-mode-btns {
+      display: flex;
+      gap: 8px;
+    }
+    .settings-mode-btn {
+      flex: 1;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 9px;
+      padding: 8px 10px;
+      color: #aaa;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+    .settings-mode-btn:hover { background: rgba(255,255,255,0.09); }
+    .settings-mode-btn.active {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--theme-primary, #e94560);
+      color: #f0f0f0;
+    }
+    .settings-mode-btn svg { opacity: 0.7; }
+    .settings-mode-btn.active svg { opacity: 1; }
+
+    /* toggle row (padding switch) */
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .settings-row-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      color: #ccc;
+    }
+    .settings-toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .settings-toggle input { opacity: 0; width: 0; height: 0; }
+    .settings-toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(255,255,255,0.15);
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .settings-toggle-slider::before {
+      content: '';
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #f0f0f0;
+      transition: transform 0.2s;
+    }
+    .settings-toggle input:checked + .settings-toggle-slider {
+      background: var(--theme-primary, #e94560);
+    }
+    .settings-toggle input:checked + .settings-toggle-slider::before {
+      transform: translateX(16px);
+    }
+
+    /* direction buttons for single page */
+    .settings-dir-btns {
+      display: flex;
+      gap: 8px;
+    }
+    .settings-dir-btn {
+      flex: 1;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 9px;
+      padding: 7px 10px;
+      color: #aaa;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.76rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+    .settings-dir-btn:hover { background: rgba(255,255,255,0.09); }
+    .settings-dir-btn.active {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--theme-primary, #e94560);
+      color: #f0f0f0;
+    }
+
+    /* ── SINGLE PAGE MODE ── */
+    #singlePageView {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: #000;
+      z-index: 1;
+      overflow: hidden;
+      align-items: center;
+      justify-content: center;
+    }
+    #singlePageView.active { display: flex; }
+
+    #singlePageView img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      display: block;
+      position: absolute;
+    }
+    /* ── SINGLE PAGE FLIP ANIMATION ── */
+    /* Out: the current page slides off the edge */
+    @keyframes sp-slide-out-left  { from { transform: translateX(0);            } to { transform: translateX(calc(-100% - 10px)); } }
+    @keyframes sp-slide-out-right { from { transform: translateX(0);            } to { transform: translateX(calc( 100% + 10px)); } }
+    /* In: the next page slides in from the opposite edge simultaneously */
+    @keyframes sp-slide-in-left   { from { transform: translateX(calc( 100% + 10px)); } to { transform: translateX(0); } }
+    @keyframes sp-slide-in-right  { from { transform: translateX(calc(-100% - 10px)); } to { transform: translateX(0); } }
+
+    #singlePageView img.sp-anim {
+      animation-duration: 0.22s;
+      animation-timing-function: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+      animation-fill-mode: both;
+    }
+    #singlePageView img.sp-out-left  { animation-name: sp-slide-out-left;  }
+    #singlePageView img.sp-out-right { animation-name: sp-slide-out-right; }
+    #singlePageView img.sp-in-left   { animation-name: sp-slide-in-left;   }
+    #singlePageView img.sp-in-right  { animation-name: sp-slide-in-right;  }
+
+    /* invisible click zones */
+    .sp-zone {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      width: 30%;
+      z-index: 2;
+      cursor: pointer;
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    .sp-zone-left  { left: 0; }
+    .sp-zone-right { right: 0; }
+    .sp-zone-center {
+      left: 30%;
+      width: 40%;
+      cursor: default;
+    }
+
+    /* strip padding between images */
+    #reader.padded .page-slot {
+      /* padding handled via JS gap on globalY */
+    }
+
+    /* ── BOOKMARK PANEL ── */
+    .bookmark-panel {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 200;
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 8px;
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 200px;
+    }
+    .bookmark-panel.open { display: flex; }
+
+    .bm-panel-btn {
+      background: none;
+      border: none;
+      border-radius: 9px;
+      padding: 10px 14px;
+      color: #ccc;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .bm-panel-btn:hover { background: rgba(255,255,255,0.08); color: #f0f0f0; }
+
+    /* ── BOOKMARK MODAL ── */
+    .bm-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 400;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .bm-modal {
+      background: rgba(18,18,18,0.98);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      padding: 20px;
+      min-width: 320px;
+      max-width: 480px;
+      width: 90vw;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .bm-modal-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #f0f0f0;
+      letter-spacing: 0.04em;
+    }
+    .bm-modal-body {
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
+    .bm-modal-input {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.85rem;
+      outline: none;
+      width: 100%;
+      transition: border-color 0.2s;
+    }
+    .bm-modal-input:focus { border-color: var(--theme-primary, #e94560); }
+    .bm-modal-hint {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.75rem;
+      color: #666;
+    }
+    .bm-modal-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .bm-btn {
+      border: none;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .bm-btn-primary {
+      background: var(--theme-primary, #e94560);
+      color: #fff;
+    }
+    .bm-btn-primary:hover { filter: brightness(1.15); }
+    .bm-btn-secondary {
+      background: rgba(255,255,255,0.08);
+      color: #ccc;
+    }
+    .bm-btn-secondary:hover { background: rgba(255,255,255,0.14); color: #f0f0f0; }
+    .bm-btn-danger {
+      background: rgba(220,50,50,0.15);
+      color: #e06060;
+    }
+    .bm-btn-danger:hover { background: rgba(220,50,50,0.28); }
+
+    /* Bookmark list rows */
+    .bm-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 9px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .bm-row:hover { background: rgba(255,255,255,0.09); }
+    .bm-row-info { flex: 1; min-width: 0; }
+    .bm-row-name {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: #f0f0f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bm-row-detail {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.7rem;
+      color: #666;
+      margin-top: 2px;
+    }
+    .bm-row-tag {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 20px;
+      flex-shrink: 0;
+      letter-spacing: 0.04em;
+    }
+    .bm-tag-closed {
+      background: rgba(74,222,128,0.15);
+      color: #4ade80;
+      border: 1px solid rgba(74,222,128,0.25);
+    }
+    .bm-tag-open {
+      background: rgba(255,255,255,0.06);
+      color: #888;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    .bm-row-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .bm-icon-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+      color: #777;
+      display: flex;
+      align-items: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .bm-icon-btn:hover { background: rgba(255,255,255,0.1); color: #f0f0f0; }
+    .bm-icon-btn.danger:hover { background: rgba(220,50,50,0.2); color: #e06060; }
+
+    /* end-to-end toggle row */
+    .bm-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      margin-bottom: 4px;
+    }
+    .bm-toggle-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.78rem;
+      color: #aaa;
+    }
+
+    /* message toast */
+    .bm-toast {
+      position: fixed;
+      bottom: 100px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 500;
+      background: rgba(18,18,18,0.95);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 10px 20px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      color: #f0f0f0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .bm-toast.show { opacity: 1; }
+
+    /* ── LAST PAGE POPUP ── */
+    .last-page-popup {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 600;
+      background: rgba(18,18,18,0.95);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      padding: 14px 28px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #f0f0f0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      white-space: nowrap;
+    }
+    .last-page-popup.show { opacity: 1; }
+
+    /* ── CURSOR-HIDE SIDEBARS ── */
+    .sidebar-zone {
+      position: fixed;
+      top: 0;
+      height: 100%;
+      width: 10%;
+      z-index: 50;
+      pointer-events: none; /* enabled only when UI is hidden, set via JS */
+    }
+    .sidebar-zone.left  { left: 0; }
+    .sidebar-zone.right { right: 0; }
+    .sidebar-zone.active { pointer-events: all; cursor: none; }
+
+    /* ── PRELOAD RADIUS SLIDER ── */
+    .settings-preload {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .settings-preload-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      color: #ccc;
+      white-space: nowrap;
+    }
+    .settings-preload-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .settings-preload-range {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100px;
+      height: 3px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.15);
+      outline: none;
+      cursor: pointer;
+    }
+    .settings-preload-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      cursor: pointer;
+    }
+    .settings-preload-range::-moz-range-thumb {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      border: none;
+      cursor: pointer;
+    }
+    .settings-preload-value {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      color: #888;
+      min-width: 42px;
+      text-align: right;
+    }
+
+    /* ── PAGE SLIDER + THUMB STRIP ── */
+    .page-slider-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      border-radius: 12px;
+      padding: 6px 12px;
+      width: 100%;
+    }
+    .page-slider-wrap.visible {
+      opacity: 1;
+      pointer-events: all;
+    }
+    /* Thumb strip */
+    .thumb-strip {
+      display: none;
+      overflow: hidden;
+      position: relative;
+      width: 100%;
+      height: 174px; /* 150px thumb + 4px gap + label + 8px padding */
+      touch-action: none;
+      cursor: grab;
+      user-select: none;
+    }
+    .thumb-strip.active { display: block; }
+    .thumb-strip:active  { cursor: grabbing; }
+
+    /* inner track that slides */
+    .thumb-track {
+      position: absolute;
+      top: 8px;
+      left: 0;
+      height: 162px;
+      will-change: transform;
+    }
+    .thumb-cell {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      flex-shrink: 0;
+      width: 100px;
+    }
+    .thumb-cell-img-wrap {
+      width: 100px;
+      height: 150px;
+      background: rgba(0,0,0,0.55);
+      border-radius: 6px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .thumb-cell-img-wrap img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .thumb-cell-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.62rem;
+      color: #aaa;
+      text-align: center;
+    }
+    /* Slider row */
+    .page-slider-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+    }
+    .page-slider-input {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.45);
+      outline: none;
+      cursor: pointer;
+    }
+    .page-slider-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid var(--theme-primary, #e94560);
+      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
+      cursor: pointer;
+    }
+    .page-slider-input::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ffffff;
+      border: 2px solid var(--theme-primary, #e94560);
+      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
+      cursor: pointer;
+    }
+    .page-slider-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      color: #888;
+      min-width: 56px;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    /* ── PDF QUALITY SLIDER ── */
+    .settings-pdf-quality {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .settings-pdf-quality-track {
+      position: relative;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.15);
+      margin: 8px 10px 0;
+    }
+    .settings-pdf-quality-fill {
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      border-radius: 2px;
+      background: var(--theme-primary, #e94560);
+      transition: width 0.15s;
+    }
+    .settings-pdf-quality-input {
+      position: absolute;
+      top: 50%;
+      left: 0;
+      transform: translateY(-50%);
+      width: 100%;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: transparent;
+      outline: none;
+      cursor: pointer;
+      margin: 0;
+    }
+    .settings-pdf-quality-input::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--theme-primary, #e94560);
+      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
+      cursor: pointer;
+    }
+    .settings-pdf-quality-input::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--theme-primary, #e94560);
+      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
+      cursor: pointer;
+    }
+    .settings-pdf-quality-labels {
+      display: flex;
+      justify-content: space-between;
+      padding: 0 2px;
+    }
+    .settings-pdf-quality-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      color: #666;
+      cursor: pointer;
+      transition: color 0.15s;
+      user-select: none;
+    }
+    .settings-pdf-quality-label.active {
+      color: var(--theme-primary, #e94560);
+      font-weight: 700;
+    }
+
+  </style>
+</head>
+<body>
+
+<div class="topbar" id="topbar">
+  <button class="back-btn" id="backBtn">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+  </button>
+  <span class="topbar-title" id="topbarTitle">Loading…</span>
+</div>
+
+<div id="reader"></div>
+<div class="sidebar-zone left"  id="sidebarLeft"></div>
+<div class="sidebar-zone right" id="sidebarRight"></div>
+
+<div class="frag-progress left" id="fragProgress"></div>
+
+<div class="frag-tooltip" id="leftTooltip"></div>
+
+<div id="bottom-container">
+
+<!-- Page slider + thumb strip -->
+<div class="page-slider-wrap" id="pageSliderWrap">
+  <div class="thumb-strip" id="thumbStrip">
+    <div class="thumb-track" id="thumbTrack"></div>
+  </div>
+  <div class="page-slider-row">
+    <input class="page-slider-input" type="range" id="pageSliderInput" min="0" value="0">
+    <span class="page-slider-label" id="pageSliderLabel">1 / 1</span>
+  </div>
+</div>
+
+<div class="bottombar" id="bottombar">
+
+  <!-- ROW 1: chapter navigation -->
+  <div class="bb-row bb-row-nav">
+    <button type="button" class="bb-chapbtn" id="bbPrevChap" aria-label="Previous chapter" title="Previous chapter">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
+    <div class="bb-chap-dropdown" id="bbChapDropdown">
+      <button type="button" class="bb-chap-btn" id="bbChapBtn" aria-haspopup="listbox" aria-expanded="false">
+        <span id="bbChapLabel">Loading…</span>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="bb-chap-menu" id="bbChapMenu" role="listbox"></div>
+    </div>
+    <button type="button" class="bb-chapbtn" id="bbNextChap" aria-label="Next chapter" title="Next chapter">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+  </div>
+
+  <!-- ROW 2: zoom + actions -->
+  <div class="bb-row bb-row-actions">
+    <div class="bb-zoom">
+      <input class="bb-zoom-range" type="range" min="60" max="100" step="1" value="100" aria-label="Strip width" title="100%" id="bbZoomRange">
+      <span class="bb-zoom-value" id="bbZoomValue">100%</span>
+    </div>
+    <button type="button" class="bb-iconbtn" id="bbBookmarkBtn" aria-label="Bookmarks" title="Bookmarks">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+    </button>
+    <button type="button" class="bb-iconbtn" id="bbSettingsBtn" aria-label="Settings" title="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </div>
+
+</div>
+
+</div><!-- /#bottom-container -->
+
+<!-- Settings panel -->
+<div class="settings-panel" id="settingsPanel">
+  <div>
+    <div class="settings-section-title">Reading mode</div>
+    <div class="settings-mode-btns">
+      <button class="settings-mode-btn" id="settingsModeLongStrip" data-mode="long-strip">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="5" rx="1"/><rect x="3" y="10" width="18" height="5" rx="1"/><rect x="3" y="17" width="18" height="5" rx="1"/>
+        </svg>
+        Long strip
+      </button>
+      <button class="settings-mode-btn" id="settingsModeSingle" data-mode="single-page">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="4" y="2" width="16" height="20" rx="2"/>
+        </svg>
+        Single page
+      </button>
+    </div>
+  </div>
+
+<!-- WITH: -->
+  <!-- Long strip settings -->
+  <div id="settingsLongStripOptions">
+    <div class="settings-section-title">Long strip settings</div>
+    <div class="settings-row">
+      <span class="settings-row-label">Padding between images</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsPaddingToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <!-- Preload radius (compressed sources only) -->
+  <div id="settingsPreloadWrap" style="display:none">
+    <div class="settings-section-title">Preload</div>
+    <div class="settings-preload">
+      <span class="settings-preload-label">Pages ahead/behind</span>
+      <div class="settings-preload-right">
+        <input class="settings-preload-range" type="range" min="3" max="14" step="1" value="7" id="settingsPreloadRange">
+        <span class="settings-preload-value" id="settingsPreloadValue">±7</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Single page settings -->
+  <div id="settingsSingleOptions" style="display:none">
+    <div class="settings-section-title">Single page settings</div>
+    <div class="settings-dir-btns">
+      <button class="settings-dir-btn" id="settingsDirLTR" data-dir="ltr">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
+        Left to right
+      </button>
+      <button class="settings-dir-btn" id="settingsDirRTL" data-dir="rtl">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+        Right to left
+      </button>
+    </div>
+  </div>
+  <!-- PDF quality (only shown for PDF sources) -->
+  <div id="settingsPdfQualityWrap" style="display:none">
+    <div class="settings-section-title">Page quality</div>
+    <div class="settings-pdf-quality">
+      <div class="settings-pdf-quality-track">
+        <div class="settings-pdf-quality-fill" id="pdfQualityFill"></div>
+        <input class="settings-pdf-quality-input" type="range" min="0" max="2" step="1" value="1" id="pdfQualityRange">
+      </div>
+      <div class="settings-pdf-quality-labels">
+        <span class="settings-pdf-quality-label" data-val="0" id="pdfQLabel0">Low</span>
+        <span class="settings-pdf-quality-label" data-val="1" id="pdfQLabel1">Normal</span>
+        <span class="settings-pdf-quality-label" data-val="2" id="pdfQLabel2">High</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Bookmark panel (mini popup) -->
+<div class="bookmark-panel" id="bookmarkPanel">
+  <button class="bm-panel-btn" id="bmAddBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+    Add Bookmark
+  </button>
+  <button class="bm-panel-btn" id="bmCloseBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+    Close Bookmark
+  </button>
+  <button class="bm-panel-btn" id="bmListBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    Bookmark List
+  </button>
+</div>
+
+<!-- Bookmark modal (shared overlay) -->
+<div class="bm-modal-overlay" id="bmModalOverlay" style="display:none">
+  <div class="bm-modal" id="bmModal">
+    <div class="bm-modal-title" id="bmModalTitle">Bookmarks</div>
+    <div class="bm-modal-body" id="bmModalBody"></div>
+    <div class="bm-modal-actions" id="bmModalActions"></div>
+  </div>
+</div>
+
+<!-- Bookmark toast -->
+<div class="bm-toast" id="bmToast"></div>
+
+<div class="last-page-popup" id="lastPagePopup">This is the last page</div>
+
+<!-- Single page view -->
+<div id="singlePageView">
+  <img id="spImageA" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;">
+  <img id="spImageB" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;visibility:hidden;">
+  <div class="sp-zone sp-zone-left"   id="spZoneLeft"></div>
+  <div class="sp-zone sp-zone-center" id="spZoneCenter"></div>
+  <div class="sp-zone sp-zone-right"  id="spZoneRight"></div>
+</div>
+
+<script>
+(async () => {
+
+  // Replace the current history entry so chapter-to-chapter navigation
+  // doesn't stack: pressing back always returns to the manga detail page.
+  history.replaceState(null, '', window.location.href);
+
+  // ── URL PARAMS ──
+  const parts     = window.location.pathname.split('/');
+  const libraryId = parts[2];
+  const mangaId   = parts[3];
+  const isVolume  = parts[4] === 'volume';
+  const chapterId = parts[5];
+  const startPage = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
+
+  const reader  = document.getElementById('reader');
+  const topbar  = document.getElementById('topbar');
+  const titleEl = document.getElementById('topbarTitle');
+  const backBtn = document.getElementById('backBtn');
+
+  // ── CONVEYOR BELT CONFIG ──
+  // Number of manga pages materialized as real DOM slots at any time.
+  // This is the buffer the user can natively scroll within before a
+  // recenter is needed — keep generous so a single flick can't outrun it.
+  const SLOT_COUNT = 80;
+  // How many manifest indices ahead/behind to keep a slot assigned (not recycled).
+  // Slots outside this window get freed and reassigned to pages entering the window.
+  const SLOT_RENDER_RADIUS = 40;
+
+  // ── FULLSCREEN ──
+  function enterFullscreen() {
+    const el = document.documentElement;
+    if      (el.requestFullscreen)       el.requestFullscreen();
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    else if (el.mozRequestFullScreen)    el.mozRequestFullScreen();
+  }
+  function exitFullscreen() {
+    if      (document.exitFullscreen)       document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    else if (document.mozCancelFullScreen)  document.mozCancelFullScreen();
+  }
+
+  // ── TOP BAR ──
+  let barTimer = null;
+  function showBar() { showAll(); } // kept for compat
+
+  const sidebarLeft  = document.getElementById('sidebarLeft');
+  const sidebarRight = document.getElementById('sidebarRight');
+
+  function setSidebarsActive(active) {
+    sidebarLeft.classList.toggle('active', active);
+    sidebarRight.classList.toggle('active', active);
+    if (!active) document.body.style.cursor = '';
+  }
+
+  sidebarLeft.addEventListener('mouseenter',  () => { document.body.style.cursor = 'none'; });
+  sidebarLeft.addEventListener('mouseleave',  () => { document.body.style.cursor = ''; });
+  sidebarRight.addEventListener('mouseenter', () => { document.body.style.cursor = 'none'; });
+  sidebarRight.addEventListener('mouseleave', () => { document.body.style.cursor = ''; });
+
+  function hideAll() {
+    topbar.classList.remove('visible');
+    fragProgress.classList.remove('visible');
+    document.getElementById('bottombar').classList.remove('visible');
+    leftTooltip.classList.remove('pinned');
+    leftHoveredIdx = null;
+    barVisible = false;
+    const sp = document.getElementById('settingsPanel');
+    if (sp) {
+      sp.classList.remove('open');
+      const btn = document.getElementById('bbSettingsBtn');
+      if (btn) btn.classList.remove('active');
+    }
+    if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
+    setSidebarsActive(true);
+  }
+
+  function showAll() {
+    topbar.classList.add('visible');
+    fragProgress.classList.add('visible');
+    document.getElementById('bottombar').classList.add('visible');
+    barVisible = true;
+    setSidebarsActive(false);
+    if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
+    clearTimeout(barTimer);
+    barTimer = setTimeout(() => {
+      if (stripVisible) return; // don't hide while thumb strip is active
+      if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
+      hideAll();
+    }, 3000);
+    if (typeof updatePinnedTooltips === 'function') updatePinnedTooltips();
+  }
+
+  let barVisible     = false;
+  let leftHoveredIdx = null;
+  document.addEventListener('click', e => {
+    if (touchMoved) { touchMoved = false; return; } // was a drag, not a tap
+    if (backBtn.contains(e.target)) return;
+    if (fragProgress.contains(e.target)) return;
+    if (document.getElementById('bottombar').contains(e.target)) return;
+    if (barVisible) {
+      clearTimeout(barTimer);
+      hideAll();
+    } else {
+      showAll();
+    }
+  });
+
+  backBtn.addEventListener('click', () => {
+    exitFullscreen();
+    window.location.href = `/manga/${libraryId}/${mangaId}`;
+  });
+
+  // ── FETCH HELPERS ──
+  async function apiFetch(path) {
+    const r = await fetch(path);
+    return r.json();
+  }
+
+  // Navigate to a chapter by replacing history so back always returns to the manga detail page.
+  function goToChapter(url) {
+    window.location.replace(url);
+  }
+
+  // ── BOOT: fetch everything needed for geometry in one round-trip burst ──
+  enterFullscreen();
+
+  const [manga, dims, chapterList, adminData] = await Promise.all([
+    apiFetch(`/api/manga/${libraryId}/${mangaId}`),
+    apiFetch(`/api/manga/${libraryId}/${mangaId}/dims`),
+    apiFetch(`/api/manga/${libraryId}/${mangaId}/${isVolume ? 'volumes' : 'chapters'}`).then(d => isVolume ? (d.volumes || []) : (d.chapters || [])),
+    apiFetch(`/api/admin/status`),
+  ]);
+
+  titleEl.textContent = manga.name || manga.title || 'Manga';
+
+  // ── READING SESSION TRACKING ──
+  const _readingMangaName = manga.name || manga.title || 'Unknown';
+  fetch(apiUrl('/api/reading/session/start'), {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ manga_name: _readingMangaName, library_id: String(libraryId) }),
+  }).catch(() => {});
+
+  let _tickSent = false;
+  const _tickInterval = setInterval(() => {
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
+  }, 60000);
+
+  function _sendFinalTick() {
+    if (_tickSent) return;
+    _tickSent = true;
+    clearInterval(_tickInterval);
+    navigator.sendBeacon('/api/reading/session/tick');
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') _sendFinalTick();
+  });
+  window.addEventListener('beforeunload', _sendFinalTick);
+
+  // ── BUILD MANIFEST ──
+  // manifest[i] = {
+  //   chapterId, localIdx,   — identity
+  //   globalY, scaledH,      — geometry (pixels, at current viewport width)
+  //   url: null,             — populated lazily when chapter URLs are fetched
+  //   el: null,              — <img> element reference
+  // }
+  //
+  // chapterStart[chapterId] = first manifest index for that chapter
+  //
+  // All geometry is derived from dims.json which the server already has —
+  // zero extra network requests needed to position anything.
+
+  const viewW        = window.innerWidth;
+  const manifest     = [];
+  const chapterStart = {};
+  let   cursorY      = 0;
+
+  // Gap in px between pages when padding is enabled (applied during rebuild)
+  const PAGE_GAP = 16;
+
+  function buildManifest(usePadding, effectiveW) {
+    const w = effectiveW ?? viewW;
+    manifest.length = 0;
+    Object.keys(chapterStart).forEach(k => delete chapterStart[k]);
+    cursorY = 0;
+    for (const ch of chapterList) {
+      const cid    = ch.id;
+      const chDims = isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid];
+      if (!chDims || !chDims.pages?.length) continue;
+      chapterStart[cid] = manifest.length;
+      for (let i = 0; i < chDims.pages.length; i++) {
+        const { w: iw, h: ih } = chDims.pages[i];
+        const scaledH = Math.round((w / iw) * ih);
+        manifest.push({
+          chapterId: cid,
+          localIdx:  i,
+          globalY:   cursorY,
+          scaledH,
+          url:    null,
+          el:     null,
+          loaded: false,
+        });
+        cursorY += scaledH + (usePadding ? PAGE_GAP : 0);
+      }
+    }
+  }
+
+  // Update globalY positions and scaledH in the existing manifest entries (preserves el refs and loaded state)
+  function recomputeGeometry(usePadding, effectiveW) {
+    const w = effectiveW ?? viewW;
+    let y = 0;
+    Object.keys(chapterStart).forEach(k => delete chapterStart[k]);
+    for (let i = 0; i < manifest.length; i++) {
+      const entry = manifest[i];
+      if (i === 0 || manifest[i - 1].chapterId !== entry.chapterId) {
+        chapterStart[entry.chapterId] = i;
+      }
+      const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
+      if (chDims?.pages?.[entry.localIdx]) {
+        const { w: iw, h: ih } = chDims.pages[entry.localIdx];
+        entry.scaledH = Math.round((w / iw) * ih);
+      }
+      entry.globalY = y;
+      y += entry.scaledH + (usePadding ? PAGE_GAP : 0);
+    }
+    cursorY = y;
+  }
+
+  // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
+  const readerSettings = Object.assign(
+    { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1 },
+    (adminData.reader_settings_by_tab || {})[libraryId] || {}
+  );
+
+  async function saveReaderSettings() {
+    await fetch(apiUrl('/api/settings/reader'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...readerSettings, library_id: libraryId }),
+    });
+  }
+
+  function applyPreloadRadius(r) {
+    readerSettings.preloadRadius = r;
+    TIER1_RADIUS = r;
+    TIER2_RADIUS = r * 2;
+    document.getElementById('settingsPreloadValue').textContent = `±${r}`;
+    document.getElementById('settingsPreloadRange').value = r;
+  }
+
+  // Build manifest with current padding setting
+  buildManifest(readerSettings.padding);
+
+  // ── CONVEYOR WINDOW STATE ──
+  // slotPool[k] is always the (k+1)-th DOM child of #reader and corresponds
+  // to manifest[windowLo + k]. The window is materialized/shifted by
+  // _rebuildConveyorWindow / _shiftConveyorWindow below.
+  const slotPool = [];
+  let windowLo = 0;
+  let windowHi = -1;
+
+  // Map from manifest index → slot pool index (-1 = not materialized)
+  const assignedSlot = new Int32Array(manifest.length).fill(-1);
+
+  // ── VIRTUAL SCROLL STATE ──
+  // virtualY is the only source of truth for scroll position.
+  // No window.scrollY, no window.scrollTo, no browser scroll events.
+  let virtualY = 0;
+  const viewH  = window.innerHeight;
+
+  // ── URL CACHE ──
+  // Fetch chapter page URL lists on demand; cache the Promise so concurrent
+  // calls for the same chapter share one network request.
+  const urlCache = {}; // chapterId -> Promise<string[]>
+
+  function sourceIsPdf() {
+    const firstCh = chapterList[0];
+    if (!firstCh) return false;
+    const chDims = isVolume ? dims.volumes?.[firstCh.id] : dims.chapters?.[firstCh.id];
+    return chDims?.source === 'pdf';
+  }
+  const isPdf = sourceIsPdf();
+
+  const PDF_SCALES = [1.0, 1.5, 2.0];
+  function pdfScaleParam() {
+    return `?scale=${PDF_SCALES[readerSettings.pdfScale ?? 1]}`;
+  }
+
+  function ensureChapterUrls(cid) {
+    if (urlCache[cid]) return urlCache[cid];
+
+    const chDims = isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid];
+    const source = chDims?.source;
+    const base   = `/api/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${cid}/page`;
+
+    // Archive / PDF / EPUB: URLs are sequential integers, build without network fetch.
+    if (source === 'archive' || source === 'pdf' || source === 'epub') {
+      const count  = chDims.page_count ?? chDims.pages?.length;
+      if (count != null) {
+        const suffix = source === 'pdf' ? pdfScaleParam() : '';
+        const urls   = Array.from({ length: count }, (_, i) => `${base}/${i}${suffix}`);
+        urlCache[cid] = Promise.resolve(urls);
+        return urlCache[cid];
+      }
+    }
+
+    // Loose: filenames stored in dims, build without network fetch.
+    if (source === 'loose' && Array.isArray(chDims?.filenames)) {
+      const urls = chDims.filenames.map(fname => `${base}/${fname}`);
+      urlCache[cid] = Promise.resolve(urls);
+      return urlCache[cid];
+    }
+
+    // Fallback: old dims.json without page_count/filenames — fetch from server.
+    const suffix = isPdf ? pdfScaleParam() : '';
+    urlCache[cid] = apiFetch(
+      `/api/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${cid}/pages${suffix}`
+    ).then(d => d.pages || []);
+    return urlCache[cid];
+  }
+
+  // Prime the opening chapter URL fetch immediately so it's in-flight (or done)
+  // by the time the jump block's .then() fires — eliminates the blank-first-page delay.
+  ensureChapterUrls(chapterId);
+
+  // ── THREE-TIER LOADER ──
+  let TIER1_RADIUS = readerSettings.preloadRadius ?? 7;
+  let TIER2_RADIUS = TIER1_RADIUS * 2;
+
+  function sourceIsCompressed() {
+    const firstCh = chapterList[0];
+    if (!firstCh) return false;
+    const chDims = isVolume ? dims.volumes?.[firstCh.id] : dims.chapters?.[firstCh.id];
+    if (!chDims) return false;
+    const src = chDims.source;
+    return src === 'archive' || src === 'pdf' || src === 'epub';
+  }
+  const isCompressed = sourceIsCompressed();
+
+  function thumbUrl(entry) {
+    return `/api/manga/${libraryId}/${mangaId}/thumb/${entry.chapterId}/${entry.localIdx}`;
+  }
+
+  function pdfScaleParam() {
+    const scales = [1.0, 1.5, 2.0];
+    return `?scale=${scales[readerSettings.pdfScale ?? 1]}`;
+  }
+
+  // Assign a URL to a manifest entry (populates entry.url, sets img src via slot if assigned)
+  function loadEntry(entry) {
+    if (entry.loaded) return;
+    if (entry.url) {
+      _applyUrlToSlot(entry);
+      return;
+    }
+    ensureChapterUrls(entry.chapterId).then(urls => {
+      entry.url = urls[entry.localIdx] || '';
+      _applyUrlToSlot(entry);
+    });
+  }
+
+  function _applyUrlToSlot(entry) {
+    const globalIdx = manifest.indexOf(entry);
+    const si = assignedSlot[globalIdx];
+    if (si !== -1) {
+      slotPool[si].img.src = entry.url;
+      entry.loaded = true;
+    }
+  }
+
+  // Tier 1: full-res + forced decode, then paint into slot
+  function loadEntryTier1(entry, signal) {
+    if (entry.loaded) return;
+    const apply = (url) => {
+      if (!url || signal?.aborted) return;
+      entry.url = url;
+      entry.loaded = true;
+      const _upgradeSpImage = () => {
+        // spImage is a swappable reference — always read it at call time, not at definition time.
+        if (readerSettings.mode === 'single-page' && spManifest[spCurrentIdx] === entry) {
+          spImage.src = url;
+        }
+      };
+      if (isCompressed) {
+        const img = new Image();
+        img.src = url;
+        img.decode().then(() => {
+          if (signal?.aborted) return;
+          const globalIdx = manifest.indexOf(entry);
+          const si = assignedSlot[globalIdx];
+          if (si !== -1) slotPool[si].img.src = url;
+          _upgradeSpImage();
+        }).catch(() => {
+          if (signal?.aborted) return;
+          const globalIdx = manifest.indexOf(entry);
+          const si = assignedSlot[globalIdx];
+          if (si !== -1) slotPool[si].img.src = url;
+          _upgradeSpImage();
+        });
+      } else {
+        const globalIdx = manifest.indexOf(entry);
+        const si = assignedSlot[globalIdx];
+        if (si !== -1) slotPool[si].img.src = url;
+        _upgradeSpImage();
+      }
+    };
+    if (entry.url) { apply(entry.url); return; }
+    ensureChapterUrls(entry.chapterId).then(urls => apply(urls[entry.localIdx] || ''));
+  }
+
+  // Tier 2: full-res prefetch only — no slot assignment
+  function prefetchEntryTier2(entry, signal) {
+    if (entry.loaded || entry.url) return;
+    ensureChapterUrls(entry.chapterId).then(urls => {
+      if (signal?.aborted) return;
+      const url = urls[entry.localIdx] || '';
+      if (!url) return;
+      entry.url = url;
+      const img = new Image();
+      img.src = url;
+    });
+  }
+
+  // Tier 3: thumbnail into slot (full-res will overwrite when promoted)
+  function loadEntryTier3(entry) {
+    if (entry.loaded) return;
+    const globalIdx = manifest.indexOf(entry);
+    const si = assignedSlot[globalIdx];
+    if (si === -1) return;
+    if (!slotPool[si].img.dataset.thumbSet) {
+      slotPool[si].img.dataset.thumbSet = '1';
+      slotPool[si].img.src = thumbUrl(entry);
+    }
+  }
+
+  function prefetchAroundIndex(centerGlobalIdx, signal, direction = 0) {
+    // In single-page mode with a known direction, use asymmetric radii:
+    // forward gets the full velocity-scaled radius, backward gets a small fixed buffer.
+    // In long-strip mode or direction=0, stay symmetric (original behaviour).
+    const SP_BACK_RADIUS_T1 = 2;  // tier-1 pages to keep behind in SP mode
+    const SP_BACK_RADIUS_T2 = 4;  // tier-2 pages to keep behind in SP mode
+
+    let fwdT1, backT1, fwdT2, backT2;
+    if (direction !== 0) {
+      const fwd  = direction > 0 ? 1 : -1;
+      fwdT1  = fwd > 0 ? TIER1_RADIUS : SP_BACK_RADIUS_T1;
+      backT1 = fwd > 0 ? SP_BACK_RADIUS_T1 : TIER1_RADIUS;
+      fwdT2  = fwd > 0 ? TIER2_RADIUS : SP_BACK_RADIUS_T2;
+      backT2 = fwd > 0 ? SP_BACK_RADIUS_T2 : TIER2_RADIUS;
+    } else {
+      fwdT1 = backT1 = TIER1_RADIUS;
+      fwdT2 = backT2 = TIER2_RADIUS;
+    }
+
+    const lo1 = Math.max(0, centerGlobalIdx - backT1);
+    const hi1 = Math.min(manifest.length - 1, centerGlobalIdx + fwdT1);
+    const lo2 = Math.max(0, centerGlobalIdx - backT2);
+    const hi2 = Math.min(manifest.length - 1, centerGlobalIdx + fwdT2);
+
+    for (let i = lo1; i <= hi1; i++) { if (signal?.aborted) return; loadEntryTier1(manifest[i], signal); }
+    for (let i = lo2; i < lo1;  i++) { if (signal?.aborted) return; prefetchEntryTier2(manifest[i], signal); }
+    for (let i = hi1 + 1; i <= hi2; i++) { if (signal?.aborted) return; prefetchEntryTier2(manifest[i], signal); }
+    for (let i = Math.max(0, lo2 - 18); i < lo2; i++) { if (signal?.aborted) return; loadEntryTier3(manifest[i]); }
+    for (let i = hi2 + 1; i <= Math.min(manifest.length - 1, hi2 + 18); i++) { if (signal?.aborted) return; loadEntryTier3(manifest[i]); }
+  }
+
+  // ── BINARY SEARCH: first manifest index whose bottom edge > y ──
+  function firstIndexAfter(y) {
+    let lo = 0, hi = manifest.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      const m   = manifest[mid];
+      if (m.globalY + m.scaledH <= y) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  // ── BUILD A SLOT ──
+  function _makeSlotEl() {
+    const el  = document.createElement('div');
+    el.className = 'page-slot';
+    const img = document.createElement('img');
+    img.style.display   = 'block';
+    img.style.width     = '100%';
+    img.style.height    = '100%';
+    img.style.objectFit = 'fill';
+    el.appendChild(img);
+    return { el, img };
+  }
+
+  // ── FULL REBUILD: clears the conveyor and materializes a new window of
+  // up to SLOT_COUNT entries centered on newWindowLo, then sets scrollTop
+  // so targetGlobalY lands at the same point in the viewport. ──
+  function _rebuildConveyorWindow(newWindowLo, targetGlobalY) {
+    for (let i = windowLo; i <= windowHi; i++) {
+      manifest[i].loaded = false;
+      assignedSlot[i] = -1;
+    }
+    reader.replaceChildren();
+    slotPool.length = 0;
+
+    if (manifest.length === 0) { windowLo = 0; windowHi = -1; return; }
+
+    const count = Math.min(SLOT_COUNT, manifest.length);
+    windowLo = Math.max(0, Math.min(newWindowLo, manifest.length - count));
+    windowHi = windowLo + count - 1;
+
+    const frag = document.createDocumentFragment();
+    for (let i = windowLo; i <= windowHi; i++) {
+      const { el, img } = _makeSlotEl();
+      el.style.height = manifest[i].scaledH + 'px';
+      frag.appendChild(el);
+      slotPool.push({ el, img });
+      assignedSlot[i] = i - windowLo;
+      loadEntry(manifest[i]);
+    }
+    reader.appendChild(frag);
+
+    reader.scrollTop = targetGlobalY - manifest[windowLo].globalY;
+    prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
+  }
+
+  // ── INCREMENTAL SHIFT: moves the window by `delta` entries by dropping
+  // slots off one end and adding them on the other, correcting scrollTop
+  // by the exact pixel delta so the visible content doesn't move. ──
+  function _shiftConveyorWindow(delta) {
+    if (delta > 0) {
+      let removedHeight = 0;
+      const frag = document.createDocumentFragment();
+      for (let k = 0; k < delta; k++) {
+        const oldIdx = windowLo + k;
+        removedHeight += manifest[oldIdx].scaledH;
+        manifest[oldIdx].loaded = false;
+        assignedSlot[oldIdx] = -1;
+        reader.removeChild(reader.firstChild);
+
+        const newIdx = windowHi + 1 + k;
+        const { el } = _makeSlotEl();
+        el.style.height = manifest[newIdx].scaledH + 'px';
+        frag.appendChild(el);
+        loadEntry(manifest[newIdx]);
+      }
+      reader.appendChild(frag);
+      windowLo += delta;
+      windowHi += delta;
+      reader.scrollTop -= removedHeight;
+    } else {
+      const n = -delta;
+      let addedHeight = 0;
+      const frag = document.createDocumentFragment();
+      for (let k = n - 1; k >= 0; k--) {
+        const newIdx = windowLo - 1 - k;
+        const { el } = _makeSlotEl();
+        el.style.height = manifest[newIdx].scaledH + 'px';
+        addedHeight += manifest[newIdx].scaledH;
+        frag.appendChild(el);
+        loadEntry(manifest[newIdx]);
+      }
+      reader.insertBefore(frag, reader.firstChild);
+      for (let k = 0; k < n; k++) {
+        const oldIdx = windowHi - k;
+        manifest[oldIdx].loaded = false;
+        assignedSlot[oldIdx] = -1;
+        reader.removeChild(reader.lastChild);
+      }
+      windowLo -= n;
+      windowHi -= n;
+      reader.scrollTop += addedHeight;
+    }
+
+    slotPool.length = 0;
+    const children = reader.children;
+    for (let k = 0; k < children.length; k++) {
+      slotPool.push({ el: children[k], img: children[k].querySelector('img') });
+      assignedSlot[windowLo + k] = k;
+    }
+    prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
+  }
+
+  // ── RECENTER: called on scroll-stop. Re-centers the materialized window
+  // on the entry at the top of the viewport, as close as edges allow. ──
+  function recenterConveyor() {
+    if (manifest.length === 0) return;
+    const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+    const count  = Math.min(SLOT_COUNT, manifest.length);
+    const target = Math.max(0, Math.min(currentIdx - Math.floor(count / 2), manifest.length - count));
+    const delta  = target - windowLo;
+    if (delta === 0) return;
+    if (Math.abs(delta) >= count) {
+      _rebuildConveyorWindow(target, virtualY);
+    } else {
+      _shiftConveyorWindow(delta);
+    }
+  }
+
+  // ── SYNC: lightweight, called on every native scroll event. ──
+  function syncScrollPosition() {
+    if (manifest.length === 0) return;
+    virtualY = manifest[windowLo].globalY + reader.scrollTop;
+    updateProgressBar();
+    scheduleProgressSave();
+    if (
+      currentChapIdx >= chapterList.length - 1 &&
+      reader.scrollTop >= reader.scrollHeight - reader.clientHeight - 1
+    ) {
+      showLastPagePopup();
+    }
+  }
+
+  // ── NATIVE SCROLL WIRING ──
+  // recenterConveyor must run only AFTER scrolling (including native
+  // momentum) has fully settled — running it mid-momentum writes scrollTop
+  // and aborts the browser's inertia animation. scrollend is the correct
+  // signal for this. For browsers without it, a fixed-time debounce on
+  // 'scroll' is unreliable (events are throttled/coalesced during
+  // compositor-driven momentum), so fall back to RAF-polling for a
+  // scrollTop that hasn't moved for two consecutive frames.
+  const supportsScrollEnd = 'onscrollend' in window;
+
+  reader.addEventListener('scroll', () => {
+    syncScrollPosition();
+    if (!supportsScrollEnd) scheduleSettledCheck();
+  }, { passive: true });
+
+  if (supportsScrollEnd) {
+    reader.addEventListener('scrollend', recenterConveyor, { passive: true });
+  }
+
+  let _settledRaf   = null;
+  let _settledLast  = 0;
+  let _settledTicks = 0;
+  function scheduleSettledCheck() {
+    _settledTicks = 0;
+    if (_settledRaf) return;
+    _settledLast = reader.scrollTop;
+    _settledRaf  = requestAnimationFrame(_settledTick);
+  }
+  function _settledTick() {
+    const cur = reader.scrollTop;
+    if (cur === _settledLast) {
+      _settledTicks++;
+      if (_settledTicks >= 2) { _settledRaf = null; recenterConveyor(); return; }
+    } else {
+      _settledTicks = 0;
+      _settledLast  = cur;
+    }
+    _settledRaf = requestAnimationFrame(_settledTick);
+  }
+
+  // ── SET VIRTUAL Y (programmatic jumps: bookmarks, slider, mode switch) ──
+  function setVirtualY(newY) {
+    const maxY = Math.max(0, cursorY - viewH);
+    virtualY = Math.max(0, Math.min(newY, maxY));
+    if (manifest.length === 0) return;
+    const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+    const count  = Math.min(SLOT_COUNT, manifest.length);
+    const target = Math.max(0, Math.min(currentIdx - Math.floor(count / 2), manifest.length - count));
+    _rebuildConveyorWindow(target, virtualY);
+    updateProgressBar();
+    scheduleProgressSave();
+  }
+
+  // ── applyManifestToSlots: called after geometry changes (padding/width).
+  // Clears the conveyor; the caller's subsequent setVirtualY rebuilds it. ──
+  function applyManifestToSlots() {
+    for (let i = windowLo; i <= windowHi; i++) {
+      manifest[i].loaded = false;
+      assignedSlot[i] = -1;
+    }
+    reader.replaceChildren();
+    slotPool.length = 0;
+    windowLo = 0;
+    windowHi = -1;
+  }
+
+  // ── JUMP TO OPENING CHAPTER ──
+  // globalY is computed from dims.json synchronously — materialize the
+  // conveyor window centered on it before first paint.
+  const startIdx = chapterStart[chapterId];
+  let startGlobalIdx = 0;
+  if (startIdx !== undefined) {
+    const targetIdx = startPage > 0 ? Math.min(startIdx + startPage, manifest.length - 1) : startIdx;
+    startGlobalIdx = targetIdx;
+    virtualY = manifest[targetIdx].globalY;
+  }
+
+  if (manifest.length > 0) {
+    const count  = Math.min(SLOT_COUNT, manifest.length);
+    const target = Math.max(0, Math.min(startGlobalIdx - Math.floor(count / 2), manifest.length - count));
+    _rebuildConveyorWindow(target, virtualY);
+  }
+
+  // Prime the URL cache for the opening chapter, then let the tier system
+  // load only the pages around the starting position.
+  ensureChapterUrls(chapterId).then(() => {
+    prefetchAroundIndex(startGlobalIdx);
+  });
+
+  // ── MOMENTUM SCROLL ──
+  let velocity = 0;
+  let rafId    = null;
+
+  function momentumLoop() {
+    if (Math.abs(velocity) < 2.5) {
+      velocity = 0;
+      rafId    = null;
+      return;
+    }
+    velocity *= 0.982;
+    const atEnd = virtualY >= cursorY - viewH - 1;
+    if (velocity > 0 && currentChapIdx >= chapterList.length - 1 && atEnd) {
+      velocity = 0;
+      rafId    = null;
+      showLastPagePopup();
+      return;
+    }
+    reader.scrollTop += velocity;
+    rafId = requestAnimationFrame(momentumLoop);
+  }
+
+  // ── NATIVE BLE BRIDGE (Android APK only) ──
+  window.injectScroll = function(delta) {
+    const sensitivity = Math.abs(delta) < 20 ? 4.0 : 0.6;
+    velocity += delta * sensitivity;
+    if (!rafId) rafId = requestAnimationFrame(momentumLoop);
+  };
+
+  // ── WHEEL INPUT (PC) ──
+  // Long-strip: native wheel scrolling on #reader (overflow-y: auto) handles
+  // this with no JS involvement. This listener now only intercepts wheel
+  // events in single-page mode, where wheel ticks flip pages.
+  let spWheelAccum  = 0;
+  let spWheelTimer  = null;
+  const SP_WHEEL_THRESHOLD = 60;
+
+  window.addEventListener('wheel', e => {
+    if (readerSettings.mode !== 'single-page') return;
+    e.preventDefault();
+    let raw = e.deltaY;
+    if (e.deltaMode === 1) raw *= 32;
+    if (e.deltaMode === 2) raw *= window.innerHeight;
+
+    spWheelAccum += raw;
+    if (Math.abs(spWheelAccum) >= SP_WHEEL_THRESHOLD) {
+      const dir = spWheelAccum > 0 ? 1 : -1;
+      spWheelAccum = 0;
+      clearTimeout(spWheelTimer);
+      spWheelTimer = setTimeout(() => { spWheelAccum = 0; }, 300);
+      if (dir > 0) spNext(); else spPrev();
+    }
+  }, { passive: false });
+
+  // ── TOUCH INPUT (tablet / phone) ──
+  // Long-strip: native touch scrolling on #reader (overflow-y: auto) handles
+  // drag, momentum and rubber-banding directly. These listeners now only
+  // track touchMoved, so the document click handler can tell a tap (toggle
+  // UI bars) apart from a scroll-drag.
+  let touchStartY   = 0;
+  let touchMoved    = false;
+  const TOUCH_TAP_THRESHOLD = 8;
+
+  reader.addEventListener('touchstart', e => {
+    if (readerSettings.mode === 'single-page') return;
+    velocity = 0;
+    if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+    touchStartY = e.touches[0].clientY;
+    touchMoved  = false;
+  }, { passive: true });
+
+  reader.addEventListener('touchmove', e => {
+    if (readerSettings.mode === 'single-page') return;
+    const y = e.touches[0].clientY;
+    if (Math.abs(y - touchStartY) > TOUCH_TAP_THRESHOLD) touchMoved = true;
+  }, { passive: true });
+
+  reader.addEventListener('touchend', e => {
+    if (readerSettings.mode === 'single-page') return;
+    if (!touchMoved) return;
+    e.preventDefault();
+  }, { passive: false });
+
+  // ── FRAGMENT PROGRESS BAR ──
+  const fragProgress = document.getElementById('fragProgress');
+
+  // Read theme primary color from CSS variable (set by app.js via loadTheme)
+  const themeColor = getComputedStyle(document.documentElement)
+                       .getPropertyValue('--color-primary').trim() || '#e94560';
+  document.documentElement.style.setProperty('--theme-primary', themeColor);
+
+  const leftTooltip = document.getElementById('leftTooltip');
+
+  // Tracks which chapter the left bar is currently built for
+  let fragProgressChapterId = chapterId;
+  let chapterManifest = manifest.filter(e => e.chapterId === chapterId);
+  let totalPages      = chapterManifest.length;
+
+  function rebuildFragProgress(forChapterId) {
+    fragProgressChapterId = forChapterId;
+    chapterManifest = manifest.filter(e => e.chapterId === forChapterId);
+    totalPages      = chapterManifest.length;
+
+    fragProgress.querySelectorAll('.frag-seg').forEach(s => s.remove());
+
+    for (let i = 0; i < totalPages; i++) {
+      const seg = document.createElement('div');
+      seg.className = 'frag-seg';
+
+      seg.addEventListener('mouseenter', () => {
+        leftHoveredIdx = i;
+        leftTooltip.textContent = `${i + 1} / ${totalPages}`;
+        const r = seg.getBoundingClientRect();
+        leftTooltip.style.left      = (r.right + 14) + 'px';
+        leftTooltip.style.top       = (r.top + r.height / 2) + 'px';
+        leftTooltip.style.transform = 'translateY(-50%)';
+        leftTooltip.classList.add('pinned');
+      });
+      seg.addEventListener('mouseleave', () => {
+        leftHoveredIdx = null;
+        leftTooltip.classList.remove('pinned');
+      });
+      seg.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const target = chapterManifest[i];
+        if (!target) return;
+        if (readerSettings.mode === 'single-page') {
+          const spIdx = spManifest.indexOf(target);
+          if (spIdx !== -1) spGotoIdx(spIdx);
+          else goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${forChapterId}`);
+        } else {
+          setVirtualY(target.globalY);
+          const globalIdx = manifest.indexOf(target);
+          if (globalIdx !== -1) prefetchAroundIndex(globalIdx);
+        }
+      });
+
+      fragProgress.appendChild(seg);
+    }
+  }
+
+  // Initial build for the opening chapter
+  rebuildFragProgress(chapterId);
+
+  // ── GLOBAL PAGE SLIDER ──
+  // Flat ordered list of all pages across all chapters in reading order
+  const globalManifest = manifest; // already in order
+
+  const pageSliderWrap  = document.getElementById('pageSliderWrap');
+  const pageSliderInput = document.getElementById('pageSliderInput');
+  const pageSliderLabel = document.getElementById('pageSliderLabel');
+  const thumbStrip      = document.getElementById('thumbStrip');
+
+  pageSliderInput.max   = Math.max(0, globalManifest.length - 1);
+  pageSliderInput.value = 0;
+  pageSliderLabel.textContent = `1 / ${globalManifest.length}`;
+
+  let sliderDragging    = false;
+  let stripVisible      = false;
+
+  // Returns the current global page index based on scroll/single-page position
+  function getCurrentGlobalPageIdx() {
+    if (readerSettings.mode === 'single-page') {
+      const entry = spManifest[spCurrentIdx];
+      return entry ? manifest.indexOf(entry) : 0;
+    }
+    const midY = virtualY + viewH * 0.5;
+    let idx = 0;
+    for (let i = 0; i < manifest.length; i++) {
+      if (manifest[i].globalY <= midY) idx = i;
+      else break;
+    }
+    return idx;
+  }
+
+  // Navigate reader to a global manifest index
+  function navigateToGlobalIdx(idx) {
+    const entry = globalManifest[idx];
+    if (!entry) return;
+    if (readerSettings.mode === 'single-page') {
+      if (entry.chapterId === chapterId) {
+        const spIdx = spManifest.indexOf(entry);
+        if (spIdx !== -1) { spGotoIdx(spIdx); return; }
+      }
+      goToChapter(
+        `/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${entry.chapterId}?page=${entry.localIdx}`
+      );
+    } else {
+      setVirtualY(entry.globalY);
+      prefetchAroundIndex(idx);
+    }
+    updateProgressBar();
+  }
+
+  // ── SLIDER VISIBILITY ──
+  function syncSliderVisibility() {
+    if (barVisible) {
+      const globalIdx = getCurrentGlobalPageIdx();
+      pageSliderInput.value = globalIdx;
+      pageSliderLabel.textContent = `${globalIdx + 1} / ${globalManifest.length}`;
+      pageSliderWrap.classList.add('visible');
+    } else {
+      pageSliderWrap.classList.remove('visible');
+      hideThumbStrip();
+    }
+  }
+
+  // ── SLIDER INPUT EVENTS ──
+  pageSliderInput.addEventListener('mousedown', () => { sliderDragging = true; });
+  pageSliderInput.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
+
+  pageSliderInput.addEventListener('input', () => {
+    const idx = Number(pageSliderInput.value);
+    pageSliderLabel.textContent = `${idx + 1} / ${globalManifest.length}`;
+    if (!stripVisible) showThumbStrip(idx);
+    else buildThumbStrip(idx);
+    clearTimeout(barTimer);
+  });
+
+  pageSliderInput.addEventListener('mouseup', (e) => {
+    sliderDragging = false;
+    if (stripVisible) {
+      e.stopPropagation();
+      clearTimeout(barTimer);
+    }
+  });
+
+  pageSliderInput.addEventListener('click', (e) => {
+    if (stripVisible) e.stopPropagation();
+  });
+
+  pageSliderInput.addEventListener('touchend', () => {
+    sliderDragging = false;
+    if (stripVisible) clearTimeout(barTimer);
+  }, { passive: true });
+
+  pageSliderWrap.addEventListener('click', (e) => {
+    if (e.target === pageSliderWrap) {
+      hideThumbStrip();
+      clearTimeout(barTimer);
+      barTimer = setTimeout(() => hideAll(), 3000);
+      return;
+    }
+    if (stripVisible) e.stopPropagation();
+  });
+
+  const thumbTrack   = document.getElementById('thumbTrack');
+  const THUMB_W      = 100; // px, matches CSS
+  const THUMB_GAP    = 6;   // px, matches CSS
+  const THUMB_STEP   = THUMB_W + THUMB_GAP; // px per thumb cell
+  const THUMB_BUFFER = 5;   // cells to render outside visible edges
+
+  let stripAbortCtrl  = null;
+  let stripCenterIdx  = 0;   // global manifest index at the center of the visible window
+  let _trackOffset    = 0;   // current translateX of the track (negative = scrolled right)
+  let _renderedLo     = 0;   // lowest global index currently in the DOM
+  let _renderedHi     = -1;  // highest global index currently in the DOM
+  let _cellMap        = {};  // gi → DOM cell element
+
+  // ── VELOCITY TRACKING ──
+  let _sliderLastIdx  = 0;
+  let _sliderLastTime = 0;
+  let _sliderVelocity = 0;
+  const VELOCITY_THRESHOLD = 12;
+  const THUMB_DEBOUNCE_MS  = 100;
+  let _thumbDebounceTimer  = null;
+
+  function _measureSliderVelocity(newIdx) {
+    const now = performance.now();
+    const dt  = (now - _sliderLastTime) / 1000;
+    if (dt > 0 && dt < 1.0) {
+      const instantV = Math.abs(newIdx - _sliderLastIdx) / dt;
+      _sliderVelocity = _sliderVelocity * 0.6 + instantV * 0.4;
+    } else {
+      _sliderVelocity = 0;
+    }
+    _sliderLastIdx  = newIdx;
+    _sliderLastTime = now;
+  }
+
+  function _cancelThumbLoading() {
+    if (stripAbortCtrl) { stripAbortCtrl.abort(); stripAbortCtrl = null; }
+    clearTimeout(_thumbDebounceTimer);
+    _thumbDebounceTimer = null;
+  }
+
+  // ── TRACK POSITION ──
+  // trackOffset for a given center global index:
+  // we want the center thumb to be at the middle of the strip window.
+  function _stripW() {
+    // getBoundingClientRect returns 0 before first paint (display:none → block transition)
+    // Use the slider wrap width as a reliable proxy since they share the same width.
+    const r = pageSliderWrap.getBoundingClientRect().width;
+    return r > 0 ? r : window.innerWidth - 40;
+  }
+
+  function _offsetForIdx(gi) {
+    const centerPx = gi * THUMB_STEP;
+    const targetX  = _stripW() / 2 - THUMB_W / 2;
+    return targetX - centerPx;
+  }
+
+  function _clampOffset(offset) {
+    const maxOff = _offsetForIdx(0);
+    const minOff = _offsetForIdx(globalManifest.length - 1);
+    return Math.max(minOff, Math.min(maxOff, offset));
+  }
+
+  function _idxAtOffset(offset) {
+    const centerPx = _stripW() / 2 - offset;
+    const gi       = Math.round((centerPx - THUMB_W / 2) / THUMB_STEP);
+    return Math.max(0, Math.min(globalManifest.length - 1, gi));
+  }
+
+  // ── RENDER WINDOW ──
+  // Work out which cells should exist in the DOM given current offset,
+  // add missing ones, remove ones that have gone out of range.
+  function _updateRenderWindow() {
+    const stripW     = _stripW();
+    const visibleLo  = _idxAtOffset(_trackOffset + stripW);
+    const visibleHi  = _idxAtOffset(_trackOffset);
+    const lo = Math.max(0, visibleLo - THUMB_BUFFER);
+    const hi = Math.min(globalManifest.length - 1, visibleHi + THUMB_BUFFER);
+
+    // Remove cells outside the new range
+    for (let gi = _renderedLo; gi <= _renderedHi; gi++) {
+      if (gi < lo || gi > hi) {
+        const cell = _cellMap[gi];
+        if (cell) { cell.remove(); delete _cellMap[gi]; }
+      }
+    }
+
+    // Add cells inside the new range that aren't yet in the DOM
+    for (let gi = lo; gi <= hi; gi++) {
+      if (_cellMap[gi]) continue;
+      const entry = globalManifest[gi];
+      if (!entry) continue;
+
+      const cell = document.createElement('div');
+      cell.className = 'thumb-cell';
+      // Position cell absolutely within the track at its natural slot
+      cell.style.position = 'absolute';
+      cell.style.left = (gi * THUMB_STEP) + 'px';
+
+      const imgWrap = document.createElement('div');
+      imgWrap.className = 'thumb-cell-img-wrap';
+      const img = document.createElement('img');
+      img.alt = '';
+      imgWrap.appendChild(img);
+
+      const label = document.createElement('div');
+      label.className = 'thumb-cell-label';
+      label.textContent = `${gi + 1}`;
+
+      cell.appendChild(imgWrap);
+      cell.appendChild(label);
+      thumbTrack.appendChild(cell);
+
+      cell.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (_stripDidDrag) { _stripDidDrag = false; return; }
+        navigateToGlobalIdx(gi);
+        hideAll();
+      });
+
+      _cellMap[gi] = cell;
+    }
+
+    _renderedLo = lo;
+    _renderedHi = hi;
+
+    // Set track width to fit all possible thumbs
+    thumbTrack.style.width = (globalManifest.length * THUMB_STEP) + 'px';
+  }
+
+  // Apply translateX to the track
+  function _applyTrackOffset(offset) {
+    _trackOffset = offset;
+    thumbTrack.style.transform = `translateX(${offset}px)`;
+    _updateRenderWindow();
+
+    // Sync slider to whichever thumb is now centered
+    const ci = _idxAtOffset(offset);
+    if (ci !== stripCenterIdx) {
+      stripCenterIdx = ci;
+      if (!sliderDragging) {
+        pageSliderInput.value = ci;
+        pageSliderLabel.textContent = `${ci + 1} / ${globalManifest.length}`;
+      }
+    }
+  }
+
+  // ── LOAD THUMBS IN VIEW ──
+  async function _loadVisibleThumbs(signal) {
+    const stripW    = _stripW();
+    const visibleLo = Math.max(0, _idxAtOffset(_trackOffset + stripW) - THUMB_BUFFER);
+    const visibleHi = Math.min(globalManifest.length - 1, _idxAtOffset(_trackOffset) + THUMB_BUFFER);
+    const center    = _idxAtOffset(_trackOffset);
+
+    // Build center-outward order
+    const ordered = [];
+    ordered.push(center);
+    for (let d = 1; d <= (visibleHi - visibleLo + THUMB_BUFFER); d++) {
+      if (center + d <= visibleHi) ordered.push(center + d);
+      if (center - d >= visibleLo) ordered.push(center - d);
+    }
+
+    // ── THUMBS: abortable fetch, center-outward ──
+    const thumbPromises = ordered.map(gi => {
+      if (signal.aborted) return;
+      const entry = globalManifest[gi];
+      if (!entry) return;
+      const cell = _cellMap[gi];
+      if (!cell) return;
+      const img = cell.querySelector('img');
+      if (!img || img.src) return; // already loaded
+      return fetch(
+        `/api/manga/${libraryId}/${mangaId}/thumb/${entry.chapterId}/${entry.localIdx}`,
+        { signal }
+      )
+        .then(r => r.ok ? r.blob() : null)
+        .then(blob => {
+          if (!blob || signal.aborted) return;
+          const url = URL.createObjectURL(blob);
+          img.src = url;
+          img.onload = () => URL.revokeObjectURL(url);
+        })
+        .catch(() => {}); // aborted or network error — silently ignore
+    });
+
+    // Wait for all thumbs to have their fetch initiated before starting full-res
+    await Promise.allSettled(thumbPromises);
+    if (signal.aborted) return;
+
+    // ── FULL-RES PRELOAD: abortable fetch, center-outward ──
+    for (const gi of ordered) {
+      if (signal.aborted) return;
+      const entry = globalManifest[gi];
+      if (!entry || entry.loaded || entry.url) continue;
+      ensureChapterUrls(entry.chapterId).then(urls => {
+        if (signal.aborted) return;
+        const url = urls[entry.localIdx] || '';
+        if (!url) return;
+        entry.url = url;
+        return fetch(url, { signal })
+          .then(r => r.ok ? r.blob() : null)
+          .then(blob => {
+            if (!blob || signal.aborted) return;
+            // Blob is discarded — the browser now has it cached for when the user navigates there
+          })
+          .catch(() => {});
+      }).catch(() => {});
+    }
+  }
+
+  function _scheduleThumbLoad() {
+    _cancelThumbLoading();
+    _thumbDebounceTimer = setTimeout(() => {
+      stripAbortCtrl = new AbortController();
+      _loadVisibleThumbs(stripAbortCtrl.signal);
+    }, 10);
+  }
+
+  // ── SNAP ON RELEASE ──
+  function _snapToNearest() {
+    const gi     = _idxAtOffset(_trackOffset);
+    const target = _offsetForIdx(gi);
+    _applyTrackOffset(_clampOffset(target));
+    stripCenterIdx = gi;
+    pageSliderInput.value = gi;
+    pageSliderLabel.textContent = `${gi + 1} / ${globalManifest.length}`;
+    _scheduleThumbLoad();
+  }
+
+  // ── PUBLIC: show strip at a given global index ──
+  function buildThumbStrip(centerGlobalIdx) {
+    _measureSliderVelocity(centerGlobalIdx);
+    _cancelThumbLoading();
+
+    stripCenterIdx = centerGlobalIdx;
+    const offset   = _clampOffset(_offsetForIdx(centerGlobalIdx));
+    _applyTrackOffset(offset);
+
+    if (_sliderVelocity > VELOCITY_THRESHOLD) {
+      _thumbDebounceTimer = setTimeout(() => {
+        _sliderVelocity = 0;
+        _scheduleThumbLoad();
+      }, THUMB_DEBOUNCE_MS);
+      return;
+    }
+
+    _scheduleThumbLoad();
+  }
+
+  function showThumbStrip(centerGlobalIdx) {
+    stripVisible = true;
+    thumbStrip.classList.add('active');
+    buildThumbStrip(centerGlobalIdx);
+    clearTimeout(barTimer);
+  }
+
+  function hideThumbStrip() {
+    stripVisible    = false;
+    _sliderVelocity = 0;
+    _sliderLastTime = 0;
+    thumbStrip.classList.remove('active');
+    _cancelThumbLoading();
+    // Clear DOM to free memory
+    thumbTrack.innerHTML = '';
+    _cellMap      = {};
+    _renderedLo   = 0;
+    _renderedHi   = -1;
+  }
+
+  // ── STRIP DRAG ──
+  let stripDragActive  = false;
+  let stripDragStartX  = 0;
+  let stripDragStartOffset = 0; // track offset at drag start
+  let stripDragMomentumV   = 0;
+  let stripDragLastX       = 0;
+  let stripDragLastTime    = 0;
+  let stripMomentumRaf     = null;
+
+  function _stopMomentum() {
+    if (stripMomentumRaf) { cancelAnimationFrame(stripMomentumRaf); stripMomentumRaf = null; }
+  }
+
+  function _momentumLoop() {
+    if (Math.abs(stripDragMomentumV) < 0.5) {
+      stripDragMomentumV = 0;
+      _snapToNearest();
+      return;
+    }
+    stripDragMomentumV *= 0.88;
+    _applyTrackOffset(_clampOffset(_trackOffset + stripDragMomentumV));
+    stripMomentumRaf = requestAnimationFrame(_momentumLoop);
+  }
+
+  let _stripDidDrag = false;
+
+  function _onStripDragStart(clientX) {
+    _stopMomentum();
+    _cancelThumbLoading();
+    stripDragActive      = true;
+    _stripDidDrag        = false;
+    stripDragStartX      = clientX;
+    stripDragStartOffset = _trackOffset;
+    stripDragMomentumV   = 0;
+    stripDragLastX       = clientX;
+    stripDragLastTime    = performance.now();
+  }
+
+  function _onStripDragMove(clientX) {
+    if (!stripDragActive) return;
+    const dx = clientX - stripDragStartX;
+    if (Math.abs(dx) > 4) _stripDidDrag = true; // only flag as drag after 4px movement
+    const now    = performance.now();
+    const dt     = now - stripDragLastTime || 1;
+    stripDragMomentumV = (clientX - stripDragLastX) / dt * 16;
+    stripDragLastX     = clientX;
+    stripDragLastTime  = now;
+    _applyTrackOffset(_clampOffset(stripDragStartOffset + dx));
+  }
+
+  function _onStripDragEnd() {
+    if (!stripDragActive) return;
+    stripDragActive = false;
+    if (_stripDidDrag && Math.abs(stripDragMomentumV) > 2) {
+      stripMomentumRaf = requestAnimationFrame(_momentumLoop);
+    }
+    _scheduleThumbLoad();
+  }
+
+  thumbStrip.addEventListener('mousedown', (e) => { _onStripDragStart(e.clientX); e.preventDefault(); });
+  window.addEventListener('mousemove',     (e) => { _onStripDragMove(e.clientX); });
+  window.addEventListener('mouseup',       ()  => { _onStripDragEnd(); });
+
+  thumbStrip.addEventListener('touchstart', (e) => { _onStripDragStart(e.touches[0].clientX); }, { passive: true });
+  thumbStrip.addEventListener('touchmove',  (e) => { e.preventDefault(); _onStripDragMove(e.touches[0].clientX); }, { passive: false });
+  thumbStrip.addEventListener('touchend',   ()  => { _onStripDragEnd(); }, { passive: true });
+
+  function updateProgressBar() {
+    const scrollTop = virtualY;
+    const vh        = viewH;
+    const midY      = scrollTop + vh * 0.5;
+
+    // Determine which chapter is currently visible
+    let visibleChapterId = chapterId;
+    if (readerSettings.mode === 'single-page') {
+      visibleChapterId = (spManifest[spCurrentIdx] || {}).chapterId || chapterId;
+    } else {
+      for (const entry of manifest) {
+        if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
+        else break;
+      }
+    }
+
+    // Rebuild left bar if chapter changed
+    if (visibleChapterId !== fragProgressChapterId) {
+      rebuildFragProgress(visibleChapterId);
+    }
+
+    const segs = fragProgress.querySelectorAll('.frag-seg');
+
+    // Find active page index within the visible chapter
+    let activeIdx = 0;
+    if (readerSettings.mode === 'single-page') {
+      const spEntry = spManifest[spCurrentIdx];
+      if (spEntry && spEntry.chapterId === visibleChapterId) {
+        activeIdx = spEntry.localIdx;
+      }
+    } else {
+      for (let i = 0; i < chapterManifest.length; i++) {
+        const e = chapterManifest[i];
+        if (midY >= e.globalY) {
+          activeIdx = e.localIdx;
+        } else {
+          break;
+        }
+      }
+    }
+    segs.forEach((s, i) => s.classList.toggle('active', i <= activeIdx));
+
+    // Update chapter dropdown label
+    let visibleChapIdx = currentChapIdx;
+    if (readerSettings.mode === 'single-page') {
+      const spEntry = spManifest[spCurrentIdx];
+      visibleChapIdx = spEntry ? chapterList.findIndex(c => c.id === spEntry.chapterId) : currentChapIdx;
+      if (visibleChapIdx === -1) visibleChapIdx = currentChapIdx;
+    } else {
+      for (let i = 0; i < manifest.length; i++) {
+        if (midY >= manifest[i].globalY) {
+          const idx = chapterList.findIndex(c => c.id === manifest[i].chapterId);
+          if (idx !== -1) visibleChapIdx = idx;
+        } else break;
+      }
+    }
+    if (visibleChapIdx !== activeChapDropdownIdx) {
+      activeChapDropdownIdx = visibleChapIdx;
+      const visibleChap = chapterList[visibleChapIdx];
+      if (visibleChap) {
+        bbChapLabel.textContent = visibleChap.name;
+        bbChapMenu.querySelectorAll('.bb-chap-menu-item').forEach((item, i) => {
+          item.classList.toggle('active', i === visibleChapIdx);
+        });
+        bbPrevChap.disabled = visibleChapIdx <= 0;
+        bbNextChap.disabled = visibleChapIdx >= chapterList.length - 1;
+      }
+    }
+
+    // Update left tooltip
+    updatePinnedTooltips();
+
+    // Update global page slider (only if user is not dragging it)
+    if (!sliderDragging) {
+      const globalIdx = getCurrentGlobalPageIdx();
+      pageSliderInput.value = globalIdx;
+      pageSliderLabel.textContent = `${globalIdx + 1} / ${globalManifest.length}`;
+    }
+  }
+
+  function updatePinnedTooltips() {
+    if (!barVisible) return;
+    const leftSegs = fragProgress.querySelectorAll('.frag-seg');
+    let leftActiveEl = null;
+    leftSegs.forEach(s => { if (s.classList.contains('active')) leftActiveEl = s; });
+    if (leftActiveEl) {
+      const r = leftActiveEl.getBoundingClientRect();
+      const idx = Array.from(leftSegs).indexOf(leftActiveEl);
+      leftTooltip.textContent = `${idx + 1} / ${totalPages}`;
+      leftTooltip.style.left      = (r.right + 14) + 'px';
+      leftTooltip.style.top       = (r.top + r.height / 2) + 'px';
+      leftTooltip.style.transform = 'translateY(-50%)';
+      leftTooltip.classList.add('pinned');
+    }
+  }
+
+  // ── BOTTOM BAR ──
+  const bottombar     = document.getElementById('bottombar');
+  const bbChapBtn     = document.getElementById('bbChapBtn');
+  const bbChapLabel   = document.getElementById('bbChapLabel');
+  const bbChapMenu    = document.getElementById('bbChapMenu');
+  const bbPrevChap    = document.getElementById('bbPrevChap');
+  const bbNextChap    = document.getElementById('bbNextChap');
+  const bbZoomRange   = document.getElementById('bbZoomRange');
+  const bbZoomValue   = document.getElementById('bbZoomValue');
+
+  // Build chapter menu items (same order as chapterList)
+  for (let i = 0; i < chapterList.length; i++) {
+    const ch   = chapterList[i];
+    const item = document.createElement('div');
+    item.className = 'bb-chap-menu-item' + (ch.id === chapterId ? ' active' : '');
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', ch.id === chapterId ? 'true' : 'false');
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'bb-chap-name';
+    nameSpan.textContent = ch.name;
+
+    const numSpan = document.createElement('span');
+    numSpan.className = 'bb-chap-num';
+    numSpan.textContent = `${i + 1} / ${chapterList.length}`;
+
+    item.appendChild(nameSpan);
+    item.appendChild(numSpan);
+
+    item.addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeBbMenu();
+      if (ch.id !== chapterId) {
+        goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${ch.id}`);
+      }
+    });
+
+    bbChapMenu.appendChild(item);
+  }
+
+  // Set initial label to current chapter name
+  const currentChap = chapterList.find(c => c.id === chapterId);
+  if (currentChap) bbChapLabel.textContent = currentChap.name;
+
+  // Scroll the active item into view when menu opens
+  function openBbMenu() {
+      bbChapMenu.classList.add('open');
+      bbChapBtn.classList.add('open');
+      bbChapBtn.setAttribute('aria-expanded', 'true');
+      fragProgress.style.opacity = '0';
+      fragProgress.style.pointerEvents = 'none';
+      pageSliderWrap.style.opacity = '0';
+      pageSliderWrap.style.pointerEvents = 'none';
+      const activeItem = bbChapMenu.querySelector('.bb-chap-menu-item.active');
+      if (activeItem) {
+          requestAnimationFrame(() => {
+              activeItem.scrollIntoView({ block: 'nearest' });
+          });
+      }
+  }
+
+  function closeBbMenu() {
+      bbChapMenu.classList.remove('open');
+      bbChapBtn.classList.remove('open');
+      bbChapBtn.setAttribute('aria-expanded', 'false');
+      fragProgress.style.opacity = '';
+      fragProgress.style.pointerEvents = '';
+      pageSliderWrap.style.opacity = '';
+      pageSliderWrap.style.pointerEvents = '';
+  }
+
+  // Prevent page scroll when wheeling inside the chapter menu
+  bbChapMenu.addEventListener('wheel', (e) => {
+    e.stopPropagation();
+  }, { passive: true });
+
+  bbChapBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    bbChapMenu.classList.contains('open') ? closeBbMenu() : openBbMenu();
+  });
+
+  // Close menu when clicking outside
+  document.addEventListener('click', () => closeBbMenu());
+
+  // Prev / Next chapter navigation
+  const currentChapIdx = chapterList.findIndex(c => c.id === chapterId);
+  let activeChapDropdownIdx = currentChapIdx;
+  // (activeChapDropdownIdx_init is defined after updateProgressBar for reference parity)
+  bbPrevChap.disabled = currentChapIdx <= 0;
+  bbNextChap.disabled = currentChapIdx >= chapterList.length - 1;
+
+  bbPrevChap.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (currentChapIdx > 0) {
+      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx - 1].id}`);
+    }
+  });
+  bbNextChap.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (currentChapIdx < chapterList.length - 1) {
+      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx + 1].id}`);
+    }
+  });
+
+  // Zoom slider label update (no-op on layout for now)
+  // ── STRIP WIDTH SLIDER ──
+  function applyStripWidth(pct) {
+    readerSettings.stripWidth = pct;
+    const effectiveW = Math.round(viewW * pct / 100);
+    const inset = (100 - pct) / 2;
+    reader.style.width  = pct + '%';
+    reader.style.left   = inset + '%';
+    reader.style.right  = inset + '%';
+    bbZoomRange.value       = pct;
+    bbZoomValue.textContent = pct + '%';
+
+    let anchorEntry = manifest[0];
+    for (const entry of manifest) {
+      if (entry.globalY <= virtualY) anchorEntry = entry;
+      else break;
+    }
+    const offsetIntoPage  = virtualY - anchorEntry.globalY;
+    const anchorGlobalIdx = manifest.indexOf(anchorEntry);
+
+    recomputeGeometry(readerSettings.padding, effectiveW);
+    applyManifestToSlots();
+
+    setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
+    prefetchAroundIndex(anchorGlobalIdx);
+  }
+
+  function updateZoomVisibility() {
+    const isLong = readerSettings.mode === 'long-strip';
+    bbZoomRange.style.display = isLong ? '' : 'none';
+    bbZoomValue.style.display = isLong ? '' : 'none';
+  }
+
+  bbZoomRange.addEventListener('input', () => {
+    applyStripWidth(Number(bbZoomRange.value));
+    saveReaderSettings();
+  });
+
+  function updateStretchBtnVisibility() {
+    updateZoomVisibility();
+  }
+
+  // ── SETTINGS PANEL ──
+  const settingsPanel            = document.getElementById('settingsPanel');
+  const bbSettingsBtn            = document.getElementById('bbSettingsBtn');
+  const settingsModeLongStrip    = document.getElementById('settingsModeLongStrip');
+  const settingsModeSingle       = document.getElementById('settingsModeSingle');
+  const settingsLongStripOptions = document.getElementById('settingsLongStripOptions');
+  const settingsSingleOptions    = document.getElementById('settingsSingleOptions');
+  const settingsPaddingToggle    = document.getElementById('settingsPaddingToggle');
+  const settingsDirLTR           = document.getElementById('settingsDirLTR');
+  const settingsDirRTL           = document.getElementById('settingsDirRTL');
+
+  function openSettingsPanel() {
+    settingsPanel.classList.add('open');
+    bbSettingsBtn.classList.add('active');
+  }
+  function closeSettingsPanel() {
+    settingsPanel.classList.remove('open');
+    bbSettingsBtn.classList.remove('active');
+  }
+
+  function syncSettingsUI() {
+    const isLong = readerSettings.mode === 'long-strip';
+    settingsModeLongStrip.classList.toggle('active', isLong);
+    settingsModeSingle.classList.toggle('active', !isLong);
+    settingsLongStripOptions.style.display = isLong ? '' : 'none';
+    settingsSingleOptions.style.display    = isLong ? 'none' : '';
+    settingsPaddingToggle.checked = !!readerSettings.padding;
+    settingsDirLTR.classList.toggle('active', readerSettings.direction === 'ltr');
+    settingsDirRTL.classList.toggle('active', readerSettings.direction === 'rtl');
+    // Preload slider: only show for compressed sources
+    const preloadWrap = document.getElementById('settingsPreloadWrap');
+    if (preloadWrap) preloadWrap.style.display = isCompressed ? '' : 'none';
+    const r = readerSettings.preloadRadius ?? 7;
+    document.getElementById('settingsPreloadValue').textContent = `±${r}`;
+    document.getElementById('settingsPreloadRange').value = r;
+    // PDF quality: only show for PDF sources
+    const pdfQualityWrap = document.getElementById('settingsPdfQualityWrap');
+    if (pdfQualityWrap) pdfQualityWrap.style.display = isPdf ? '' : 'none';
+    syncPdfQualityUI(readerSettings.pdfScale ?? 1);
+  }
+
+  bbSettingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    settingsPanel.classList.contains('open') ? closeSettingsPanel() : openSettingsPanel();
+  });
+
+  // Close when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!settingsPanel.contains(e.target) && e.target !== bbSettingsBtn) {
+      closeSettingsPanel();
+    }
+  });
+
+  // Prevent panel click from propagating to document (which would close it)
+  settingsPanel.addEventListener('click', (e) => e.stopPropagation());
+
+  // Mode buttons
+  function applyMode(mode) {
+    readerSettings.mode = mode;
+    syncSettingsUI();
+    updateStretchBtnVisibility();
+    if (mode === 'long-strip') {
+      activateLongStripMode();
+    } else {
+      activateSinglePageMode();
+    }
+    saveReaderSettings();
+  }
+
+  settingsModeLongStrip.addEventListener('click', () => applyMode('long-strip'));
+  settingsModeSingle.addEventListener('click',    () => applyMode('single-page'));
+
+  // Padding toggle
+  settingsPaddingToggle.addEventListener('change', () => {
+    readerSettings.padding = settingsPaddingToggle.checked;
+    applyPaddingSetting();
+    saveReaderSettings();
+  });
+
+  // Direction buttons
+  settingsDirLTR.addEventListener('click', () => {
+    readerSettings.direction = 'ltr';
+    syncSettingsUI();
+    saveReaderSettings();
+  });
+  settingsDirRTL.addEventListener('click', () => {
+    readerSettings.direction = 'rtl';
+    syncSettingsUI();
+    saveReaderSettings();
+  });
+
+  document.getElementById('settingsPreloadRange').addEventListener('input', (e) => {
+    applyPreloadRadius(Number(e.target.value));
+    saveReaderSettings();
+  });
+
+  // ── PDF QUALITY ──
+
+  function syncPdfQualityUI(val) {
+    const pct = val / 2 * 100;
+    const fill = document.getElementById('pdfQualityFill');
+    if (fill) fill.style.width = pct + '%';
+    document.getElementById('pdfQualityRange').value = val;
+    for (let i = 0; i <= 2; i++) {
+      const lbl = document.getElementById(`pdfQLabel${i}`);
+      if (lbl) lbl.classList.toggle('active', i === val);
+    }
+  }
+
+  document.getElementById('pdfQualityRange').addEventListener('input', (e) => {
+    const val = Number(e.target.value);
+    readerSettings.pdfScale = val;
+    syncPdfQualityUI(val);
+    Object.keys(urlCache).forEach(k => delete urlCache[k]);
+    for (let i = 0; i < manifest.length; i++) {
+      manifest[i].url    = null;
+      manifest[i].loaded = false;
+    }
+    applyManifestToSlots();
+    saveReaderSettings();
+  });
+
+  // Clicking a label snaps slider to that value
+  for (let i = 0; i <= 2; i++) {
+    document.getElementById(`pdfQLabel${i}`).addEventListener('click', () => {
+      readerSettings.pdfScale = i;
+      syncPdfQualityUI(i);
+      Object.keys(urlCache).forEach(k => delete urlCache[k]);
+      for (let j = 0; j < manifest.length; j++) {
+        manifest[j].url    = null;
+        manifest[j].loaded = false;
+      }
+      applyManifestToSlots();
+      saveReaderSettings();
+    });
+  }
+
+  function applyPaddingSetting() {
+    let anchorEntry = manifest[0];
+    for (const entry of manifest) {
+      if (entry.globalY <= virtualY) anchorEntry = entry;
+      else break;
+    }
+    const offsetIntoPage  = virtualY - anchorEntry.globalY;
+    const anchorGlobalIdx = manifest.indexOf(anchorEntry);
+
+    recomputeGeometry(readerSettings.padding);
+    applyManifestToSlots();
+
+    setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
+  }
+
+  // ── SINGLE PAGE MODE ──
+  const singlePageView = document.getElementById('singlePageView');
+  const spImageA       = document.getElementById('spImageA');
+  const spImageB       = document.getElementById('spImageB');
+  // spImage always points to the currently visible (foreground) image slot
+  let spImage    = spImageA;
+  let spImageBg  = spImageB; // the hidden slot used for the incoming page
+  const spZoneLeft     = document.getElementById('spZoneLeft');
+  const spZoneCenter   = document.getElementById('spZoneCenter');
+  const spZoneRight    = document.getElementById('spZoneRight');
+
+  // All pages flattened in order (same order as manifest)
+  let spCurrentIdx = 0; // index into manifest for current chapter pages
+  const spManifest = manifest.filter(e => e.chapterId === chapterId);
+  let lastSeenChapterId = chapterId;
+  let bmEndToEnd = false;
+  let bmEndToEndActive = false;
+  let progressSaveTimer = null;
+  let spProgressSaveTimer = null;
+
+
+  const lastPagePopupEl = document.getElementById('lastPagePopup');
+  let lastPagePopupTimer = null;
+  function showLastPagePopup() {
+    lastPagePopupEl.classList.add('show');
+    clearTimeout(lastPagePopupTimer);
+    lastPagePopupTimer = setTimeout(() => lastPagePopupEl.classList.remove('show'), 2000);
+  }
+
+  let _spAnimTimer   = null;
+  let _spAnimFrame   = 0;      // increments on every flip; lets async callbacks detect staleness
+  let _spPrefAbort   = null;
+  let _spPrefTimer   = null;
+  let _spVelLastIdx  = 0;
+  let _spVelLastTime = 0;
+  let _spVelocity    = 0;      // pages/second (EMA)
+  let _spLastFlipDir = 0;      // 1 = forward, -1 = backward, 0 = unknown
+
+  function _spMeasureVelocity(idx) {
+    const now = performance.now();
+    const dt  = (now - _spVelLastTime) / 1000;
+    if (dt > 0 && dt < 2.0) {
+      const instant = Math.abs(idx - _spVelLastIdx) / dt;
+      _spVelocity   = _spVelocity * 0.5 + instant * 0.5;
+    } else {
+      _spVelocity = 0;
+    }
+    _spVelLastIdx  = idx;
+    _spVelLastTime = now;
+  }
+
+  function _spSchedulePrefetch(globalIdx) {
+    clearTimeout(_spPrefTimer);
+    if (_spPrefAbort) { _spPrefAbort.abort(); _spPrefAbort = null; }
+
+    // Velocity-scaled forward radius:
+    //   0 pps  → 4 pages ahead (tier-1), 8 pages ahead (tier-2)
+    //   5 pps  → ~9 pages ahead (tier-1), ~18 pages ahead (tier-2)
+    //   10+ pps → 15 pages ahead (tier-1), 30 pages ahead (tier-2)
+    const scaledT1 = Math.round(Math.min(15, 4 + _spVelocity * 1.1));
+    const scaledT2 = scaledT1 * 2;
+
+    // Travel direction: compare current global idx to previous
+    const direction = globalIdx > (_spVelLastIdx < 0 ? globalIdx : globalIdx) ? 0
+      : (spCurrentIdx > (_spVelLastIdx || spCurrentIdx) ? 1 : -1);
+    // Derive direction from the EMA velocity sign isn't stored, so use idx vs previous spCurrentIdx.
+    // _spVelLastIdx is updated by _spMeasureVelocity before _spSchedulePrefetch is called,
+    // so at this point _spVelLastIdx === spCurrentIdx. Use the flip direction instead:
+    const spDir = _spLastFlipDir || 0;
+
+    const delay = Math.max(50, 300 - _spVelocity * 25);
+    _spPrefTimer = setTimeout(() => {
+      _spPrefAbort = new AbortController();
+      // Temporarily widen radii for this prefetch pass.
+      const savedT1 = TIER1_RADIUS;
+      const savedT2 = TIER2_RADIUS;
+      TIER1_RADIUS = scaledT1;
+      TIER2_RADIUS = scaledT2;
+      prefetchAroundIndex(globalIdx, _spPrefAbort.signal, spDir);
+      TIER1_RADIUS = savedT1;
+      TIER2_RADIUS = savedT2;
+    }, delay);
+  }
+
+  // Commit a URL to spImage immediately, bypassing any pending animation.
+  function _spCommitImage(url, inClass) {
+    clearTimeout(_spAnimTimer);
+    spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
+    spImageBg.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
+    spImageBg.style.visibility = 'hidden';
+    spImage.src = url;
+    if (inClass) {
+      spImage.classList.add('sp-anim', inClass);
+      _spAnimTimer = setTimeout(() => {
+        spImage.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
+      }, 220);
+    }
+  }
+
+  function spGotoIdx(idx) {
+    if (idx < 0) {
+      if (currentChapIdx > 0) {
+        const prevChap = chapterList[currentChapIdx - 1];
+        const prevChapPages = manifest.filter(e => e.chapterId === prevChap.id);
+        const lastPageIdx = prevChapPages.length > 0 ? prevChapPages[prevChapPages.length - 1].localIdx : 0;
+        goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${prevChap.id}?page=${lastPageIdx}`);
+      }
+      return;
+    }
+    if (idx >= spManifest.length) {
+      if (currentChapIdx < chapterList.length - 1) {
+        goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx + 1].id}`);
+      } else {
+        showLastPagePopup();
+      }
+      return;
+    }
+
+    _spMeasureVelocity(idx);
+
+    // Duration shrinks with velocity: 220ms at rest → 40ms at ≥10 pps.
+    const dur = Math.max(40, 220 - _spVelocity * 18);
+
+    const isForward    = idx > spCurrentIdx;
+    _spLastFlipDir     = isForward ? 1 : -1;
+    const isLTR        = readerSettings.direction !== 'rtl';
+    const outClass     = (isForward === isLTR) ? 'sp-out-left'  : 'sp-out-right';
+    const inClass      = (isForward === isLTR) ? 'sp-in-left'   : 'sp-in-right';
+
+    spCurrentIdx = idx;
+    const entry  = spManifest[idx];
+
+    // Cancel any prior animation.
+    clearTimeout(_spAnimTimer);
+    spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
+    spImage.style.animationDuration = '';
+    spImageBg.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
+    spImageBg.style.animationDuration = '';
+    spImageBg.style.visibility = 'hidden';
+
+    const myFrame = ++_spAnimFrame;
+
+    // Kick off the simultaneous slide: outgoing (spImage) slides out,
+    // incoming (spImageBg) slides in at the same time, then they swap roles.
+    const _runSlide = (incomingUrl) => {
+      if (_spAnimFrame !== myFrame) return;
+
+      if (dur <= 0) {
+        // No animation — instant swap.
+        spImage.src = incomingUrl;
+        spImageBg.style.visibility = 'hidden';
+        return;
+      }
+
+      // Place the incoming image in the background slot, off-screen.
+      spImageBg.src = incomingUrl;
+      spImageBg.style.visibility = 'visible';
+      spImageBg.style.animationDuration = dur + 'ms';
+      spImageBg.classList.add('sp-anim', inClass);
+
+      // Slide the current image out.
+      spImage.style.animationDuration = dur + 'ms';
+      spImage.classList.add('sp-anim', outClass);
+
+      _spAnimTimer = setTimeout(() => {
+        if (_spAnimFrame !== myFrame) return;
+        // Swap roles: bg becomes the new foreground.
+        spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right');
+        spImage.style.animationDuration = '';
+        spImage.style.visibility = 'hidden';
+        spImageBg.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
+        spImageBg.style.animationDuration = '';
+        // Promote bg → fg
+        [spImage, spImageBg] = [spImageBg, spImage];
+        spImage.style.visibility   = 'visible';
+        spImageBg.style.visibility = 'hidden';
+      }, dur);
+    };
+
+    if (entry.url) {
+      if (isCompressed && dur > 0) {
+        const img = new Image();
+        img.src = entry.url;
+        const capturedUrl = entry.url;
+        img.decode()
+          .then(() => _runSlide(capturedUrl))
+          .catch(() => _runSlide(capturedUrl));
+      } else {
+        _runSlide(entry.url);
+      }
+    } else {
+      // Show thumb immediately as the incoming page while the real URL loads.
+      _runSlide(thumbUrl(entry));
+      ensureChapterUrls(entry.chapterId).then(urls => {
+        entry.url = urls[entry.localIdx] || '';
+        if (!entry.url || _spAnimFrame !== myFrame) return;
+        // Silently upgrade the now-foreground image src (no re-animation needed).
+        if (isCompressed) {
+          const img = new Image();
+          img.src = entry.url;
+          img.decode()
+            .then(() => { if (_spAnimFrame === myFrame) spImage.src = entry.url; })
+            .catch(() => { if (_spAnimFrame === myFrame) spImage.src = entry.url; });
+        } else {
+          spImage.src = entry.url;
+        }
+      });
+    }
+
+    const globalIdx = manifest.indexOf(entry);
+    if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
+
+    updateProgressBar();
+
+    // ── EAGER CHAPTER BOUNDARY PREFETCH ──
+    // Within 5 pages of a chapter edge: load the first/last few pages of the
+    // neighboring chapter so entry.url is populated before the user flips there.
+    const SP_CHAP_PREFETCH_THRESHOLD = 5;
+    const SP_CHAP_PREFETCH_PAGES     = 4; // how many boundary pages to fully load
+    const _pagesFromEnd   = spManifest.length - 1 - idx;
+    const _pagesFromStart = idx;
+    if (_pagesFromEnd <= SP_CHAP_PREFETCH_THRESHOLD && currentChapIdx < chapterList.length - 1) {
+      const nextChapId = chapterList[currentChapIdx + 1].id;
+      const nextStart  = chapterStart[nextChapId];
+      if (nextStart !== undefined) {
+        const hi = Math.min(manifest.length - 1, nextStart + SP_CHAP_PREFETCH_PAGES - 1);
+        for (let i = nextStart; i <= hi; i++) loadEntryTier1(manifest[i]);
+      }
+    }
+    if (_pagesFromStart <= SP_CHAP_PREFETCH_THRESHOLD && currentChapIdx > 0) {
+      const prevChapId = chapterList[currentChapIdx - 1].id;
+      const prevStart  = chapterStart[prevChapId];
+      if (prevStart !== undefined) {
+        const chLen = manifest.filter(e => e.chapterId === prevChapId).length;
+        const lo    = Math.max(prevStart, prevStart + chLen - SP_CHAP_PREFETCH_PAGES);
+        for (let i = lo; i < prevStart + chLen; i++) loadEntryTier1(manifest[i]);
+      }
+    }
+
+    clearTimeout(spProgressSaveTimer);
+    spProgressSaveTimer = setTimeout(() => {
+      spProgressSaveTimer = null;
+      saveReadingProgress();
+    }, 800);
+  }
+
+  function spForward()  { spGotoIdx(spCurrentIdx + 1); }
+  function spBackward() { spGotoIdx(spCurrentIdx - 1); }
+  function spNext() { readerSettings.direction === 'ltr' ? spForward()  : spBackward(); }
+  // ── SINGLE PAGE DRAG / SWIPE ──
+  // Mouse drag and touch swipe to change pages in single-page mode.
+  // A move of > SP_DRAG_THRESHOLD px commits the flip; releasing before
+  // that threshold counts as a tap and is handled by the zone click listeners.
+  const SP_DRAG_THRESHOLD = 50; // px to commit a page flip
+  let _spDragActive   = false;
+  let _spDragStartX   = 0;
+  let _spDragMoved    = false;
+
+  function _spDragStart(clientX) {
+    if (readerSettings.mode !== 'single-page') return;
+    _spDragActive = true;
+    _spDragMoved  = false;
+    _spDragStartX = clientX;
+  }
+
+  function _spDragMove(clientX) {
+    if (!_spDragActive) return;
+    if (Math.abs(clientX - _spDragStartX) > 8) _spDragMoved = true;
+  }
+
+  function _spDragEnd(clientX) {
+    if (!_spDragActive) return;
+    _spDragActive = false;
+    if (!_spDragMoved) return; // treat as tap — let click listeners handle it
+    const dx = clientX - _spDragStartX;
+    if (Math.abs(dx) < SP_DRAG_THRESHOLD) return; // not enough movement
+    // Swipe left (dx < 0) → go forward in LTR, backward in RTL
+    if (dx < 0) spNext(); else spPrev();
+  }
+
+  // Mouse events on the single-page view
+  singlePageView.addEventListener('mousedown', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    _spDragStart(e.clientX);
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    _spDragMove(e.clientX);
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    const wasMoved = _spDragMoved;
+    _spDragEnd(e.clientX);
+    // If it was a real drag, stop the event from firing the zone click listeners
+    if (wasMoved) e.stopImmediatePropagation();
+  });
+
+  // Touch events on the single-page view
+  singlePageView.addEventListener('touchstart', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    _spDragStart(e.touches[0].clientX);
+  }, { passive: true });
+  singlePageView.addEventListener('touchmove', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    _spDragMove(e.touches[0].clientX);
+    if (_spDragMoved) e.preventDefault(); // prevent page pan while swiping
+  }, { passive: false });
+  singlePageView.addEventListener('touchend', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    const clientX = e.changedTouches[0].clientX;
+    const wasMoved = _spDragMoved;
+    _spDragEnd(clientX);
+    // Suppress the synthetic click that would follow if this was a real swipe
+    if (wasMoved && Math.abs(clientX - _spDragStartX) >= SP_DRAG_THRESHOLD) {
+      e.preventDefault();
+    }
+  }, { passive: false });
+  function spPrev() { readerSettings.direction === 'ltr' ? spBackward() : spForward();  }
+
+  spZoneCenter.addEventListener('click', (e) => {
+    e.stopPropagation();
+    barVisible ? hideAll() : showAll();
+  });
+  spZoneLeft.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Physical left = backward in LTR, forward in RTL
+    readerSettings.direction === 'ltr' ? spBackward() : spForward();
+  });
+  spZoneRight.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Physical right = forward in LTR, backward in RTL
+    readerSettings.direction === 'ltr' ? spForward() : spBackward();
+  });
+
+  // Keyboard / controller arrow navigation (works in both modes)
+  document.addEventListener('keydown', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      readerSettings.direction === 'ltr' ? spNext() : spPrev();
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      readerSettings.direction === 'ltr' ? spPrev() : spNext();
+    }
+  });
+
+  function activateSinglePageMode() {
+    reader.style.display = 'none';
+    singlePageView.classList.add('active');
+    // Find which page corresponds to current virtualY position
+    let startIdx = 0;
+    for (let i = 0; i < spManifest.length; i++) {
+      if (spManifest[i].globalY <= virtualY) startIdx = i;
+      else break;
+    }
+    spGotoIdx(startIdx);
+  }
+
+  function activateLongStripMode() {
+    reader.style.display = '';
+    singlePageView.classList.remove('active');
+    // Restore virtualY to the current single page position
+    const entry = spManifest[spCurrentIdx];
+    if (entry) setVirtualY(entry.globalY);
+    else setVirtualY(virtualY);
+  }
+
+  // ── APPLY INITIAL SETTINGS ──
+  syncSettingsUI();
+  updateStretchBtnVisibility();
+  applyStripWidth(readerSettings.stripWidth ?? 100);
+  applyPreloadRadius(readerSettings.preloadRadius ?? 7);
+
+  // ── INITIAL PREFETCH ──
+  {
+    const startGlobalIdx = startIdx !== undefined
+      ? Math.min(startIdx + startPage, manifest.length - 1)
+      : 0;
+    prefetchAroundIndex(startGlobalIdx);
+  }
+
+  if (readerSettings.mode === 'single-page') {
+    // Wait for the opening chapter URL batch before showing the first page,
+    // so spGotoIdx always finds entry.url populated and never hits the thumb fallback.
+    ensureChapterUrls(chapterId).then(() => activateSinglePageMode());
+  }
+
+  // ── READING PROGRESS TRACKING ──
+
+  function getVisibleChapterId() {
+    if (readerSettings.mode === 'single-page') {
+      return (spManifest[spCurrentIdx] || {}).chapterId || chapterId;
+    }
+    const midY = virtualY + viewH * 0.5;
+    let visibleChapterId = chapterId;
+    for (const entry of manifest) {
+      if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
+      else break;
+    }
+    return visibleChapterId;
+  }
+
+  async function saveReadingProgress(completedChapterId = null) {
+    const currentPage      = getCurrentPageIdx();
+    const visibleChapterId = getVisibleChapterId();
+    await fetch(apiUrl('/api/reading/progress'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        library_id:           libraryId,
+        manga_id:             mangaId,
+        chapter_id:           visibleChapterId,
+        page:                 currentPage,
+        completed_chapter_id: completedChapterId,
+      }),
+    });
+  }
+
+  function getCurrentPageIdx() {
+    if (readerSettings.mode === 'single-page') {
+      return (spManifest[spCurrentIdx] || {}).localIdx || 0;
+    }
+    const midY = virtualY + viewH * 0.5;
+    let idx = 0;
+    for (let i = 0; i < manifest.length; i++) {
+      const e = manifest[i];
+      if (midY >= e.globalY) idx = e.localIdx;
+      else break;
+    }
+    return idx;
+  }
+
+  function checkChapterCompletion() {
+    if (readerSettings.mode !== 'long-strip') return;
+    const midY = virtualY + viewH * 0.5;
+
+    let visibleChapterId = chapterId;
+    for (const entry of manifest) {
+      if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
+      else break;
+    }
+
+    if (visibleChapterId !== lastSeenChapterId) {
+      const newChapEntries = manifest.filter(e => e.chapterId === visibleChapterId);
+      if (newChapEntries.length >= 2) {
+        if (virtualY >= newChapEntries[1].globalY) {
+          saveReadingProgress(lastSeenChapterId);
+          lastSeenChapterId = visibleChapterId;
+          return;
+        }
+      } else {
+        saveReadingProgress(lastSeenChapterId);
+        lastSeenChapterId = visibleChapterId;
+        return;
+      }
+    }
+  }
+
+  function scheduleProgressSave() {
+    checkChapterCompletion();
+    if (bmEndToEndActive) checkEndToEnd();
+    if (progressSaveTimer) return;
+    progressSaveTimer = setTimeout(() => {
+      progressSaveTimer = null;
+      saveReadingProgress();
+    }, 2000);
+  }
+
+  // Skip initial save when resuming from a saved page — the saved state is already correct
+  const _resumePage = new URLSearchParams(window.location.search).get('page');
+  if (!_resumePage || _resumePage === '0') {
+    saveReadingProgress();
+  }
+  // ── BOOKMARK SYSTEM ──
+
+  let bookmarks = [];
+
+  // ── HELPERS ──
+
+  function getCurrentPosition() {
+    const cid = getVisibleChapterId();
+    const chapIdx = chapterList.findIndex(c => c.id === cid);
+    let pageIdx = 0;
+    if (readerSettings.mode === 'single-page') {
+      pageIdx = (spManifest[spCurrentIdx] || {}).localIdx || 0;
+    } else {
+      const midY = virtualY + viewH * 0.5;
+      for (const e of manifest) {
+        if (e.chapterId === cid && midY >= e.globalY) pageIdx = e.localIdx;
+      }
+    }
+    return { chapterId: cid, chapterIdx: chapIdx, pageIdx };
+  }
+
+  function positionBefore(a, b) {
+    // Returns true if position a is strictly before position b
+    if (a.chapterIdx !== b.chapterIdx) return a.chapterIdx < b.chapterIdx;
+    return a.pageIdx < b.pageIdx;
+  }
+
+  function positionEqual(a, b) {
+    return a.chapterIdx === b.chapterIdx && a.pageIdx === b.pageIdx;
+  }
+
+  function chapterName(cid) {
+    const ch = chapterList.find(c => c.id === cid);
+    return ch ? ch.name : cid;
+  }
+
+  function bmPositionLabel(pos) {
+    return `Ch. ${chapterName(pos.chapterId)} — Page ${pos.pageIdx + 1}`;
+  }
+
+  // ── LOAD / SAVE ──
+
+  async function loadBookmarks() {
+    try {
+      const res = await fetch(apiUrl(`/api/manga/${libraryId}/${mangaId}/bookmarks`));
+      const data = await res.json();
+      bookmarks = data.bookmarks || [];
+    } catch(e) {
+      bookmarks = [];
+    }
+  }
+
+  async function persistBookmarks() {
+    await fetch(apiUrl(`/api/manga/${libraryId}/${mangaId}/bookmarks`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookmarks }),
+    });
+  }
+
+  // ── SORT bookmarks by start position (chapter then page) ──
+  function sortBookmarks() {
+    bookmarks.sort((a, b) => {
+      if (a.start.chapterIdx !== b.start.chapterIdx) return a.start.chapterIdx - b.start.chapterIdx;
+      return a.start.pageIdx - b.start.pageIdx;
+    });
+  }
+
+  // ── AUTO-NUMBERING ──
+  // Strip trailing number suffix (e.g. "Luffy fights 03" → "Luffy fights")
+  function bmBaseName(name) {
+    return name.replace(/\s+\d+$/, '').trim();
+  }
+
+  function renumberGroup(baseName) {
+    // Find all bookmarks with this base name, in sorted order, and assign 01, 02, …
+    const group = bookmarks.filter(b => bmBaseName(b.name) === baseName);
+    if (group.length < 2) {
+      // Only one — strip the number suffix if it crept in
+      if (group.length === 1 && group[0].name !== baseName) {
+        group[0].name = baseName;
+      }
+      return;
+    }
+    // Sort by position
+    group.sort((a, b) => {
+      if (a.start.chapterIdx !== b.start.chapterIdx) return a.start.chapterIdx - b.start.chapterIdx;
+      return a.start.pageIdx - b.start.pageIdx;
+    });
+    group.forEach((b, i) => {
+      b.name = `${baseName} ${String(i + 1).padStart(2, '0')}`;
+    });
+  }
+
+  // ── TOAST ──
+  let bmToastTimer = null;
+  const bmToastEl = document.getElementById('bmToast');
+  function showToast(msg) {
+    bmToastEl.textContent = msg;
+    bmToastEl.classList.add('show');
+    clearTimeout(bmToastTimer);
+    bmToastTimer = setTimeout(() => bmToastEl.classList.remove('show'), 2500);
+  }
+
+  // ── MODAL HELPERS ──
+  const bmModalOverlay = document.getElementById('bmModalOverlay');
+  const bmModalTitle   = document.getElementById('bmModalTitle');
+  const bmModalBody    = document.getElementById('bmModalBody');
+  const bmModalActions = document.getElementById('bmModalActions');
+
+  function openModal(title, bodyFn, actionsFn) {
+    bmModalTitle.textContent = title;
+    bmModalBody.innerHTML = '';
+    bmModalActions.innerHTML = '';
+    bodyFn(bmModalBody);
+    if (actionsFn) actionsFn(bmModalActions);
+    bmModalOverlay.style.display = 'flex';
+  }
+
+  function closeModal() {
+    bmModalOverlay.style.display = 'none';
+  }
+
+  bmModalOverlay.addEventListener('click', (e) => {
+    if (e.target === bmModalOverlay) closeModal();
+  });
+
+  // ── BOOKMARK PANEL ──
+  const bookmarkPanel  = document.getElementById('bookmarkPanel');
+  const bbBookmarkBtn  = document.getElementById('bbBookmarkBtn');
+  const bmAddBtn       = document.getElementById('bmAddBtn');
+  const bmCloseBtn     = document.getElementById('bmCloseBtn');
+  const bmListBtn      = document.getElementById('bmListBtn');
+
+  function openBookmarkPanel() {
+    bookmarkPanel.classList.add('open');
+    bbBookmarkBtn.classList.add('active');
+    closeSettingsPanel();
+  }
+  function closeBookmarkPanel() {
+    bookmarkPanel.classList.remove('open');
+    bbBookmarkBtn.classList.remove('active');
+  }
+
+  bbBookmarkBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    bookmarkPanel.classList.contains('open') ? closeBookmarkPanel() : openBookmarkPanel();
+  });
+  bookmarkPanel.addEventListener('click', (e) => e.stopPropagation());
+
+  // Close bookmark panel when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!bookmarkPanel.contains(e.target) && e.target !== bbBookmarkBtn) {
+      closeBookmarkPanel();
+    }
+  });
+
+  // Also close bookmark panel in hideAll
+  const _origHideAll = hideAll;
+  // Patch hideAll to also close bookmark panel and modal
+  // (we extend rather than replace since hideAll is defined above)
+  const _bmHideAllPatch = () => {
+    closeBookmarkPanel();
+  };
+  // Hook into the existing barTimer timeout path by overriding showAll's timer
+  // Instead, we listen on the existing barTimer callback indirectly by wrapping hideAll reference.
+  // The cleanest approach: patch the function reference used by the timer.
+  // Since hideAll is a plain function (not on an object), we shadow it by reassigning.
+  // However JS closures already captured it, so we extend via event instead:
+  document.addEventListener('_hideAll', () => closeBookmarkPanel());
+
+  // ── ADD BOOKMARK ──
+  bmAddBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    openModal('Add Bookmark', (body) => {
+      const hint = document.createElement('div');
+      hint.className = 'bm-modal-hint';
+      const pos = getCurrentPosition();
+      hint.textContent = `Position: ${bmPositionLabel(pos)}`;
+      body.appendChild(hint);
+
+      const input = document.createElement('input');
+      input.className = 'bm-modal-input';
+      input.type = 'text';
+      input.placeholder = 'Bookmark name (leave empty for auto-name)';
+      body.appendChild(input);
+      setTimeout(() => input.focus(), 50);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closeModal);
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'bm-btn bm-btn-primary';
+      saveBtn.textContent = 'Save';
+      saveBtn.addEventListener('click', () => {
+        const input = bmModalBody.querySelector('.bm-modal-input');
+        let name = input ? input.value.trim() : '';
+        const pos = getCurrentPosition();
+
+        if (!name) {
+          // Auto-name: "Bookmark N"
+          name = `Bookmark ${bookmarks.length + 1}`;
+        }
+
+        const baseName = bmBaseName(name);
+        const existingGroup = bookmarks.filter(b => bmBaseName(b.name) === baseName);
+
+        bookmarks.push({ name, start: pos, end: null, id: Date.now() });
+        sortBookmarks();
+
+        if (existingGroup.length > 0) {
+          // Group now has 2+ members — renumber all
+          renumberGroup(baseName);
+        }
+
+        persistBookmarks();
+        closeModal();
+        showToast('Bookmark saved');
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+    });
+  });
+
+  // ── CLOSE BOOKMARK ──
+  bmCloseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    showCloseBookmarkModal();
+  });
+
+  function showCloseBookmarkModal() {
+    openModal('Close Bookmark', (body) => {
+      const pos = getCurrentPosition();
+      const hint = document.createElement('div');
+      hint.className = 'bm-modal-hint';
+      hint.textContent = `Close at: ${bmPositionLabel(pos)}`;
+      hint.style.marginBottom = '8px';
+      body.appendChild(hint);
+
+      if (bookmarks.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'bm-modal-hint';
+        empty.textContent = 'No bookmarks yet.';
+        body.appendChild(empty);
+        return;
+      }
+
+      bookmarks.forEach((bm, idx) => {
+        const row = buildBookmarkRow(bm, {
+          showActions: false,
+          onClick: () => {
+            if (bm.end) {
+              // Already closed — ask if user wants to update
+              closeModal();
+              openModal('Update Close Point', (body2) => {
+                const msg = document.createElement('div');
+                msg.className = 'bm-modal-hint';
+                msg.style.color = '#ccc';
+                msg.textContent = `"${bm.name}" is already closed. Do you want to update its end point to the current position?`;
+                body2.appendChild(msg);
+              }, (actions2) => {
+                const cancelBtn = document.createElement('button');
+                cancelBtn.className = 'bm-btn bm-btn-secondary';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.addEventListener('click', closeModal);
+
+                const confirmBtn = document.createElement('button');
+                confirmBtn.className = 'bm-btn bm-btn-primary';
+                confirmBtn.textContent = 'Update';
+                confirmBtn.addEventListener('click', () => {
+                  applyCloseToBookmark(bm, pos);
+                  closeModal();
+                });
+                actions2.appendChild(cancelBtn);
+                actions2.appendChild(confirmBtn);
+              });
+            } else {
+              applyCloseToBookmark(bm, pos);
+              closeModal();
+            }
+          }
+        });
+        body.appendChild(row);
+      });
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closeModal);
+      actions.appendChild(cancelBtn);
+    });
+  }
+
+  function applyCloseToBookmark(bm, endPos) {
+    // Enforce: end must be after start. If not, swap.
+    if (positionBefore(endPos, bm.start) || positionEqual(endPos, bm.start)) {
+      // Swap: new start = endPos, new end = old start
+      const oldStart = bm.start;
+      bm.start = endPos;
+      bm.end   = oldStart;
+      sortBookmarks();
+      // Re-number group after position changed
+      renumberGroup(bmBaseName(bm.name));
+    } else {
+      bm.end = endPos;
+    }
+    persistBookmarks();
+    showToast('Bookmark closed');
+  }
+
+  // ── BOOKMARK LIST ──
+  bmListBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    showBookmarkListModal();
+  });
+
+  function showBookmarkListModal() {
+    openModal('Bookmarks', (body) => {
+      // End-to-end toggle row
+      const toggleRow = document.createElement('div');
+      toggleRow.className = 'bm-toggle-row';
+      const toggleLabel = document.createElement('span');
+      toggleLabel.className = 'bm-toggle-label';
+      toggleLabel.textContent = 'End-to-end reading';
+      const toggleWrap = document.createElement('label');
+      toggleWrap.className = 'settings-toggle';
+      const toggleInput = document.createElement('input');
+      toggleInput.type = 'checkbox';
+      toggleInput.checked = bmEndToEnd;
+      toggleInput.addEventListener('change', () => { bmEndToEnd = toggleInput.checked; });
+      const toggleSlider = document.createElement('span');
+      toggleSlider.className = 'settings-toggle-slider';
+      toggleWrap.appendChild(toggleInput);
+      toggleWrap.appendChild(toggleSlider);
+      toggleRow.appendChild(toggleLabel);
+      toggleRow.appendChild(toggleWrap);
+      body.appendChild(toggleRow);
+
+      if (bookmarks.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'bm-modal-hint';
+        empty.textContent = 'No bookmarks yet.';
+        body.appendChild(empty);
+        return;
+      }
+
+      bookmarks.forEach((bm) => {
+        const row = buildBookmarkRow(bm, {
+          showActions: true,
+          onClick: () => {
+            closeModal();
+            navigateToBookmark(bm);
+          },
+          onRename: () => showRenameModal(bm),
+          onDelete: () => showDeleteModal(bm),
+        });
+        body.appendChild(row);
+      });
+    }, (actions) => {
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'bm-btn bm-btn-secondary';
+      closeBtn.textContent = 'Close';
+      closeBtn.addEventListener('click', closeModal);
+      actions.appendChild(closeBtn);
+    });
+  }
+
+  // ── BUILD A BOOKMARK ROW ──
+  function buildBookmarkRow(bm, { showActions, onClick, onRename, onDelete }) {
+    const row = document.createElement('div');
+    row.className = 'bm-row';
+
+    const info = document.createElement('div');
+    info.className = 'bm-row-info';
+
+    const name = document.createElement('div');
+    name.className = 'bm-row-name';
+    name.textContent = bm.name;
+
+    const detail = document.createElement('div');
+    detail.className = 'bm-row-detail';
+    detail.textContent = bm.end
+      ? `${bmPositionLabel(bm.start)} → ${bmPositionLabel(bm.end)}`
+      : bmPositionLabel(bm.start);
+
+    info.appendChild(name);
+    info.appendChild(detail);
+
+    const tag = document.createElement('span');
+    tag.className = `bm-row-tag ${bm.end ? 'bm-tag-closed' : 'bm-tag-open'}`;
+    tag.textContent = bm.end ? 'CLOSED' : 'OPEN';
+
+    row.appendChild(info);
+    row.appendChild(tag);
+
+    if (showActions) {
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'bm-row-actions';
+
+      // Rename button
+      const renameBtn = document.createElement('button');
+      renameBtn.className = 'bm-icon-btn';
+      renameBtn.title = 'Rename';
+      renameBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+      renameBtn.addEventListener('click', (e) => { e.stopPropagation(); onRename && onRename(); });
+
+      // Delete button
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bm-icon-btn danger';
+      deleteBtn.title = 'Delete';
+      deleteBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+      deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); onDelete && onDelete(); });
+
+      actionsDiv.appendChild(renameBtn);
+      actionsDiv.appendChild(deleteBtn);
+      row.appendChild(actionsDiv);
+    }
+
+    row.addEventListener('click', onClick);
+    return row;
+  }
+
+  // ── RENAME ──
+  function showRenameModal(bm) {
+    openModal('Rename Bookmark', (body) => {
+      const input = document.createElement('input');
+      input.className = 'bm-modal-input';
+      input.type = 'text';
+      input.value = bm.name;
+      body.appendChild(input);
+      setTimeout(() => { input.focus(); input.select(); }, 50);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => showBookmarkListModal());
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'bm-btn bm-btn-primary';
+      saveBtn.textContent = 'Save';
+      saveBtn.addEventListener('click', () => {
+        const input = bmModalBody.querySelector('.bm-modal-input');
+        const newName = input ? input.value.trim() : '';
+        if (!newName) return;
+        const oldBase = bmBaseName(bm.name);
+        bm.name = newName;
+        const newBase = bmBaseName(newName);
+        // Renumber old group (may now have one fewer member)
+        renumberGroup(oldBase);
+        // Renumber new group if it now has 2+ members
+        const newGroup = bookmarks.filter(b => bmBaseName(b.name) === newBase);
+        if (newGroup.length > 1) renumberGroup(newBase);
+        persistBookmarks();
+        showBookmarkListModal();
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+    });
+  }
+
+  // ── DELETE ──
+  function showDeleteModal(bm) {
+    openModal('Delete Bookmark', (body) => {
+      const msg = document.createElement('div');
+      msg.className = 'bm-modal-hint';
+      msg.style.color = '#ccc';
+      msg.textContent = `Delete "${bm.name}"? This cannot be undone.`;
+      body.appendChild(msg);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => showBookmarkListModal());
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'bm-btn bm-btn-danger';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', () => {
+        const base = bmBaseName(bm.name);
+        bookmarks = bookmarks.filter(b => b.id !== bm.id);
+        renumberGroup(base);
+        persistBookmarks();
+        showBookmarkListModal();
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(delBtn);
+    });
+  }
+
+  // ── NAVIGATE TO BOOKMARK ──
+  function navigateToBookmark(bm) {
+    if (bmEndToEnd && bm.end) {
+      bmEndToEndActive = true;
+      bmCurrentGroup   = bmBaseName(bm.name);
+      bmCurrentGroupIdx = bookmarks
+        .filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup)
+        .findIndex(b => b.id === bm.id);
+    } else {
+      bmEndToEndActive = false;
+    }
+    jumpToPosition(bm.start);
+  }
+
+  function jumpToPosition(pos) {
+    if (pos.chapterId === chapterId) {
+      if (readerSettings.mode === 'single-page') {
+        const idx = spManifest.findIndex(e => e.localIdx === pos.pageIdx);
+        if (idx !== -1) spGotoIdx(idx);
+      } else {
+        const entry = manifest.find(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
+        if (entry) setVirtualY(entry.globalY);
+      }
+    } else {
+      goToChapter(`/manga/${libraryId}/${mangaId}/chapter/${pos.chapterId}?page=${pos.pageIdx}`);
+    }
+  }
+
+  // ── END-TO-END: check if we've reached the end of the current bookmark ──
+  let bmCurrentGroup    = null;
+  let bmCurrentGroupIdx = 0;
+
+  function checkEndToEnd() {
+    if (!bmEndToEndActive) return;
+
+    const pos = getCurrentPosition();
+    // Find the active bookmark in the current group
+    const group = bookmarks.filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup);
+    const activeBm = group[bmCurrentGroupIdx];
+    if (!activeBm || !activeBm.end) return;
+
+    const end = activeBm.end;
+    // Check if we've reached or passed the end position
+    if (!positionBefore(pos, end) && !positionEqual(pos, end)) return;
+    if (positionEqual(pos, end) || (!positionBefore(pos, end))) {
+      // Move to next bookmark in chain
+      advanceEndToEnd();
+    }
+  }
+
+  function advanceEndToEnd() {
+    // Try next in same group
+    const group = bookmarks.filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup);
+    if (bmCurrentGroupIdx + 1 < group.length) {
+      bmCurrentGroupIdx++;
+      jumpToPosition(group[bmCurrentGroupIdx].start);
+      return;
+    }
+
+    // Group exhausted — find next group by lowest start position
+    const doneGroups = new Set();
+    // Collect all groups that have been started
+    // (current group and all groups whose base name equals bmCurrentGroup or comes before)
+    bookmarks
+      .filter(b => b.end)
+      .forEach(b => {
+        const base = bmBaseName(b.name);
+        if (base === bmCurrentGroup) doneGroups.add(base);
+      });
+
+    // Find all remaining groups (not done), sorted by the position of their first bookmark
+    const remaining = [];
+    const seen = new Set(doneGroups);
+    for (const bm of bookmarks) {
+      if (!bm.end) continue;
+      const base = bmBaseName(bm.name);
+      if (seen.has(base)) continue;
+      seen.add(base);
+      remaining.push({ base, firstBm: bm });
+    }
+    // bookmarks are already sorted by position so the first occurrence of each group
+    // is the one nearest the start of the manga
+
+    if (remaining.length === 0) {
+      bmEndToEndActive = false;
+      showToast('Bookmarks ended');
+      return;
+    }
+
+    // Move to the next group
+    const next = remaining[0];
+    bmCurrentGroup    = next.base;
+    bmCurrentGroupIdx = 0;
+    jumpToPosition(next.firstBm.start);
+  }
+
+  // ── SINGLE PAGE COMPLETION HOOK ──
+  const _origSpForward = spForward;
+  spForward = function() {
+    if (readerSettings.mode === 'single-page' && spCurrentIdx >= spManifest.length - 1) {
+      const lastPageIdx = spManifest.length > 0 ? spManifest[spManifest.length - 1].localIdx : 0;
+      fetch(apiUrl('/api/reading/progress'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          library_id:           libraryId,
+          manga_id:             mangaId,
+          chapter_id:           chapterId,
+          page:                 lastPageIdx,
+          completed_chapter_id: chapterId,
+        }),
+      });
+    }
+    _origSpForward();
+  };
+
+  // Hook end-to-end check into page changes
+  // scheduleProgressSave (called by setVirtualY) handles long-strip.
+  // For single-page: wrap spGotoIdx.
+  const _origSpGotoIdxE2E = spGotoIdx;
+  spGotoIdx = function(idx) {
+    _origSpGotoIdxE2E(idx);
+    if (bmEndToEndActive) checkEndToEnd();
+  };
+
+
+  // Load bookmarks on startup
+  await loadBookmarks();
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>KINSHO</title>
+  <script src="/static/api.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--color-background);
+      color: var(--color-text);
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── TOP BAR ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      padding: 16px 20px;
+      background: var(--color-secondary);
+      border-bottom: 1px solid #2a2a2a;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      gap: 8px;
+    }
+    .topbar-title {
+      font-size: 1.4rem;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 4px;
+      margin-left: 14px;
+    }
+    .topbar-title .kin {
+      color: #000;
+      -webkit-text-stroke: 1.5px #fff;
+      paint-order: stroke fill;
+    }
+    .topbar-title .sho {
+      color: #fff;
+      -webkit-text-stroke: 1.5px #000;
+      paint-order: stroke fill;
+    }
+    .settings-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: var(--color-text);
+      transition: background 0.2s;
+    }
+    .settings-btn:hover { background: #2a2a2a; }
+    .settings-btn svg { display: block; }
+
+    .category-page-title {
+      font-size: 1rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--color-primary);
+      margin-left: 14px;
+    }
+
+    .shuffle-btn {
+      margin-left: auto;
+      background: none;
+      border: 1px solid var(--color-primary);
+      border-radius: 20px;
+      color: var(--color-primary);
+      padding: 6px 14px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .shuffle-btn:hover { background: var(--color-primary); color: #fff; }
+
+    /* ── GRID SECTION ── */
+    .grid-section { padding: 12px 20px; }
+    .manga-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 13vw, 160px), 1fr));
+      gap: 16px 12px;
+    }
+
+    /* ── THUMBNAIL CARD ── */
+    .manga-thumb {
+      flex: 0 0 clamp(100px, 13vw, 160px);
+      width: clamp(100px, 13vw, 160px);
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .manga-thumb:hover { transform: translateY(-4px); }
+
+    .manga-thumb .cover {
+      width: 100%;
+      height: calc(clamp(100px, 13vw, 160px) * 3 / 2);
+      background: var(--color-secondary);
+      border-radius: 8px;
+      border: 1px solid #333;
+      overflow: hidden;
+      position: relative;
+    }
+    .manga-thumb .cover img {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 8px;
+      display: block;
+    }
+    .manga-thumb .cover span {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      color: #555;
+      font-size: 0.7rem;
+    }
+    .complete-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: var(--color-primary);
+      color: #fff;
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      pointer-events: none;
+      display: block !important;
+      width: auto !important;
+      height: auto !important;
+    }
+
+    .manga-thumb .card-body { padding: 5px 2px 0; }
+
+    .manga-thumb .progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 4px;
+    }
+    .manga-thumb .progress-track {
+      flex: 1;
+      height: 3px;
+      background: #333;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .manga-thumb .progress-pct {
+      font-size: 0.6rem;
+      color: #888;
+      white-space: nowrap;
+      flex-shrink: 0;
+      width: 26px;
+      text-align: right;
+    }
+    .manga-thumb .progress-bar {
+      height: 100%;
+      background: var(--color-primary);
+      border-radius: 2px;
+    }
+
+    .manga-thumb .thumb-title {
+      font-size: 0.72rem;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ── BACKGROUND LAYER ── */
+    .bg-layer {
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    .bg-layer.blurred {
+      filter: blur(8px);
+      transform: scale(1.05);
+    }
+    .bg-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background: rgba(0,0,0,0.35);
+    }
+    #app {
+      position: relative;
+      z-index: 0;
+    }
+
+    /* ── PAGINATION ── */
+    .pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 6px;
+      padding: 20px 0 8px;
+      flex-wrap: wrap;
+    }
+    .page-btn {
+      background: var(--color-secondary);
+      border: 1px solid #333;
+      color: var(--color-text);
+      border-radius: 6px;
+      padding: 5px 12px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .page-btn:hover:not(:disabled) {
+      border-color: var(--color-primary);
+      color: var(--color-primary);
+    }
+    .page-btn.active {
+      background: var(--color-primary);
+      border-color: var(--color-primary);
+      color: #fff;
+      font-weight: 700;
+    }
+    .page-btn:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+  </style>
+</head>
+<body>
+<script>
+  window.__LIBRARY_ID__     = {{ library_id | tojson }};
+  window.__CATEGORY__       = {{ category | tojson }};
+  window.__CATEGORY_TITLE__ = {{ category_title | tojson }};
+</script>
+
+<div id="app">
+    <div class="bg-layer" :class="{ blurred: bgIsRaster }" :style="bgLayerStyle"></div>
+    <div class="bg-overlay" v-if="bgLayerStyle"></div>
+
+  <div class="topbar">
+    <button class="settings-btn" @click="goBack">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M19 12H5M12 19l-7-7 7-7"/>
+      </svg>
+    </button>
+
+    <span class="category-page-title">{{ categoryTitle }}</span>
+
+    <button v-if="category === 'random'" class="shuffle-btn" @click="shuffle">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="16 3 21 3 21 8"/>
+        <line x1="4" y1="20" x2="21" y2="3"/>
+        <polyline points="21 16 21 21 16 21"/>
+        <line x1="15" y1="15" x2="21" y2="21"/>
+        <line x1="4" y1="4" x2="9" y2="9"/>
+      </svg>
+      Shuffle
+    </button>
+  </div>
+
+  <div class="grid-section">
+    <div class="manga-grid">
+      <manga-thumb
+        v-for="manga in mangas"
+        :key="manga.id"
+        :manga="manga"
+        @click="openManga(manga.id)"
+      />
+    </div>
+
+    <!-- Pagination -->
+    <div v-if="totalPages > 1" class="pagination">
+      <button
+        class="page-btn"
+        :disabled="page === 1"
+        @click="loadPage(page - 1)"
+      >&#8592;</button>
+      <button
+        v-for="p in totalPages"
+        :key="p"
+        class="page-btn"
+        :class="{ active: p === page }"
+        @click="loadPage(p)"
+        v-text="p"
+      ></button>
+      <button
+        class="page-btn"
+        :disabled="page === totalPages"
+        @click="loadPage(page + 1)"
+      >&#8594;</button>
+    </div>
+  </div>
+
+</div>
+
+
+<script src="/static/category_list.js"></script>
+</body>
+</html>

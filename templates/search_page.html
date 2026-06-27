@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>Search — KINSHO</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--color-background, #0f0f0f);
+      color: var(--color-text, #f0f0f0);
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── TOPBAR ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      background: var(--color-secondary, #1a1a1a);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .back-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: var(--color-text, #f0f0f0);
+      transition: background 0.2s;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .back-btn:hover { background: #2a2a2a; }
+
+    .search-input {
+      flex: 1;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid var(--color-primary, #e94560);
+      border-radius: 20px;
+      padding: 9px 18px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.95rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+      transition: border-color 0.2s;
+    }
+    .search-input::placeholder { color: rgba(255,255,255,0.35); }
+    .search-input:focus { border-color: var(--color-primary, #e94560); }
+
+    /* ── FILTERS ── */
+    .filters {
+      padding: 16px 20px 8px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .filter-label {
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #aaa;
+      margin-bottom: 10px;
+      margin-top: 18px;
+    }
+    .pills-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-bottom: 20px;
+      min-height: 28px;
+    }
+    .pill {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 4px 11px;
+      border-radius: 17px;
+      border: 1px solid var(--color-primary, #e94560);
+      color: var(--color-primary, #e94560);
+      background: transparent;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      user-select: none;
+    }
+    .pill:hover {
+      background: var(--color-primary, #e94560);
+      color: #fff;
+    }
+    .pill.active {
+      background: var(--color-primary, #e94560);
+      color: #fff;
+    }
+    .no-filters {
+      font-size: 0.75rem;
+      color: #444;
+      font-style: italic;
+    }
+
+    /* ── RESULTS ── */
+    .results-section {
+      padding: 16px 20px 40px;
+      max-width: 1200px;
+      margin: 0 auto;
+      margin-top: 24px;
+    }
+    .results-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .results-count {
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: #aaa;
+    }
+    .manga-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 13vw, 160px), 1fr));
+      gap: 16px 12px;
+    }
+
+    /* ── MANGA CARD ── */
+    .manga-thumb {
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .manga-thumb:hover { transform: translateY(-4px); }
+    .manga-thumb:hover .cover { box-shadow: 0 8px 24px rgba(0,0,0,0.55); }
+    .manga-thumb .cover {
+      width: 100%;
+      aspect-ratio: 2 / 3;
+      background: var(--color-secondary, #1a1a1a);
+      border-radius: 11px;
+      border: 1px solid #333;
+      overflow: hidden;
+      position: relative;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .manga-thumb .cover img {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 11px;
+      display: block;
+    }
+    .manga-thumb .cover span {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      color: #555;
+      font-size: 0.7rem;
+    }
+    .manga-thumb .card-body { padding: 5px 2px 0; }
+    .manga-thumb .thumb-title {
+      font-size: 0.72rem;
+      color: var(--color-text, #f0f0f0);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ── EMPTY STATE ── */
+    .state-msg {
+      text-align: center;
+      padding: 48px 20px;
+      color: #555;
+      font-size: 0.85rem;
+    }
+    .filter-search {
+      width: 100%;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 20px;
+      padding: 5px 14px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.78rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      margin-bottom: 10px;
+      transition: border-color 0.2s;
+    }
+    .filter-search:focus { border-color: var(--color-primary, #e94560); }
+    .filter-search::placeholder { color: rgba(255,255,255,0.25); }
+
+    /* ── LIST FILTER DROPDOWN ── */
+    .list-dropdown-wrap {
+      position: relative;
+      width: 220px;
+    }
+    .list-dropdown-trigger {
+      width: 100%;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 20px;
+      padding: 6px 14px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.78rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      transition: border-color 0.2s;
+      user-select: none;
+    }
+    .list-dropdown-trigger:hover,
+    .list-dropdown-trigger.open { border-color: var(--color-primary, #e94560); }
+    .list-dropdown-trigger svg {
+      flex-shrink: 0;
+      transition: transform 0.2s;
+    }
+    .list-dropdown-trigger.open svg { transform: rotate(180deg); }
+    .list-dropdown-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      width: 100%;
+      background: var(--color-secondary, #1a1a1a);
+      border: 1px solid #333;
+      border-radius: 10px;
+      z-index: 500;
+      padding: 6px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .list-dropdown-option {
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.78rem;
+      color: var(--color-text, #f0f0f0);
+      transition: background 0.15s;
+      user-select: none;
+    }
+    .list-dropdown-option:hover { background: rgba(255,255,255,0.07); }
+    .list-dropdown-option.selected {
+      color: var(--color-primary, #e94560);
+      font-weight: 600;
+    }
+    .list-dropdown-option + .list-dropdown-option { margin-top: 2px; }
+
+  </style>
+
+  <script src="/static/api.js"></script>
+</head>
+<body>
+{% raw %}
+<div id="app">
+
+  <div class="topbar">
+    <button class="back-btn" @click="goBack">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </button>
+    <input
+      class="search-input"
+      type="text"
+      v-model="query"
+      placeholder="Search manga…"
+      ref="searchInput"
+      @input="onInput"
+    />
+  </div>
+
+  <div class="filters">
+    <div class="filter-label">Genres</div>
+    <input class="filter-search" type="text" v-model="genreSearch" placeholder="Filter genres…">
+    <div class="pills-row">
+      <span v-if="allGenres.length === 0" class="no-filters">No genres yet.</span>
+      <span
+        v-for="genre in filteredGenres"
+        :key="genre"
+        class="pill"
+        :class="{ active: selectedGenres.includes(genre) }"
+        @click="toggleGenre(genre)"
+      >{{ genre }}</span>
+    </div>
+
+    <div class="filter-label">Tags</div>
+    <input class="filter-search" type="text" v-model="tagSearch" placeholder="Filter tags…">
+    <div class="pills-row">
+      <span v-if="allTags.length === 0" class="no-filters">No tags yet.</span>
+      <span
+        v-for="tag in filteredTagList"
+        :key="tag"
+        class="pill"
+        :class="{ active: selectedTags.includes(tag) }"
+        @click="toggleTag(tag)"
+      >{{ tag }}</span>
+    </div>
+    <div class="filter-label">List</div>
+    <div style="margin-bottom:16px;">
+      <div class="list-dropdown-wrap" v-click-outside="closeListFilterDropdown">
+        <div
+          class="list-dropdown-trigger"
+          :class="{ open: showListFilterDropdown }"
+          @click="showListFilterDropdown = !showListFilterDropdown"
+        >
+          <span>{{ selectedList || 'No List' }}</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        <div class="list-dropdown-menu" v-if="showListFilterDropdown" @click.stop>
+          <div
+            class="list-dropdown-option"
+            :class="{ selected: selectedList === null }"
+            @click="selectList(null)"
+          >No List</div>
+          <div
+            class="list-dropdown-option"
+            :class="{ selected: selectedList === name }"
+            v-for="(entry, name) in allLists"
+            :key="name"
+            @click="selectList(name)"
+          >{{ name }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="filters" style="padding-top:0">
+    <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;">
+      <input type="checkbox" v-model="onlyCompleted" style="accent-color:var(--color-primary,#e94560);width:15px;height:15px;cursor:pointer;">
+      <span style="font-size:0.78rem;font-weight:600;color:var(--color-text,#f0f0f0);">Only Completed</span>
+    </label>
+  </div>
+
+  <div class="results-section">
+    <div class="results-header">
+      <span class="results-count">{{ filteredMangas.length }} result{{ filteredMangas.length !== 1 ? 's' : '' }}</span>
+    </div>
+
+    <div v-if="loading" class="state-msg">Loading…</div>
+    <div v-else-if="filteredMangas.length === 0" class="state-msg">No manga found.</div>
+    <div class="manga-grid" v-else>
+      <div
+        class="manga-thumb"
+        v-for="manga in filteredMangas"
+        :key="manga.id"
+        @click="openManga(manga.id)"
+      >
+        <div class="cover">
+          <img v-if="manga.cover_url" :src="manga.cover_url" :alt="manga.title">
+          <span v-else>No Cover</span>
+        </div>
+        <div class="card-body">
+          <div class="thumb-title">{{ manga.title }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const { createApp } = Vue;
+
+createApp({
+  data() {
+    const params = new URLSearchParams(window.location.search);
+    const preGenre = params.get('genre');
+    const preTag   = params.get('tag');
+    return {
+      libraryId:      parseInt(params.get('lib')) || null,
+      query:          '',
+      allGenres:      [],
+      allTags:        [],
+      selectedGenres: preGenre ? [preGenre] : [],
+      selectedTags:   preTag   ? [preTag]   : [],
+      genreSearch:    '',
+      tagSearch:      '',
+      onlyCompleted:  false,
+      selectedList:   null,
+      showListFilterDropdown: false,
+      allLists:       {},
+      mangas:         [],
+      loading:        true,
+    };
+  },
+
+  computed: {
+    filteredMangas() {
+      const q = this.query.trim().toLowerCase();
+      return this.mangas.filter(m => {
+        if (q && !m.title.toLowerCase().includes(q)) return false;
+        if (this.selectedGenres.length > 0) {
+          const mg = m.genres || [];
+          if (!this.selectedGenres.every(g => mg.includes(g))) return false;
+        }
+        if (this.selectedTags.length > 0) {
+          const mt = m.tags || [];
+          if (!this.selectedTags.every(t => mt.includes(t))) return false;
+        }
+        if (this.onlyCompleted && !m.is_complete) return false;
+        if (this.selectedList) {
+          const entry = this.allLists[this.selectedList];
+          if (!entry || !(entry.manga_ids || []).includes(m.id)) return false;
+        }
+        return true;
+      });
+    },
+    filteredGenres() {
+      const q = this.genreSearch.trim().toLowerCase();
+      if (!q) return this.allGenres;
+      return this.allGenres.filter(g => g.toLowerCase().includes(q));
+    },
+    filteredTagList() {
+      const q = this.tagSearch.trim().toLowerCase();
+      if (!q) return this.allTags;
+      return this.allTags.filter(t => t.toLowerCase().includes(q));
+    },
+  },
+
+  async mounted() {
+    await Promise.all([
+      this.loadMangas(),
+      this.loadGenres(),
+      this.loadTags(),
+      this.loadLists(),
+    ]);
+    this.$nextTick(() => {
+      if (this.$refs.searchInput) this.$refs.searchInput.focus();
+    });
+  },
+
+  methods: {
+    async loadMangas() {
+      if (!this.libraryId) { this.loading = false; return; }
+      try {
+        const res = await fetch(apiUrl(`/api/mangas/${this.libraryId}/search`));
+        const data = await res.json();
+        this.mangas = (data.mangas || []).map(m => ({
+          id:          m.id,
+          title:       m.name,
+          cover_url:   m.cover_url || null,
+          genres:      m.genres || [],
+          tags:        m.tags || [],
+          is_complete: !!m.is_complete,
+        }));
+      } catch (e) {
+        console.error('Failed to load mangas:', e);
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async loadGenres() {
+      try {
+        const res = await fetch(apiUrl('/api/genres'));
+        const data = await res.json();
+        this.allGenres = data.genres || [];
+      } catch (e) { this.allGenres = []; }
+    },
+
+    async loadTags() {
+      try {
+        const res = await fetch(apiUrl('/api/tags'));
+        const data = await res.json();
+        this.allTags = data.tags || [];
+      } catch (e) { this.allTags = []; }
+    },
+
+    async loadLists() {
+      try {
+        const res = await fetch(apiUrl('/api/lists'));
+        const data = await res.json();
+        this.allLists = data.lists || {};
+      } catch (e) { this.allLists = {}; }
+    },
+
+    toggleGenre(genre) {
+      const i = this.selectedGenres.indexOf(genre);
+      if (i === -1) this.selectedGenres.push(genre);
+      else this.selectedGenres.splice(i, 1);
+    },
+
+    toggleTag(tag) {
+      const i = this.selectedTags.indexOf(tag);
+      if (i === -1) this.selectedTags.push(tag);
+      else this.selectedTags.splice(i, 1);
+    },
+
+    selectList(name) {
+      this.selectedList = name;
+      this.showListFilterDropdown = false;
+    },
+
+    closeListFilterDropdown() {
+      this.showListFilterDropdown = false;
+    },
+
+    openManga(id) {
+      window.location.href = `/manga/${this.libraryId}/${id}`;
+    },
+
+    goBack() {
+      window.location.href = '/';
+    },
+
+    onInput() {},
+  },
+}).directive('click-outside', {
+  mounted(el, binding) {
+    el._clickOutside = (e) => { if (!el.contains(e.target)) binding.value(e); };
+    document.addEventListener('click', el._clickOutside);
+  },
+  unmounted(el) {
+    document.removeEventListener('click', el._clickOutside);
+  },
+}).mount('#app');
+</script>
+{% endraw %}
+</body>
+</html>

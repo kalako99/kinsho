@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>KINSHO — Settings</title>
+  <script src="/static/api.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--color-background, #0f0f0f);
+      color: var(--color-text, #f0f0f0);
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+      padding-bottom: 40px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 16px 20px;
+      background: var(--color-secondary, #1a1a1a);
+      border-bottom: 1px solid var(--color-border, #2a2a2a);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .back-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: var(--color-text, #f0f0f0);
+      transition: background 0.2s;
+      display: flex;
+      align-items: center;
+    }
+    .back-btn:hover { background: var(--color-border, #2a2a2a); }
+    .topbar-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--color-text, #f0f0f0);
+      letter-spacing: 1px;
+    }
+
+    .settings-section {
+      padding: 24px 20px 8px;
+    }
+    .section-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--color-primary, #e94560);
+      margin-bottom: 12px;
+    }
+    .section-hint {
+      font-size: 0.75rem;
+      color: var(--color-muted, #666);
+      margin-bottom: 14px;
+      line-height: 1.5;
+    }
+
+    .card {
+      background: var(--color-secondary, #1a1a1a);
+      border: 1px solid var(--color-border, #2a2a2a);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 10px;
+    }
+
+    .field-label {
+      font-size: 0.72rem;
+      color: var(--color-muted, #888);
+      margin-bottom: 6px;
+    }
+    .field-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    input[type="text"],
+    input[type="password"] {
+      flex: 1;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid var(--color-border, #333);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input[type="text"]:focus { border-color: var(--color-primary, #e94560); }
+    input[type="text"]::placeholder { color: var(--color-muted, #444); }
+
+    .btn {
+      background: none;
+      border: 1px solid var(--color-border, #333);
+      border-radius: 8px;
+      padding: 10px 16px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: var(--color-secondary, #2a2a2a); }
+    .btn-primary {
+      background: var(--color-primary, #e94560);
+      border-color: var(--color-primary, #e94560);
+      color: #fff;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(0.85); }
+    .btn-primary:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+      filter: none;
+    }
+    .btn-icon {
+      background: none;
+      border: 1px solid var(--color-border, #333);
+      border-radius: 8px;
+      width: 38px;
+      height: 38px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--color-text, #f0f0f0);
+      transition: background 0.2s, border-color 0.2s;
+      flex-shrink: 0;
+    }
+    .btn-icon:hover { background: var(--color-secondary, #2a2a2a); }
+    .btn-icon.danger:hover { border-color: var(--color-primary, #e94560); color: var(--color-primary, #e94560); }
+    .btn-add {
+      border: 1px dashed var(--color-border, #333);
+      border-radius: 10px;
+      background: none;
+      width: 100%;
+      padding: 12px;
+      color: var(--color-muted, #666);
+      font-size: 0.82rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: border-color 0.2s, color 0.2s;
+    }
+    .btn-add:hover { border-color: var(--color-primary, #e94560); color: var(--color-primary, #e94560); }
+
+    .library-card {
+      background: var(--color-secondary, #1a1a1a);
+      border: 1px solid var(--color-border, #2a2a2a);
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+    }
+    .library-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .library-header input[type="text"] {
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+
+    .status-msg {
+      font-size: 0.75rem;
+      margin-top: 8px;
+      min-height: 18px;
+    }
+    .status-msg.ok       { color: var(--color-primary, #4caf50); }
+    .status-msg.err      { color: #e94560; }
+    .status-msg.scanning { color: #f0a500; }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--color-border, #2a2a2a);
+      margin: 8px 20px 0;
+    }
+
+    .theme-select {
+      width: 100%;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid var(--color-border, #333);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.85rem;
+      outline: none;
+      margin-bottom: 14px;
+      cursor: pointer;
+    }
+    .theme-select:focus { border-color: var(--color-primary, #e94560); }
+  </style>
+  <script>
+    (function () {
+      const BUILTIN_THEMES = [
+        { name: 'Midnight Red',  primary: '#e94560', secondary: '#1a1a1a', background: '#0f0f0f', text: '#f0f0f0' },
+        { name: 'Ocean Deep',    primary: '#38bdf8', secondary: '#0f1f2e', background: '#071422', text: '#e2f0fb' },
+        { name: 'Forest Ink',    primary: '#4ade80', secondary: '#161f18', background: '#0d1510', text: '#e6f4ea' },
+        { name: 'Amber Noir',    primary: '#f59e0b', secondary: '#1c1810', background: '#100e09', text: '#fdf3dc' },
+        { name: 'Royal Dusk', primary: '#a78bfa', secondary: '#1a1228', background: '#0e0a1a', text: '#ede9fe', bg_image: null },
+      ];
+      function applyTheme(name) {
+        const theme = BUILTIN_THEMES.find(t => t.name === name) || BUILTIN_THEMES[0];
+        const r = document.documentElement;
+        r.style.setProperty('--color-primary',    theme.primary);
+        r.style.setProperty('--color-secondary',  theme.secondary);
+        r.style.setProperty('--color-background', theme.background);
+        r.style.setProperty('--color-text',       theme.text);
+        r.style.setProperty('--color-border',     theme.secondary === '#0f0f0f' ? '#2a2a2a' : theme.secondary + 'aa');
+        r.style.setProperty('--color-muted',      theme.text + '66');
+        document.body.style.background = theme.background;
+      }
+      fetch(apiUrl('/api/settings'))
+        .then(r => r.json())
+        .then(d => applyTheme(d.active_theme))
+        .catch(() => applyTheme('Midnight Red'));
+    })();
+  </script>
+</head>
+<body>
+<div id="app">
+
+
+  <div class="topbar">
+    <button class="back-btn" @click="goBack">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="15 18 9 12 15 6"/>
+      </svg>
+    </button>
+    <span class="topbar-title">Settings</span>
+  </div>
+
+  <!-- ── SERVER CONNECTION (native app only) ── -->
+  <div class="settings-section" v-if="isNativeApp">
+    <div class="section-label">Server Connection</div>
+    <div class="section-hint">The address of your KINSHO server. Changing this takes effect immediately.</div>
+    <div class="card">
+      <div class="field-label">Server URL</div>
+      <div class="field-row">
+        <input
+          type="text"
+          v-model="serverUrl"
+          placeholder="http://192.168.1.x:8000"
+          @keyup.enter="saveServerUrl"
+        />
+        <button class="btn btn-primary" @click="saveServerUrl" :disabled="!serverUrl.trim()">Save</button>
+      </div>
+      <div class="status-msg" :class="serverUrlStatus.type" v-text="serverUrlStatus.msg"></div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <!-- ── ACCOUNT SECTION ── -->
+  <div class="settings-section">
+    <div class="section-label">Account</div>
+
+    <!-- NOT LOGGED IN: show login form -->
+    <template v-if="!isLoggedIn">
+      <div class="section-hint">You are in local mode. Log in to connect to your server.</div>
+      <div class="card">
+        <div class="field-label">Log in</div>
+        <div class="field-row" style="margin-bottom:8px;">
+          <input
+            type="text"
+            v-model="loginUsername"
+            placeholder="Username"
+            autocomplete="username"
+            @keyup.enter="loginFromSettings"
+          />
+        </div>
+        <div class="field-row">
+          <input
+            type="password"
+            v-model="loginPassword"
+            placeholder="Password"
+            autocomplete="current-password"
+            @keyup.enter="loginFromSettings"
+          />
+          <button
+            class="btn btn-primary"
+            @click="loginFromSettings"
+            :disabled="!loginUsername.trim() || !loginPassword.trim()"
+          >Login</button>
+        </div>
+        <div class="status-msg" :class="loginStatus.type" v-text="loginStatus.msg"></div>
+      </div>
+    </template>
+
+    <!-- LOGGED IN: show password change + logout -->
+    <template v-else>
+      <div class="card">
+        <div class="field-label">Change password</div>
+        <div class="field-row" style="margin-bottom: 8px;">
+          <input
+            type="password"
+            v-model="currentPassword"
+            placeholder="Current password"
+            @keyup.enter="changePassword"
+          />
+        </div>
+        <div class="field-row">
+          <input
+            type="password"
+            v-model="newPassword"
+            placeholder="New password"
+            @keyup.enter="changePassword"
+          />
+          <button
+            class="btn btn-primary"
+            @click="changePassword"
+            :disabled="!currentPassword.trim() || !newPassword.trim()"
+          >Save</button>
+        </div>
+        <div class="status-msg" :class="passwordStatus.type" v-text="passwordStatus.msg"></div>
+      </div>
+      <button class="btn" style="width:100%; margin-top: 4px;" @click="logout">
+        Log out
+      </button>
+    </template>
+  </div>
+ 
+  <template v-if="isAdmin">
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Data Storage</div>
+    <div class="section-hint">
+      This folder is where KINSHO saves your library data (data.json).
+      Set this first — your library paths won't be saved until this is configured.
+    </div>
+    <div class="card">
+      <div class="field-label">Data folder path</div>
+      <div class="field-row">
+        <input
+          type="text"
+          v-model="dataPath"
+          placeholder="e.g. /app/kinsho-data"
+          @keyup.enter="saveDataPath"
+        />
+        <button
+          class="btn btn-primary"
+          @click="saveDataPath"
+          :disabled="!dataPath.trim()"
+        >Save</button>
+      </div>
+      <div class="status-msg" :class="dataPathStatus.type" v-text="dataPathStatus.msg"></div>
+    </div>
+  </div>
+
+  </template><!-- /v-if isAdmin: Data Storage -->
+
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Libraries</div>
+    <!-- ── ADMIN VIEW: full library controls ── -->
+    <template v-if="isAdmin">
+
+    <div class="section-hint">
+      Each library is a folder on your system containing manga, webtoons, books, etc.
+      Give each one a name — this will become the tab label on the main page.
+    </div>
+
+    <div
+      v-for="(lib, index) in visibleLibraries"
+      :key="lib.id"
+      class="library-card"
+    >
+      <div class="library-header">
+        <input type="text" v-model="lib.name" placeholder="Tab name (e.g. Manga)" />
+        <button class="btn-icon danger" @click="removeLibrary(index)" title="Remove">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14H6L5 6"/>
+            <path d="M10 11v6M14 11v6"/>
+            <path d="M9 6V4h6v2"/>
+          </svg>
+        </button>
+      </div>
+      <div class="field-label">Folder path</div>
+      <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
+        <input type="text" v-model="lib.paths[pi]" placeholder="e.g. /app/manga" />
+        <button
+          class="btn-icon danger"
+          @click="removePath(lib, pi)"
+          :disabled="lib.paths.length === 1"
+          title="Remove path"
+          style="opacity: lib.paths.length === 1 ? 0.3 : 1;"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+        </button>
+      </div>
+      <button class="btn-add" @click="addPath(lib)" style="margin-top: 4px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+        Add path
+      </button>
+      <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
+        <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
+          ↺ Reload scan
+        </button>
+        <span
+          class="status-msg"
+          style="margin: 0;"
+          :class="scanStatus[lib.id] ? scanStatus[lib.id].type : ''"
+          v-text="scanStatus[lib.id] ? scanStatus[lib.id].msg : ''"
+        ></span>
+      </div>
+    </div>
+
+    <button class="btn-add" @click="addLibrary" :disabled="!dataPathSaved">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="12" y1="5" x2="12" y2="19"/>
+        <line x1="5" y1="12" x2="19" y2="12"/>
+      </svg>
+      Add library
+    </button>
+
+    <div v-if="!dataPathSaved" style="font-size:0.75rem; color:#666; margin-top:8px; text-align:center;">
+      Save a data folder path first before adding libraries.
+    </div>
+
+    <div style="margin-top: 14px;" v-if="visibleLibraries.length > 0">
+      <button class="btn btn-primary" style="width:100%;" @click="saveLibraries">Save Libraries</button>
+      <div class="status-msg" :class="libStatus.type" style="text-align:center;" v-text="libStatus.msg"></div>
+    </div>
+
+    </template><!-- /v-if isAdmin: full library controls -->
+
+    <!-- ── NON-ADMIN VIEW: reload only ── -->
+    <template v-else>
+      <div v-if="visibleLibraries.length === 0" style="font-size:0.75rem; color:#666; text-align:center; padding: 12px 0;">
+        No libraries available.
+      </div>
+      <div v-for="lib in visibleLibraries" :key="lib.id" class="card">
+        <div class="field-label" v-text="lib.name"></div>
+        <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+          <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
+            ↺ Reload scan
+          </button>
+          <span
+            class="status-msg"
+            style="margin:0;"
+            :class="scanStatus[lib.id] ? scanStatus[lib.id].type : ''"
+            v-text="scanStatus[lib.id] ? scanStatus[lib.id].msg : ''"
+          ></span>
+        </div>
+      </div>
+    </template><!-- /v-else: non-admin library view -->
+
+  </div>
+
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Themes</div>
+    <div class="section-hint">Choose a theme for the app. Your selection is saved automatically.</div>
+
+    <div class="card">
+      <div class="field-label">Active theme</div>
+      <select class="theme-select" v-model="activeTheme" @change="saveThemes">
+        <option v-for="t in BUILTIN_THEMES" :key="t.name" :value="t.name" v-text="t.name"></option>
+      </select>
+      <div class="status-msg" :class="themeStatus.type" v-text="themeStatus.msg"></div>
+    </div>
+  </div>
+
+  <!-- ── ANALYTICS ── -->
+  <hr class="divider">
+  <div class="settings-section">
+    <div class="section-label">Analytics</div>
+    <div style="font-size:0.82rem; margin-bottom:14px;">
+      Total reading time: <span v-text="formatMinutes(analyticsTotalMinutes)" style="color:var(--color-primary,#e94560); font-weight:700;"></span>
+    </div>
+
+    <div class="card" style="padding:14px 14px 10px; user-select:none;">
+      <!-- Controls row -->
+      <div style="display:flex; align-items:center; gap:6px; margin-bottom:10px; flex-wrap:wrap;">
+        <select class="theme-select" style="width:auto; margin-bottom:0; padding:7px 10px;" v-model="analyticsPrecision" @change="onPrecisionChange">
+          <option value="day">Day</option>
+          <option value="month">Month</option>
+          <option value="year">Year</option>
+        </select>
+        <input
+          v-if="analyticsPrecision === 'day'"
+          type="date"
+          v-model="analyticsSelectedDay"
+          @change="$nextTick(() => renderGraph())"
+          style="background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:8px; padding:7px 10px; color:var(--color-text,#f0f0f0); font-size:0.82rem; outline:none; font-family:'Segoe UI',sans-serif;"
+        />
+        <template v-if="analyticsPrecision === 'month'">
+          <select class="theme-select" style="width:auto; margin-bottom:0; padding:7px 10px;" v-model="analyticsSelectedYear" @change="$nextTick(() => renderGraph())">
+            <option v-for="y in analyticsAvailableYears" :key="y" :value="y" v-text="y"></option>
+          </select>
+          <select class="theme-select" style="width:auto; margin-bottom:0; padding:7px 10px;" v-model="analyticsSelectedMonth" @change="$nextTick(() => renderGraph())">
+            <option v-for="n in 12" :key="n" :value="n" v-text="monthName(n)"></option>
+          </select>
+        </template>
+        <select
+          v-if="analyticsPrecision === 'year'"
+          class="theme-select"
+          style="width:auto; margin-bottom:0; padding:7px 10px;"
+          v-model="analyticsSelectedYear"
+          @change="$nextTick(() => renderGraph())"
+        >
+          <option v-for="y in analyticsAvailableYears" :key="y" :value="y" v-text="y"></option>
+        </select>
+        <button class="btn-icon" @click="analyticsPrev" style="margin-left:auto;" title="Previous">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button class="btn-icon" @click="analyticsNext" title="Next">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+      <!-- Canvas + period total -->
+      <div style="position:relative; cursor:grab;"
+           @mousedown="onGraphDragStart" @mousemove="onGraphDragMove" @mouseup="onGraphDragEnd" @mouseleave="onGraphDragEnd"
+           @touchstart.passive="onGraphTouchStart" @touchmove.passive="onGraphTouchMove" @touchend="onGraphTouchEnd">
+        <canvas ref="analyticsCanvas" style="width:100%; display:block; border-radius:6px;"></canvas>
+        <div style="position:absolute; top:4px; right:4px; font-size:0.72rem; font-weight:700; color:var(--color-primary,#e94560); background:var(--color-secondary,#1a1a1a); padding:2px 7px; border-radius:6px;" v-text="formatMinutes(analyticsPeriodTotal)"></div>
+      </div>
+    </div>
+
+    <!-- Admin: all-users reading history -->
+    <template v-if="isAdmin">
+      <div style="margin-top:16px;">
+        <div style="font-size:0.7rem; font-weight:700; text-transform:uppercase; letter-spacing:2px; color:var(--color-muted,#888); margin-bottom:8px;">Users Reading History</div>
+        <div v-if="adminStatsLoading" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">Loading…</div>
+        <div v-for="u in adminStatsUsers" :key="u.username" class="library-card" style="margin-bottom:6px;">
+          <div @click="toggleAdminStatsUser(u.username)" style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+            <span style="font-size:0.88rem; font-weight:600;" v-text="u.username"></span>
+            <span style="font-size:0.78rem; color:var(--color-muted,#888);" v-text="formatMinutes(u.total_minutes)"></span>
+          </div>
+          <template v-if="adminStatsExpanded === u.username">
+            <div v-if="Object.keys(u.by_library).length === 0" style="font-size:0.78rem; color:var(--color-muted,#888); padding-top:8px;">No reading data yet.</div>
+            <div v-for="(mangas, libName) in u.by_library" :key="libName" style="margin-top:10px;">
+              <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-primary,#e94560); margin-bottom:5px;" v-text="libName"></div>
+              <div v-for="(mins, mangaName) in mangas" :key="mangaName"
+                   style="display:flex; justify-content:space-between; font-size:0.8rem; padding:4px 0; border-bottom:1px solid var(--color-border,#2a2a2a);">
+                <span v-text="mangaName"></span>
+                <span v-text="formatMinutes(mins)" style="color:var(--color-muted,#888); flex-shrink:0; margin-left:8px;"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── USER PERMISSIONS (admin only) ── -->
+  <template v-if="isAdmin">
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">User Permissions</div>
+    <div class="section-hint">
+      Control what each user can access. The <strong>Default</strong> row defines permissions for newly registered users.
+    </div>
+
+    <!-- Search bar -->
+    <div style="margin-bottom:10px;">
+      <input
+        type="text"
+        v-model="userSearch"
+        placeholder="Search users…"
+        style="width:100%; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:8px; padding:9px 12px; color:var(--color-text,#f0f0f0); font-size:0.85rem; font-family:'Segoe UI',sans-serif; outline:none; box-sizing:border-box;"
+      />
+    </div>
+
+    <!-- _default row -->
+    <div class="library-card" v-if="userPermissions['_default']">
+      <div class="library-header" @click="toggleUserExpand('_default')" style="cursor:pointer; margin-bottom:0;">
+        <span style="flex:1; font-size:0.88rem; font-weight:600;">Default User Settings</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             :style="expandedUser === '_default' ? 'transform:rotate(180deg)' : ''">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+      <template v-if="expandedUser === '_default'">
+        <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions['_default'].tags"> Tags (add / remove)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions['_default'].genres"> Genres (add / remove)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions['_default'].description"> Description (edit)
+          </label>
+          <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
+          <label
+            v-for="lib in libraries"
+            :key="lib.id"
+            style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer; padding-left:8px;"
+          >
+            <input
+              type="checkbox"
+              :checked="userPermissions['_default'].libraries[String(lib.id)] !== false"
+              @change="e => { if (!userPermissions['_default'].libraries) userPermissions['_default'].libraries = {}; userPermissions['_default'].libraries[String(lib.id)] = e.target.checked; }"
+          ><span v-text="lib.name"></span>
+          </label>
+        </div>
+        <!-- Blocked Tags -->
+        <div style="margin-top:12px;">
+          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags</div>
+          <div style="position:relative;">
+            <input
+              type="text"
+              v-model="blockedTagInput"
+              @input="onBlockedTagInput('_default')"
+              placeholder="Search tags to block…"
+              style="width:100%; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:8px; padding:8px 12px; color:var(--color-text,#f0f0f0); font-size:0.82rem; font-family:'Segoe UI',sans-serif; outline:none; box-sizing:border-box;"
+            />
+            <div v-if="blockedTagSuggestions.length && expandedUser === '_default'"
+                 style="position:absolute; top:100%; left:0; right:0; background:var(--color-secondary,#1a1a1a); border:1px solid var(--color-border,#333); border-radius:8px; z-index:50; margin-top:4px; overflow:hidden;">
+              <div
+                v-for="t in blockedTagSuggestions" :key="t"
+                @click="addBlockedTag('_default', t)"
+                style="padding:8px 12px; font-size:0.82rem; cursor:pointer;"
+                onmouseover="this.style.background='var(--color-border,#2a2a2a)'" onmouseout="this.style.background=''"
+                v-text="t"
+              ></div>
+            </div>
+          </div>
+          <div v-if="userPermissions['_default'].blocked_tags && userPermissions['_default'].blocked_tags.length" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;">
+            <span
+              v-for="t in userPermissions['_default'].blocked_tags" :key="t"
+              style="display:inline-flex; align-items:center; gap:5px; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:6px; padding:3px 8px; font-size:0.78rem;"
+            >
+              <span v-text="t"></span>
+              <button @click="removeBlockedTag('_default', t)" style="background:none; border:none; cursor:pointer; color:var(--color-muted,#888); font-size:0.9rem; line-height:1; padding:0;" title="Remove">&times;</button>
+            </span>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="width:100%; margin-top:14px;" @click="saveUserPermissions('_default')">Save Default</button>
+      </template>
+    </div>
+
+    <!-- Per-user rows -->
+    <div
+      v-for="user in filteredUsers"
+      :key="user.username"
+      class="library-card"
+      style="margin-top:8px;"
+    >
+      <div class="library-header" @click="toggleUserExpand(user.username)" style="cursor:pointer; margin-bottom:0;">
+        <span style="flex:1; font-size:0.88rem; font-weight:600;" v-text="user.username"></span>
+        <span style="font-size:0.7rem; color:var(--color-muted,#888); margin-right:8px; text-transform:uppercase; letter-spacing:1px;" v-text="user.role"></span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             :style="expandedUser === user.username ? 'transform:rotate(180deg)' : ''">
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </div>
+      <template v-if="expandedUser === user.username && userPermissions[user.username]">
+        <div style="margin-top:12px; display:flex; flex-direction:column; gap:8px;">
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions[user.username].tags"> Tags (add / remove)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions[user.username].genres"> Genres (add / remove)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions[user.username].description"> Description (edit)
+          </label>
+          <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
+          <label
+            v-for="lib in libraries"
+            :key="lib.id"
+            style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer; padding-left:8px;"
+          >
+            <input
+              type="checkbox"
+              :checked="userPermissions[user.username].libraries[String(lib.id)] !== false"
+              @change="e => { if (!userPermissions[user.username].libraries) userPermissions[user.username].libraries = {}; userPermissions[user.username].libraries[String(lib.id)] = e.target.checked; }"
+          ><span v-text="lib.name"></span>
+          </label>
+        </div>
+        <!-- Blocked Tags -->
+        <div style="margin-top:12px;">
+          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags</div>
+          <div style="position:relative;">
+            <input
+              type="text"
+              v-model="blockedTagInput"
+              @input="onBlockedTagInput(user.username)"
+              placeholder="Search tags to block…"
+              style="width:100%; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:8px; padding:8px 12px; color:var(--color-text,#f0f0f0); font-size:0.82rem; font-family:'Segoe UI',sans-serif; outline:none; box-sizing:border-box;"
+            />
+            <div v-if="blockedTagSuggestions.length && expandedUser === user.username"
+                 style="position:absolute; top:100%; left:0; right:0; background:var(--color-secondary,#1a1a1a); border:1px solid var(--color-border,#333); border-radius:8px; z-index:50; margin-top:4px; overflow:hidden;">
+              <div
+                v-for="t in blockedTagSuggestions" :key="t"
+                @click="addBlockedTag(user.username, t)"
+                style="padding:8px 12px; font-size:0.82rem; cursor:pointer;"
+                onmouseover="this.style.background='var(--color-border,#2a2a2a)'" onmouseout="this.style.background=''"
+                v-text="t"
+              ></div>
+            </div>
+          </div>
+          <div v-if="userPermissions[user.username].blocked_tags && userPermissions[user.username].blocked_tags.length" style="display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;">
+            <span
+              v-for="t in userPermissions[user.username].blocked_tags" :key="t"
+              style="display:inline-flex; align-items:center; gap:5px; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:6px; padding:3px 8px; font-size:0.78rem;"
+            >
+              <span v-text="t"></span>
+              <button @click="removeBlockedTag(user.username, t)" style="background:none; border:none; cursor:pointer; color:var(--color-muted,#888); font-size:0.9rem; line-height:1; padding:0;" title="Remove">&times;</button>
+            </span>
+          </div>
+        </div>
+        <button class="btn btn-primary" style="width:100%; margin-top:14px;" @click="saveUserPermissions(user.username)">Save</button>
+      </template>
+    </div>
+
+    <div class="status-msg" :class="permStatus.type" style="text-align:center; margin-top:10px;" v-text="permStatus.msg"></div>
+  </div>
+  </template><!-- /v-if isAdmin: User Permissions -->
+
+</div>
+
+<script src="/static/settings.js?v=2"></script>
+</body>
+</html>

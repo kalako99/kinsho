@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KINSHO — Login</title>
+  <script src="/static/api.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --color-primary:    #e94560;
+      --color-secondary:  #1a1a1a;
+      --color-background: #0f0f0f;
+      --color-text:       #f0f0f0;
+      --color-border:     #2a2a2a;
+      --color-muted:      #666;
+    }
+
+    body {
+      background: var(--color-background);
+      color: var(--color-text);
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .logo {
+      height: 28px;
+      margin-bottom: 32px;
+      user-select: none;
+      display: block;
+    }
+
+    .page {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ── SERVER STEP ── */
+    #server-step {
+      width: 340px;
+      background: var(--color-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 11px;
+      padding: 28px 24px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* ── AUTH STEP ── */
+    #auth-step { display: none; }
+
+    .server-indicator {
+      margin-top: 10px;
+      font-size: 0.72rem;
+      color: var(--color-muted);
+      text-align: center;
+      cursor: pointer;
+      transition: color 0.2s;
+      user-select: none;
+    }
+    .server-indicator:hover { color: var(--color-primary); }
+
+    /* ── FLIP CONTAINER (unchanged) ── */
+    #signup_toggle { display: none; }
+
+    .container {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      perspective: 1000px;
+      width: 340px;
+      height: 380px;
+    }
+
+    .form {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      transform-style: preserve-3d;
+      transition: transform 0.75s cubic-bezier(0.77, 0, 0.175, 1);
+    }
+
+    #signup_toggle:checked + .container .form {
+      transform: rotateY(-180deg);
+    }
+
+    .form_front,
+    .form_back {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 28px 24px;
+      background: var(--color-secondary);
+      border: 1px solid var(--color-border);
+      border-radius: 11px;
+    }
+
+    .form_back {
+      transform: rotateY(-180deg);
+      height: auto;
+      min-height: 100%;
+    }
+
+    .form_details {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      color: var(--color-primary);
+      margin-bottom: 4px;
+    }
+
+    .input {
+      width: 100%;
+      background: var(--color-background);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: var(--color-text);
+      font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .input:focus           { border-color: var(--color-primary); }
+    .input::placeholder    { color: var(--color-muted); }
+    .input:focus::placeholder { opacity: 0; transition: opacity 0.2s; }
+
+    .btn {
+      background: var(--color-primary);
+      border: 1px solid var(--color-primary);
+      border-radius: 20px;
+      padding: 10px 16px;
+      color: #fff;
+      font-size: 0.82rem;
+      font-weight: 600;
+      font-family: 'Segoe UI', sans-serif;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+      width: 100%;
+      margin-top: 2px;
+    }
+    .btn:hover { background: color-mix(in srgb, var(--color-primary) 80%, black 20%); }
+
+    .switch {
+      font-size: 0.75rem;
+      color: var(--color-muted);
+      text-align: center;
+      margin-top: 2px;
+    }
+    .signup_tog {
+      color: var(--color-primary);
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .signup_tog:hover { filter: brightness(1.2); }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <img src="/static/logo.svg" alt="KINSHO" class="logo">
+
+    <!-- ── SERVER STEP ── -->
+    <div id="server-step">
+      <div class="form_details">Server</div>
+      <div style="font-size:0.75rem; color:var(--color-muted); line-height:1.6;">
+        Enter the address of your KINSHO server.
+      </div>
+      <input
+        id="server-url-input"
+        type="text"
+        class="input"
+        placeholder="http://192.168.1.x:8000"
+      />
+      <button class="btn" id="server-connect-btn">Connect</button>
+      <div id="server-status" style="font-size:.75rem; text-align:center; min-height:18px;"></div>
+      <div id="local-skip-server" style="display:none; text-align:center; margin-top:2px;">
+        <span onclick="useLocally()" style="font-size:0.72rem; color:var(--color-muted,#666); cursor:pointer; text-decoration:underline; text-underline-offset:2px;">Continue without account</span>
+      </div>
+    </div>
+
+    <!-- ── AUTH STEP ── -->
+    <div id="auth-step">
+      <input id="signup_toggle" type="checkbox">
+      <div class="container">
+        <div class="form">
+
+          <!-- LOGIN FACE -->
+          <div class="form_front">
+            <div class="form_details">Login</div>
+            <input type="text"     class="input" placeholder="Username" autocomplete="username">
+            <input type="password" class="input" placeholder="Password" autocomplete="current-password">
+            <button class="btn" type="button">Login</button>
+            <span class="switch">
+              Don't have an account?
+              <label for="signup_toggle" class="signup_tog">Sign Up</label>
+            </span>
+          </div>
+
+          <!-- SIGN UP FACE -->
+          <div class="form_back">
+            <div class="form_details">Sign Up</div>
+            <input type="text"     class="input" placeholder="Username"         autocomplete="username">
+            <input type="password" class="input" placeholder="Password"         autocomplete="new-password">
+            <input type="password" class="input" placeholder="Confirm password" autocomplete="new-password">
+            <button class="btn" type="button">Create Account</button>
+            <span class="switch">
+              Already have an account?
+              <label for="signup_toggle" class="signup_tog">Sign In</label>
+            </span>
+          </div>
+
+        </div>
+      </div>
+      <!-- Tap to change server -->
+      <div class="server-indicator" id="server-indicator" title="Change server">
+        ⚙ <span id="server-indicator-url"></span>
+      </div>
+      <div id="local-skip-auth" style="display:none; text-align:center; margin-top:6px;">
+        <span onclick="useLocally()" style="font-size:0.72rem; color:var(--color-muted,#666); cursor:pointer; text-decoration:underline; text-underline-offset:2px;">Continue without account</span>
+      </div>
+    </div>
+  </div>
+
+<script>
+  // ── STEP MANAGEMENT ──────────────────────────────────────────────
+  function showServerStep() {
+    document.getElementById('server-step').style.display = 'flex';
+    document.getElementById('auth-step').style.display   = 'none';
+    const saved = localStorage.getItem('kinsho_server_url') || '';
+    document.getElementById('server-url-input').value = saved;
+  }
+
+  function showAuthStep() {
+    document.getElementById('server-step').style.display = 'none';
+    document.getElementById('auth-step').style.display   = 'block';
+    const url = localStorage.getItem('kinsho_server_url') || '';
+    document.getElementById('server-indicator-url').textContent =
+      url ? url : 'Browser mode';
+  }
+
+  // Show "Continue without account" only in compiled native app
+  const _isNative = !!(window.__TAURI__ || (window.Capacitor && window.Capacitor.isNative));
+  document.getElementById('local-skip-server').style.display = _isNative ? 'block' : 'none';
+  document.getElementById('local-skip-auth').style.display   = _isNative ? 'block' : 'none';
+
+  function useLocally() {
+    localStorage.setItem('kinsho_local_mode', 'true');
+    localStorage.setItem('kinsho_server_url', '');
+    window.API_BASE = '';
+    window.location.href = '/';
+  }
+
+  // On load: show the right step
+  if (window.API_BASE === null) {
+    showServerStep();
+  } else {
+    showAuthStep();
+  }
+
+  // ── SERVER CONNECT ────────────────────────────────────────────────
+  function setServerStatus(msg, isError) {
+    const el = document.getElementById('server-status');
+    el.style.color = isError ? '#e94560' : '#4caf50';
+    el.textContent = msg;
+  }
+
+  async function connectToServer() {
+    let url = document.getElementById('server-url-input').value.trim();
+    if (!url) { setServerStatus('Please enter a server address.', true); return; }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'http://' + url;
+    url = url.replace(/\/$/, '');
+    setServerStatus('Connecting…', false);
+    try {
+      const res = await fetch(url + '/api/auth/me', { credentials: 'include' });
+      // 401 = server reachable but not logged in — that is fine
+      if (res.ok || res.status === 401) {
+        localStorage.setItem('kinsho_server_url', url);
+        window.API_BASE = url;
+        setServerStatus('', false);
+        showAuthStep();
+      } else {
+        setServerStatus('Server returned an unexpected error.', true);
+      }
+    } catch {
+      setServerStatus('Could not reach server. Check the address.', true);
+    }
+  }
+
+  document.getElementById('server-connect-btn')
+    .addEventListener('click', connectToServer);
+  document.getElementById('server-url-input')
+    .addEventListener('keyup', e => { if (e.key === 'Enter') connectToServer(); });
+  document.getElementById('server-indicator')
+    .addEventListener('click', showServerStep);
+
+  // ── STATUS HELPERS ────────────────────────────────────────────────
+  function showStatus(msg, isError) {
+    let el = document.getElementById('status-msg');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'status-msg';
+      el.style.cssText = 'font-size:.75rem;text-align:center;margin-top:6px;min-height:18px;';
+      document.querySelector('.form_front').appendChild(el);
+    }
+    el.style.color = isError ? '#e94560' : '#4caf50';
+    el.textContent = msg;
+  }
+
+  function showStatusBack(msg, isError) {
+    let el = document.getElementById('status-msg-back');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'status-msg-back';
+      el.style.cssText = 'font-size:.75rem;text-align:center;margin-top:6px;min-height:18px;';
+      document.querySelector('.form_back').appendChild(el);
+    }
+    el.style.color = isError ? '#e94560' : '#4caf50';
+    el.textContent = msg;
+  }
+
+  // ── LOGIN ─────────────────────────────────────────────────────────
+  document.querySelector('.form_front .btn').addEventListener('click', async () => {
+    const inputs   = document.querySelectorAll('.form_front .input');
+    const username = inputs[0].value.trim();
+    const password = inputs[1].value;
+    if (!username || !password) { showStatus('Please fill in all fields.', true); return; }
+    try {
+      const res  = await fetch(apiUrl('/api/auth/login'), {
+        method:      'POST',
+        headers:     { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:        JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (data.ok) { window.location.href = '/'; }
+      else         { showStatus(data.error || 'Login failed.', true); }
+    } catch {
+      showStatus('Could not reach server.', true);
+    }
+  });
+
+  // ── REGISTER ─────────────────────────────────────────────────────
+  document.querySelector('.form_back .btn').addEventListener('click', async () => {
+    const inputs   = document.querySelectorAll('.form_back .input');
+    const username = inputs[0].value.trim();
+    const password = inputs[1].value;
+    const confirm  = inputs[2].value;
+    if (!username || !password || !confirm) { showStatusBack('Please fill in all fields.', true); return; }
+    if (password !== confirm) { showStatusBack('Passwords do not match.', true); return; }
+    try {
+      const res  = await fetch(apiUrl('/api/auth/register'), {
+        method:      'POST',
+        headers:     { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body:        JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (data.ok) { window.location.href = '/'; }
+      else         { showStatusBack(data.error || 'Registration failed.', true); }
+    } catch {
+      showStatusBack('Could not reach server.', true);
+    }
+  });
+
+  // ── ENTER KEY ─────────────────────────────────────────────────────
+  document.querySelectorAll('.form_front .input').forEach(i =>
+    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.form_front .btn').click(); })
+  );
+  document.querySelectorAll('.form_back .input').forEach(i =>
+    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.form_back .btn').click(); })
+  );
+</script>
+</body>
+</html>

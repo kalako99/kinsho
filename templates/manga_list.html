@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>KINSHO</title>
+  <script src="/static/api.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--color-background);
+      color: var(--color-text);
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── TOP BAR ── */
+    .topbar {
+      display: flex;
+      align-items: center;
+      padding: 16px 20px;
+      background: color-mix(in srgb, var(--color-secondary) 70%, transparent);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      gap: 8px;
+    }
+    .topbar-title {
+      font-size: 1.4rem;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 4px;
+      margin-left: 14px;
+    }
+    .topbar-title .kin {
+      color: #000;
+      -webkit-text-stroke: 1.5px #fff;
+      paint-order: stroke fill;
+    }
+    .topbar-title .sho {
+      color: #fff;
+      -webkit-text-stroke: 1.5px #000;
+      paint-order: stroke fill;
+    }
+    .settings-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: var(--color-text);
+      transition: background 0.2s;
+    }
+    .settings-btn:hover { background: #2a2a2a; }
+    .settings-btn svg { display: block; }
+
+    /* ── TOP BAR TABS ── */
+    .topbar-tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      flex: 1;
+      min-width: 0;
+      padding: 0 8px;
+    }
+    .topbar-tabs::-webkit-scrollbar { display: none; }
+    .tab-btn {
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 20px;
+      padding: 6px 14px;
+      color: #888;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+      letter-spacing: 0.3px;
+      display: inline-flex;
+      align-items: center;
+      height: 36px;
+    }
+    .tab-btn:hover {
+      background: var(--color-primary);
+      border-color: var(--color-primary);
+      color: #fff;
+    }
+    .tab-btn.active {
+      background: color-mix(in srgb, var(--color-primary) 60%, transparent);
+      border-color: var(--color-primary);
+      color: var(--color-text);
+      font-weight: 600;
+    }
+    .tab-btn.drag-over {
+      border-left: 2px solid var(--color-primary);
+    }
+    .tab-btn.dragging-source {
+      opacity: 0.4;
+    }
+
+    /* ── SECTIONS ── */
+    .section { padding: 12px 20px 4px; margin-bottom: 28px; }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .section-title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--color-primary);
+      text-shadow: 0 1px 6px rgba(0,0,0,0.6);
+    }
+
+
+    /* View More link — appears in section header when scrolled to end */
+    .row-more-btn {
+      display: none;
+      opacity: 0;
+      transform: translateX(8px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .row-more-btn.visible {
+      display: inline-flex;
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .row-more-btn a {
+      color: var(--color-primary);
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+      background: var(--color-secondary);
+      border: 1px solid var(--color-primary);
+      border-radius: 20px;
+      padding: 4px 10px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .row-more-btn a:hover { background: var(--color-primary); color: #fff; }
+
+    /* ── SCROLLABLE ROW ── */
+    .manga-row {
+      display: flex;
+      gap: 12px;
+      overflow-x: auto;
+      padding-bottom: 10px;
+      scrollbar-width: none;
+      cursor: grab;
+      user-select: none;
+    }
+    .manga-row::-webkit-scrollbar { display: none; }
+    .manga-row.dragging { cursor: grabbing; }
+
+    /* ── THUMBNAIL CARD ── */
+    .manga-thumb {
+      flex: 0 0 clamp(100px, 13vw, 160px);
+      width: clamp(100px, 13vw, 160px);
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .manga-thumb:hover { transform: translateY(-4px); }
+    .manga-thumb:hover .cover { box-shadow: 0 8px 24px rgba(0,0,0,0.55); }
+
+    /* Cover image */
+    .manga-thumb .cover {
+      width: 100%;
+      height: calc(clamp(100px, 13vw, 160px) * 3 / 2);
+      background: var(--color-secondary);
+      border-radius: 11px;
+      border: 1px solid #333;
+      overflow: hidden;
+      position: relative;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .manga-thumb .cover img {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 11px;
+      display: block;
+    }
+    .manga-thumb .cover span {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      color: #555;
+      font-size: 0.7rem;
+    }
+    .complete-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: var(--color-primary);
+      color: #fff;
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      pointer-events: none;
+      display: block !important;
+      width: auto !important;
+      height: auto !important;
+    }
+
+    /* Card body */
+    .manga-thumb .card-body { padding: 5px 2px 0; }
+
+    /* Progress bar */
+    .manga-thumb .progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 4px;
+    }
+    .manga-thumb .progress-track {
+      flex: 1;
+      height: 6px;
+      background: #333;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .manga-thumb .progress-pct {
+      font-size: 0.6rem;
+      color: #888;
+      white-space: nowrap;
+      flex-shrink: 0;
+      width: 26px;
+      text-align: right;
+    }
+    .manga-thumb .progress-bar {
+      height: 100%;
+      background: var(--color-primary);
+      border-radius: 2px;
+    }
+
+    /* Title */
+    .manga-thumb .thumb-title {
+      font-size: 0.72rem;
+      color: var(--color-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
+    }
+
+    /* ── GRID SECTION ── */
+    .grid-section { padding: 12px 20px; margin-top: 8px; }
+    .manga-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 13vw, 160px), 1fr));
+      gap: 16px 12px;
+    }
+
+    /* ── SEARCH BAR ── */
+    .container {
+      position: relative;
+      box-sizing: border-box;
+      width: fit-content;
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+
+    .mainbox {
+      box-sizing: border-box;
+      position: relative;
+      width: 230px;
+      height: 50px;
+      display: flex;
+      flex-direction: row-reverse;
+      align-items: center;
+      justify-content: center;
+      border-radius: 160px;
+      background-color: color-mix(in srgb, var(--color-secondary, #1a1a1a) 75%, transparent);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--color-primary, #e94560);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      transition: all 0.3s ease;
+    }
+
+    .checkbox:focus {
+      border: none;
+      outline: none;
+    }
+
+    .checkbox:checked {
+      right: 10px;
+    }
+
+    .checkbox:checked ~ .mainbox {
+      width: 50px;
+    }
+
+    .checkbox:checked ~ .mainbox .search_input {
+      width: 0;
+      height: 0px;
+    }
+
+    .checkbox:checked ~ .mainbox .iconContainer {
+      padding-right: 8px;
+    }
+
+    .checkbox {
+      box-sizing: border-box;
+      width: 30px;
+      height: 30px;
+      position: absolute;
+      right: 17px;
+      top: 10px;
+      z-index: 9;
+      cursor: pointer;
+      appearance: none;
+    }
+
+    .search_input {
+      box-sizing: border-box;
+      height: 100%;
+      width: 170px;
+      background-color: transparent;
+      border: none;
+      outline: none;
+      padding-bottom: 4px;
+      padding-left: 10px;
+      font-size: 1em;
+      color: white;
+      transition: all 0.3s ease;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    }
+
+    .search_input::placeholder {
+      color: rgba(255, 255, 255, 0.776);
+    }
+
+    .iconContainer {
+      box-sizing: border-box;
+      padding-top: 5px;
+      width: fit-content;
+      transition: all 0.3s ease;
+    }
+
+    .search_icon {
+      box-sizing: border-box;
+      fill: var(--color-primary, #e94560);
+      font-size: 1.3em;
+    }
+
+    /* ── BACKGROUND LAYER ── */
+    .bg-layer {
+      position: fixed;
+      inset: 0;
+      z-index: -2;
+      background-size: cover;
+      background-position: center top;
+      background-repeat: no-repeat;
+    }
+    .bg-layer.blurred {
+      filter: blur(12px);
+      transform: scale(1.08);
+      opacity: 0.75;
+    }
+    .bg-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background: linear-gradient(
+        to bottom,
+        rgba(0,0,0,0.65) 0%,
+        rgba(0,0,0,0.35) 30%,
+        rgba(0,0,0,0.35) 70%,
+        rgba(0,0,0,0.65) 100%
+      );
+    }
+    #app {
+      position: relative;
+      z-index: 0;
+    }
+
+    /* ── PAGINATION ── */
+    .pagination {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 6px;
+      padding: 20px 0 8px;
+      flex-wrap: wrap;
+    }
+    .page-btn {
+      background: var(--color-secondary);
+      border: 1px solid var(--color-primary);
+      color: var(--color-text);
+      border-radius: 20px;
+      padding: 5px 14px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      transition: background 0.2s, color 0.2s;
+    }
+    .page-btn:hover:not(:disabled) {
+      background: var(--color-primary);
+      color: #fff;
+    }
+    .page-btn.active {
+      background: var(--color-primary);
+      border: 1px solid var(--color-primary);
+      color: #fff;
+      font-weight: 700;
+    }
+    .page-btn:disabled {
+      opacity: 0.3;
+      cursor: default;
+    }
+
+    .topbar-logo {
+      height: 28px;
+      margin-left: 14px;
+      display: block;
+    }
+
+  </style>
+</head>
+<body>
+<script>
+  window.__LIBRARIES__ = {{ libraries | tojson }};
+  window.__LAST_TAB__  = {{ last_tab | tojson }};
+</script>
+
+<div id="app">
+    <div class="bg-layer" :class="{ blurred: bgIsRaster }" :style="bgLayerStyle"></div>
+    <div class="bg-overlay" v-if="bgLayerStyle"></div>
+
+  <div class="topbar">
+    <button class="settings-btn" @click="openSettings">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+    </button>
+
+    <img src="/static/logo.svg" alt="KINSHO" class="topbar-logo">
+
+    <div class="topbar-tabs" v-if="tabs.length > 1">
+      <button
+        v-for="tab in tabs"
+        :key="tab.id"
+        class="tab-btn"
+        :class="{ active: activeTab === tab.id }"
+        draggable="true"
+        @click="switchTab(tab.id)"
+        @dragstart="onTabDragStart($event, tab.id)"
+        @dragover.prevent="onTabDragOver($event, tab.id)"
+        @dragleave="onTabDragLeave($event)"
+        @drop.prevent="onTabDrop($event, tab.id)"
+        @dragend="onTabDragEnd()"
+        v-text="tab.name"
+      ></button>
+    </div>
+
+    <button class="settings-btn" @click="openSearch" style="margin-left: auto; flex-shrink: 0;">
+      <svg viewBox="0 0 512 512" height="20" width="20" xmlns="http://www.w3.org/2000/svg" fill="currentColor">
+        <path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/>
+      </svg>
+    </button>
+    
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Last Read</span>
+      <div class="row-more-btn" :class="{ visible: atEnd.lastRead }">
+        <a href="#" @click.prevent="goMore('last-read')">View more →</a>
+      </div>
+    </div>
+    <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'lastRead')">
+        <manga-thumb
+          v-for="manga in lastRead"
+          :key="manga.id"
+          :manga="manga"
+          @click="openManga(manga.id)"
+        />
+      </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Random</span>
+      <div class="row-more-btn" :class="{ visible: atEnd.random }">
+        <a href="#" @click.prevent="goMore('random')">View more →</a>
+      </div>
+    </div>
+    <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'random')">
+        <manga-thumb
+          v-for="manga in random"
+          :key="manga.id"
+          :manga="manga"
+          @click="openManga(manga.id)"
+        />
+      </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Favourites</span>
+      <div class="row-more-btn" :class="{ visible: atEnd.favourites }">
+        <a href="#" @click.prevent="goMore('favourites')">View more →</a>
+      </div>
+    </div>
+    <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'favourites')">
+        <manga-thumb
+          v-for="manga in favourites"
+          :key="manga.id"
+          :manga="manga"
+          @click="openManga(manga.id)"
+        />
+      </div>
+  </div>
+
+  <div class="grid-section">
+    <div class="section-header">
+      <span class="section-title">Last Updated</span>
+    </div>
+    <div class="manga-grid">
+      <manga-thumb
+        v-for="manga in lastUpdated"
+        :key="manga.id"
+        :manga="manga"
+        @click="openManga(manga.id)"
+      />
+    </div>
+
+    <!-- Pagination -->
+    <div v-if="lastUpdatedTotalPages > 1" class="pagination">
+      <button
+        class="page-btn"
+        :disabled="lastUpdatedPage === 1"
+        @click="loadLastUpdated(activeTab, lastUpdatedPage - 1)"
+      >&#8592;</button>
+      <button
+        v-for="p in lastUpdatedTotalPages"
+        :key="p"
+        class="page-btn"
+        :class="{ active: p === lastUpdatedPage }"
+        @click="loadLastUpdated(activeTab, p)"
+        v-text="p"
+      ></button>
+      <button
+        class="page-btn"
+        :disabled="lastUpdatedPage === lastUpdatedTotalPages"
+        @click="loadLastUpdated(activeTab, lastUpdatedPage + 1)"
+      >&#8594;</button>
+    </div>
+  </div>
+
+</div>
+
+
+<script src="/static/app.js"></script>
+</body>
+</html>
