@@ -1796,18 +1796,18 @@ def default_theme():
     return {
         "name": "Default",
         "primary":    "#e94560",
-        "secondary":  "#1a1a1a",
-        "background": "#0f0f0f",
+        "secondary":  "#1d1113",
+        "background": "#120b0d",
         "text":       "#f0f0f0",
         "bg_image":   None,
     }
 
 def get_theme_css(username: str = None) -> str:
     BUILTIN_THEMES = [
-        {"name": "Midnight Red",  "primary": "#e94560", "secondary": "#1a1a1a", "background": "#0f0f0f", "text": "#f0f0f0"},
-        {"name": "Ocean Deep",    "primary": "#38bdf8", "secondary": "#0f1f2e", "background": "#071422", "text": "#e2f0fb"},
-        {"name": "Forest Ink",    "primary": "#4ade80", "secondary": "#161f18", "background": "#0d1510", "text": "#e6f4ea"},
-        {"name": "Amber Noir",    "primary": "#f59e0b", "secondary": "#1c1810", "background": "#100e09", "text": "#fdf3dc"},
+        {"name": "Midnight Red",  "primary": "#e94560", "secondary": "#1d1113", "background": "#120b0d", "text": "#f0f0f0"},
+        {"name": "Ocean Deep",    "primary": "#38bdf8", "secondary": "#0d1e2e", "background": "#060f1c", "text": "#e2f0fb"},
+        {"name": "Forest Ink",    "primary": "#4ade80", "secondary": "#141d16", "background": "#0b130d", "text": "#e6f4ea"},
+        {"name": "Amber Noir",    "primary": "#f59e0b", "secondary": "#1c1608", "background": "#0f0c07", "text": "#fdf3dc"},
         {"name": "Royal Dusk",    "primary": "#a78bfa", "secondary": "#1a1228", "background": "#0e0a1a", "text": "#ede9fe"},
     ]
     try:
@@ -1815,9 +1815,13 @@ def get_theme_css(username: str = None) -> str:
         user_data = auth.load_user_data(user)
         active_name = user_data.get("active_theme", "Midnight Red")
         theme = next((t for t in BUILTIN_THEMES if t["name"] == active_name), BUILTIN_THEMES[0])
+        visual_theme = user_data.get("active_visual_theme", "default")
     except Exception:
         theme = BUILTIN_THEMES[0]
+        visual_theme = "default"
+    dt_script = f'<script>document.documentElement.setAttribute("data-theme","{visual_theme}");</script>'
     return (
+        f'<link rel="stylesheet" href="/static/style.css">'
         f"<style>"
         f":root{{"
         f"--color-primary:{theme['primary']};"
@@ -1828,6 +1832,7 @@ def get_theme_css(username: str = None) -> str:
         f"}}"
         f"body{{background:{theme['background']};}}"
         f"</style>"
+        f"{dt_script}"
     )
 
 @app.get("/api/settings")
@@ -1836,13 +1841,14 @@ def get_settings(request: Request):
     data = load_app_data()
     user_data = auth.load_user_data(username)
     return JSONResponse({
-        "data_path":      get_data_path() or "",
-        "libraries":      data.get("libraries", []),
-        "themes":         data.get("themes", [default_theme()]),
-        "active_theme":   user_data.get("active_theme", "Midnight Red"),
-        "favourites":     user_data.get("favourites", []),
-        "backdrop_list":   user_data.get("backdrop_list",   True),
-        "backdrop_detail": user_data.get("backdrop_detail", True),
+        "data_path":           get_data_path() or "",
+        "libraries":           data.get("libraries", []),
+        "themes":              data.get("themes", [default_theme()]),
+        "active_theme":        user_data.get("active_theme", "Midnight Red"),
+        "active_visual_theme": user_data.get("active_visual_theme", "default"),
+        "favourites":          user_data.get("favourites", []),
+        "backdrop_list":        user_data.get("backdrop_list",   True),
+        "backdrop_detail":      user_data.get("backdrop_detail", True),
     })
 
 @app.get("/search")
@@ -1962,6 +1968,18 @@ async def save_themes(request: Request):
     save_app_data(data)
     user_data = auth.load_user_data(username)
     user_data["active_theme"] = body.get("active_theme", "Default")
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/visual-theme")
+async def save_visual_theme(request: Request):
+    username  = auth.get_current_user(request) or "admin"
+    body      = await request.json()
+    user_data = auth.load_user_data(username)
+    vt = body.get("active_visual_theme", "default")
+    if vt not in ("default", "anilist"):
+        vt = "default"
+    user_data["active_visual_theme"] = vt
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 

@@ -207,11 +207,11 @@
   <script>
     (function () {
       const BUILTIN_THEMES = [
-        { name: 'Midnight Red',  primary: '#e94560', secondary: '#1a1a1a', background: '#0f0f0f', text: '#f0f0f0' },
-        { name: 'Ocean Deep',    primary: '#38bdf8', secondary: '#0f1f2e', background: '#071422', text: '#e2f0fb' },
-        { name: 'Forest Ink',    primary: '#4ade80', secondary: '#161f18', background: '#0d1510', text: '#e6f4ea' },
-        { name: 'Amber Noir',    primary: '#f59e0b', secondary: '#1c1810', background: '#100e09', text: '#fdf3dc' },
-        { name: 'Royal Dusk', primary: '#a78bfa', secondary: '#1a1228', background: '#0e0a1a', text: '#ede9fe', bg_image: null },
+        { name: 'Midnight Red',  primary: '#e94560', secondary: '#1d1113', background: '#120b0d', text: '#f0f0f0' },
+        { name: 'Ocean Deep',    primary: '#38bdf8', secondary: '#0d1e2e', background: '#060f1c', text: '#e2f0fb' },
+        { name: 'Forest Ink',    primary: '#4ade80', secondary: '#141d16', background: '#0b130d', text: '#e6f4ea' },
+        { name: 'Amber Noir',    primary: '#f59e0b', secondary: '#1c1608', background: '#0f0c07', text: '#fdf3dc' },
+        { name: 'Royal Dusk',    primary: '#a78bfa', secondary: '#1a1228', background: '#0e0a1a', text: '#ede9fe' },
       ];
       function applyTheme(name) {
         const theme = BUILTIN_THEMES.find(t => t.name === name) || BUILTIN_THEMES[0];
@@ -472,15 +472,40 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">Themes</div>
-    <div class="section-hint">Choose a theme for the app. Your selection is saved automatically.</div>
+    <div class="section-label">Accent Colors</div>
+    <div class="section-hint">Choose the accent color palette. Your selection is saved automatically.</div>
 
     <div class="card">
-      <div class="field-label">Active theme</div>
+      <div class="field-label">Active accent</div>
       <select class="theme-select" v-model="activeTheme" @change="saveThemes">
         <option v-for="t in BUILTIN_THEMES" :key="t.name" :value="t.name" v-text="t.name"></option>
       </select>
       <div class="status-msg" :class="themeStatus.type" v-text="themeStatus.msg"></div>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Theme</div>
+    <div class="section-hint">Choose a visual style. Changes card shapes, spacing, and borders — not colors.</div>
+
+    <div class="card" style="display:flex; flex-direction:column; gap:10px;">
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0;">
+        <input type="radio" v-model="activeVisualTheme" value="default" @change="saveVisualTheme" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
+        <div>
+          <div style="font-size:0.88rem; font-weight:600;">Default</div>
+          <div style="font-size:0.75rem; color:var(--color-muted,#888); margin-top:2px;">Current style — rounded cards, glassmorphism.</div>
+        </div>
+      </label>
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0; border-top:1px solid var(--color-border,#2a2a2a);">
+        <input type="radio" v-model="activeVisualTheme" value="anilist" @change="saveVisualTheme" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
+        <div>
+          <div style="font-size:0.88rem; font-weight:600;">AniList</div>
+          <div style="font-size:0.75rem; color:var(--color-muted,#888); margin-top:2px;">Crisp corners, solid surfaces, cleaner layout.</div>
+        </div>
+      </label>
+      <div class="status-msg" :class="visualThemeStatus.type" v-text="visualThemeStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
   </div>
 

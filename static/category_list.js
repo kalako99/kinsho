@@ -109,11 +109,11 @@ const app = createApp({
 
     async loadTheme() {
       const BUILTIN_THEMES = [
-        { name: 'Midnight Red',  primary: '#e94560', secondary: '#1a1a1a', background: '#0f0f0f', text: '#f0f0f0', bg_image: null },
-        { name: 'Ocean Deep',    primary: '#38bdf8', secondary: '#0f1f2e', background: '#071422', text: '#e2f0fb', bg_image: null },
-        { name: 'Forest Ink',    primary: '#4ade80', secondary: '#161f18', background: '#0d1510', text: '#e6f4ea', bg_image: null },
-        { name: 'Amber Noir',    primary: '#f59e0b', secondary: '#1c1810', background: '#100e09', text: '#fdf3dc', bg_image: null },
-        { name: 'Royal Dusk', primary: '#a78bfa', secondary: '#1a1228', background: '#0e0a1a', text: '#ede9fe' },
+        { name: 'Midnight Red',  primary: '#e94560', secondary: '#1d1113', background: '#120b0d', text: '#f0f0f0' },
+        { name: 'Ocean Deep',    primary: '#38bdf8', secondary: '#0d1e2e', background: '#060f1c', text: '#e2f0fb' },
+        { name: 'Forest Ink',    primary: '#4ade80', secondary: '#141d16', background: '#0b130d', text: '#e6f4ea' },
+        { name: 'Amber Noir',    primary: '#f59e0b', secondary: '#1c1608', background: '#0f0c07', text: '#fdf3dc' },
+        { name: 'Royal Dusk',    primary: '#a78bfa', secondary: '#1a1228', background: '#0e0a1a', text: '#ede9fe' },
       ];
       try {
         const res = await fetch('/api/settings');
