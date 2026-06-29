@@ -20,6 +20,7 @@ import threading
 from fastapi.responses import Response
 from urllib.parse import quote
 import auth
+import metadata_fetch
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -2520,6 +2521,45 @@ async def save_description(library_id: int, manga_id: str, request: Request):
     dims["description"] = description
     save_manga_dims(library_id, manga["name"], dims)
     return JSONResponse({"ok": True})
+
+@app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
+async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
+    username = auth.get_current_user(request) or "admin"
+    perms = auth.resolve_permissions(username)
+    if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
+    query = q.strip() or manga_id
+    try:
+        results = await metadata_fetch.search_anilist_manga(query, per_page=8)
+        scored  = metadata_fetch.score_all_candidates(query, results)
+        return JSONResponse({"candidates": scored})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/manga/{library_id}/{manga_id}/apply-metadata")
+async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request) or "admin"
+    perms = auth.resolve_permissions(username)
+    if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    candidate = body.get("candidate", {})
+    fields = set(body.get("fields", ["description", "genres", "tags"]))
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    try:
+        metadata_fetch.apply_anilist_metadata(
+            library_id, manga["name"], candidate, fields,
+            load_manga_dims, save_manga_dims,
+        )
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/settings/last-tab")
 async def save_last_tab(request: Request):
