@@ -101,48 +101,64 @@
 /* Hide the scroll-triggered "View more" button — rows no longer scroll */
 [data-theme="sharp"] .row-more-btn { display: none !important; }
 
+/* ── DETAIL PAGE: action buttons always wrap vertically in Sharp mode ─────── */
+
+/* Wrap so "Add to Favourites" drops below "Start Reading" when space is tight */
+[data-theme="sharp"] .poster-actions {
+  flex-direction: column;
+  align-items: flex-start;
+}
+[data-theme="sharp"] .poster-actions .btn {
+  width: 100%;
+  justify-content: center;
+}
+
 /* ── DETAIL PAGE: two-column layout (hero left, chapters right sidebar) ───── */
+/* Only activates when viewport is wide enough to comfortably show both columns */
+@media (min-width: 860px) {
 
-/* Only trigger on pages that actually have a chapters-section */
-[data-theme="sharp"] #app:has(.chapters-section) {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  align-items: start;
-}
+  /* Only trigger on pages that actually have a chapters-section */
+  [data-theme="sharp"] #app:has(.chapters-section) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    align-items: start;
+  }
 
-[data-theme="sharp"] #app:has(.chapters-section) > .topbar {
-  grid-column: 1 / -1;
-}
+  [data-theme="sharp"] #app:has(.chapters-section) > .topbar {
+    grid-column: 1 / -1;
+  }
 
-/* Loading / error state messages span full width */
-[data-theme="sharp"] #app:has(.chapters-section) > .state-msg {
-  grid-column: 1 / -1;
-}
+  /* Loading / error state messages span full width */
+  [data-theme="sharp"] #app:has(.chapters-section) > .state-msg {
+    grid-column: 1 / -1;
+  }
 
-/* Hero occupies the left column; no width cap needed — grid handles it */
-[data-theme="sharp"] .hero {
-  min-width: 0;
-  overflow: hidden;
-}
+  /* Hero occupies the left column; no width cap needed — grid handles it */
+  [data-theme="sharp"] .hero {
+    min-width: 0;
+    overflow: hidden;
+  }
 
-/* Shrink the poster slightly since we have less horizontal space */
-[data-theme="sharp"] .poster,
-[data-theme="sharp"] .poster img,
-[data-theme="sharp"] .poster-placeholder {
-  width: 220px;
-  height: 310px;
-}
+  /* Shrink the poster since the left column is narrower */
+  [data-theme="sharp"] .poster,
+  [data-theme="sharp"] .poster img,
+  [data-theme="sharp"] .poster-placeholder {
+    width: 200px;
+    height: 280px;
+  }
 
-/* Chapters sidebar */
-[data-theme="sharp"] .chapters-section {
-  grid-column: 2;
-  position: sticky;
-  top: 56px;
-  max-height: calc(100vh - 56px);
-  overflow-y: auto;
-  border-left: 1px solid rgba(255,255,255,0.07);
-  padding: 20px 14px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-secondary) transparent;
-  background: var(--color-background);
+  /* Chapters sidebar */
+  [data-theme="sharp"] .chapters-section {
+    grid-column: 2;
+    position: sticky;
+    top: 56px;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    border-left: 1px solid rgba(255,255,255,0.07);
+    padding: 20px 14px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-secondary) transparent;
+    background: var(--color-background);
+  }
+
 }
