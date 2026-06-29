@@ -122,6 +122,14 @@
       flex-direction: row;
       gap: 12px;
     }
+    .poster-row2 {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: row;
+      gap: 8px;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
 
     /* ── HEAD (right of poster) ── */
     .hero-head {
@@ -939,6 +947,10 @@
         flex-wrap: wrap;
         justify-content: center;
       }
+      .poster-row2 {
+        flex-wrap: wrap;
+        justify-content: center;
+      }
       .cta-row {
         flex-wrap: wrap;
       }
@@ -1033,14 +1045,15 @@
               </svg>
               {{ manga.is_favourite ? 'Favourited' : 'Add to Favourites' }}
             </button>
+          </div>
+          <div class="poster-row2" v-click-outside="closeListDropdown">
             <button class="btn btn-soft" v-if="canEditDescription || canEditTags || canEditGenres" @click="openMetadataSearch">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
               </svg>
               Fetch Metadata
             </button>
-          </div>
-          <div class="list-dropdown-wrap" style="margin-top:10px;" v-click-outside="closeListDropdown">
+            <div class="list-dropdown-wrap">
             <button class="btn btn-soft" style="width:200px;" @click="toggleListDropdown">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
@@ -1088,6 +1101,7 @@
                 </div>
                 <div v-if="filteredLists.length === 0 && !listSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No lists yet.</div>
               </div>
+            </div>
             </div>
           </div>
 

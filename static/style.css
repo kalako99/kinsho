@@ -110,6 +110,16 @@
 [data-theme="sharp"] .poster-actions .btn {
   justify-content: center;
 }
+[data-theme="sharp"] .poster-row2 {
+  flex-direction: column;
+  align-items: stretch;
+}
+[data-theme="sharp"] .poster-row2 .btn {
+  justify-content: center;
+}
+[data-theme="sharp"] .poster-row2 .list-dropdown-wrap {
+  width: auto;
+}
 
 /* ── DETAIL PAGE: two-column layout — sidebar always on the right ─────────── */
 
