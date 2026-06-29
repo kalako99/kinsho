@@ -937,8 +937,8 @@
 
     <!-- HERO -->
     <div class="hero">
-      <div class="hero-bg" :style="manga.cover_url_large ? `background-image:url('${manga.cover_url_large}')` : ''"></div>
-      <div class="hero-overlay"></div>
+      <div v-if="showBackdrop" class="hero-bg" :style="manga.cover_url_large ? `background-image:url('${manga.cover_url_large}')` : ''"></div>
+      <div v-if="showBackdrop" class="hero-overlay"></div>
       <div class="hero-inner">
 
         <!-- POSTER -->
@@ -1293,6 +1293,7 @@ createApp({
       mangaId:              window.__MANGA_ID__,
       manga:                null,
       loading:              true,
+      showBackdrop:         true,
       isAdmin:              false,
       readingTimeMinutes:   null,
       canEditTags:          false,
@@ -1361,6 +1362,9 @@ createApp({
   },
 
   async mounted() {
+    fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
+      this.showBackdrop = d.backdrop_detail !== false;
+    }).catch(() => {});
     await this.loadManga();
     await Promise.all([
       this.loadAdminStatus(),

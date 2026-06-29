@@ -484,6 +484,26 @@
     </div>
   </div>
 
+  <!-- ── BACKDROP TOGGLES ── -->
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Display</div>
+    <div class="section-hint">Toggle the blurred cover backdrop on each page.</div>
+
+    <div class="card" style="display:flex; flex-direction:column; gap:14px;">
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Backdrop on Library page</span>
+        <input type="checkbox" v-model="backdropList" @change="saveBackdrop('list')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Backdrop on Manga / Volume detail page</span>
+        <input type="checkbox" v-model="backdropDetail" @change="saveBackdrop('detail')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <div class="status-msg" :class="backdropStatus.type" v-text="backdropStatus.msg" style="min-height:0; margin:0;"></div>
+    </div>
+  </div>
+
   <!-- ── ANALYTICS ── -->
   <hr class="divider">
   <div class="settings-section">

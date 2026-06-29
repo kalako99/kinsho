@@ -1836,11 +1836,13 @@ def get_settings(request: Request):
     data = load_app_data()
     user_data = auth.load_user_data(username)
     return JSONResponse({
-        "data_path":    get_data_path() or "",
-        "libraries":    data.get("libraries", []),
-        "themes":       data.get("themes", [default_theme()]),
-        "active_theme": user_data.get("active_theme", "Midnight Red"),
-        "favourites":   user_data.get("favourites", []),
+        "data_path":      get_data_path() or "",
+        "libraries":      data.get("libraries", []),
+        "themes":         data.get("themes", [default_theme()]),
+        "active_theme":   user_data.get("active_theme", "Midnight Red"),
+        "favourites":     user_data.get("favourites", []),
+        "backdrop_list":   user_data.get("backdrop_list",   True),
+        "backdrop_detail": user_data.get("backdrop_detail", True),
     })
 
 @app.get("/search")
@@ -1960,6 +1962,18 @@ async def save_themes(request: Request):
     save_app_data(data)
     user_data = auth.load_user_data(username)
     user_data["active_theme"] = body.get("active_theme", "Default")
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/backdrop")
+async def save_backdrop(request: Request):
+    username  = auth.get_current_user(request) or "admin"
+    body      = await request.json()
+    user_data = auth.load_user_data(username)
+    if "backdrop_list" in body:
+        user_data["backdrop_list"]   = bool(body["backdrop_list"])
+    if "backdrop_detail" in body:
+        user_data["backdrop_detail"] = bool(body["backdrop_detail"])
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 

@@ -181,7 +181,8 @@ const app = createApp({
           )[0];
         }
 
-        if (bgManga && bgManga.coverLarge) {
+        const backdropEnabled = settings.backdrop_list !== false;
+        if (backdropEnabled && bgManga && bgManga.coverLarge) {
           this.bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
           this.bgIsRaster = true;
         } else {

@@ -29,6 +29,11 @@ createApp({
       newPassword:     '',
       passwordStatus:  { msg: '', type: '' },
 
+      // ── BACKDROP ──
+      backdropList:   true,
+      backdropDetail: true,
+      backdropStatus: { msg: '', type: '' },
+
       // ── THEMES ──
       BUILTIN_THEMES: [
         { name: 'Midnight Red',  primary: '#e94560', secondary: '#1a1a1a', background: '#0f0f0f', text: '#f0f0f0', bg_image: null },
@@ -246,6 +251,8 @@ createApp({
         if (!this.BUILTIN_THEMES.find(t => t.name === this.activeTheme)) {
           this.activeTheme = 'Midnight Red';
         }
+        this.backdropList   = data.backdrop_list   !== false;
+        this.backdropDetail = data.backdrop_detail !== false;
       } catch (e) {
         console.error('Failed to load settings:', e);
       }
@@ -411,6 +418,26 @@ createApp({
         this.themeStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.themeStatus = { msg: '', type: '' }; }, 3000);
+    },
+
+    async saveBackdrop(key) {
+      try {
+        const body = key === 'list'
+          ? { backdrop_list:   this.backdropList }
+          : { backdrop_detail: this.backdropDetail };
+        const res  = await fetch(apiUrl('/api/settings/backdrop'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body),
+        });
+        const data = await res.json();
+        this.backdropStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.backdropStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.backdropStatus = { msg: '', type: '' }; }, 2000);
     },
 
     // ── ANALYTICS ──
