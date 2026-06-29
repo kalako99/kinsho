@@ -1,56 +1,24 @@
-/* ── ANILIST VISUAL THEME ──────────────────────────────────────────────────────
-   Applied when <html data-theme="anilist">.
-   Changes shapes, spacing, shadows, and typography — never colors.
+/* ── SHARP VISUAL THEME ───────────────────────────────────────────────────────
+   Applied when <html data-theme="sharp">.
+   Changes shapes, spacing, layout disposition, and shadows — never colors.
    Colors always come from the active accent color (CSS custom properties).
    ──────────────────────────────────────────────────────────────────────────── */
 
-/* Cover cards: crisp corners, no border, stronger shadow */
-[data-theme="anilist"] .manga-thumb .cover {
+/* ── SHAPES: crisp corners everywhere ────────────────────────────────────── */
+
+[data-theme="sharp"] .manga-thumb .cover,
+[data-theme="sharp"] .manga-thumb .cover img {
   border-radius: 4px;
   border: none;
   box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
 
-/* Hover: scale-lift instead of translate-only */
-[data-theme="anilist"] .manga-thumb {
-  transition: transform 0.2s, opacity 0.2s;
-}
-[data-theme="anilist"] .manga-thumb:hover {
-  transform: translateY(-5px) scale(1.03);
-}
-[data-theme="anilist"] .manga-thumb:hover .cover {
-  box-shadow: 0 14px 30px rgba(0,0,0,0.65);
-}
+[data-theme="sharp"] .tab-btn { border-radius: 4px; }
 
-/* Section headings: slightly less aggressive uppercase */
-[data-theme="anilist"] .section-title {
-  font-size: 1rem;
-  letter-spacing: 0.5px;
-  font-weight: 900;
-}
+[data-theme="sharp"] .poster img,
+[data-theme="sharp"] .poster-placeholder { border-radius: 4px; border: none; }
 
-/* Topbar: solid, no glassmorphism */
-[data-theme="anilist"] .topbar {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-  background: var(--color-secondary);
-  box-shadow: 0 1px 0 rgba(255,255,255,0.06);
-}
-
-/* Tab buttons: rectangular */
-[data-theme="anilist"] .tab-btn {
-  border-radius: 4px;
-}
-
-/* Detail page: poster/cover */
-[data-theme="anilist"] .poster img,
-[data-theme="anilist"] .poster-placeholder {
-  border-radius: 4px;
-  border: none;
-}
-
-/* Chapter/volume list rows */
-[data-theme="anilist"] .mchap-item {
+[data-theme="sharp"] .mchap-item {
   border-radius: 4px;
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -58,69 +26,123 @@
   box-shadow: none;
   border: 1px solid rgba(255,255,255,0.05);
 }
-[data-theme="anilist"] .mchap-item:hover {
+[data-theme="sharp"] .mchap-item:hover {
   background: color-mix(in srgb, var(--color-secondary) 75%, white 25%);
-  box-shadow: none;
 }
 
-/* CTA buttons: tighter corners */
-[data-theme="anilist"] .btn {
-  border-radius: 4px;
-  letter-spacing: 0.2px;
+[data-theme="sharp"] .btn { border-radius: 4px; }
+[data-theme="sharp"] .sort-btn { border-radius: 4px; }
+[data-theme="sharp"] .page-btn { border-radius: 4px; }
+
+[data-theme="sharp"] .tag-pill,
+[data-theme="sharp"] .meta-badge,
+[data-theme="sharp"] .status-badge,
+[data-theme="sharp"] .complete-badge { border-radius: 4px; }
+
+[data-theme="sharp"] .popup { border-radius: 6px; }
+[data-theme="sharp"] .popup-btn { border-radius: 4px; }
+[data-theme="sharp"] .cover-option,
+[data-theme="sharp"] .cover-option img { border-radius: 4px; }
+[data-theme="sharp"] .card,
+[data-theme="sharp"] .library-card { border-radius: 6px; }
+[data-theme="sharp"] input[type="text"],
+[data-theme="sharp"] input[type="password"],
+[data-theme="sharp"] .theme-select { border-radius: 4px; }
+[data-theme="sharp"] .list-dropdown-menu { border-radius: 6px; }
+[data-theme="sharp"] .suggestion-pill { border-radius: 4px; }
+[data-theme="sharp"] .btn-tag { border-radius: 4px; }
+
+/* ── TOPBAR: solid, no glassmorphism ──────────────────────────────────────── */
+
+[data-theme="sharp"] .topbar {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--color-secondary);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06);
 }
 
-/* Sort buttons */
-[data-theme="anilist"] .sort-btn {
-  border-radius: 4px;
+/* Search pill → rectangular */
+[data-theme="sharp"] .mainbox { border-radius: 4px; }
+
+/* ── HOVER: scale-lift on cover cards ────────────────────────────────────── */
+
+[data-theme="sharp"] .manga-thumb { transition: transform 0.18s, opacity 0.18s; }
+[data-theme="sharp"] .manga-thumb:hover { transform: translateY(-5px) scale(1.03); }
+[data-theme="sharp"] .manga-thumb:hover .cover { box-shadow: 0 14px 30px rgba(0,0,0,0.65); }
+
+/* ── SECTION TITLES: accent-color left border stripe ─────────────────────── */
+
+[data-theme="sharp"] .section-title {
+  border-left: 3px solid var(--color-primary);
+  padding-left: 10px;
+  text-shadow: none;
+  letter-spacing: 0.6px;
 }
 
-/* Tag pills and badges */
-[data-theme="anilist"] .tag-pill,
-[data-theme="anilist"] .meta-badge,
-[data-theme="anilist"] .status-badge,
-[data-theme="anilist"] .complete-badge,
-[data-theme="anilist"] .page-btn {
-  border-radius: 4px;
+/* ── MAIN LIST: convert horizontal scroll rows to wrapping grids ──────────── */
+
+[data-theme="sharp"] .manga-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 11vw, 145px), 1fr));
+  gap: 16px 12px;
+  overflow: visible;
+  cursor: default;
+  user-select: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none; /* keep, harmless */
 }
 
-/* Popup dialogs */
-[data-theme="anilist"] .popup {
-  border-radius: 6px;
-}
-[data-theme="anilist"] .popup-btn {
-  border-radius: 4px;
+/* Cards inside the converted rows size naturally in grid */
+[data-theme="sharp"] .manga-row .manga-thumb {
+  flex: none;
+  width: auto;
 }
 
-/* Cover picker overlay items */
-[data-theme="anilist"] .cover-option,
-[data-theme="anilist"] .cover-option img {
-  border-radius: 4px;
+/* Hide the scroll-triggered "View more" button — rows no longer scroll */
+[data-theme="sharp"] .row-more-btn { display: none !important; }
+
+/* ── DETAIL PAGE: two-column layout (hero left, chapters right sidebar) ───── */
+
+/* Only trigger on pages that actually have a chapters-section */
+[data-theme="sharp"] #app:has(.chapters-section) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  align-items: start;
 }
 
-/* Settings cards */
-[data-theme="anilist"] .card,
-[data-theme="anilist"] .library-card {
-  border-radius: 6px;
+[data-theme="sharp"] #app:has(.chapters-section) > .topbar {
+  grid-column: 1 / -1;
 }
 
-/* Inputs */
-[data-theme="anilist"] input[type="text"],
-[data-theme="anilist"] input[type="password"],
-[data-theme="anilist"] .theme-select {
-  border-radius: 4px;
+/* Loading / error state messages span full width */
+[data-theme="sharp"] #app:has(.chapters-section) > .state-msg {
+  grid-column: 1 / -1;
 }
 
-/* List dropdown */
-[data-theme="anilist"] .list-dropdown-menu {
-  border-radius: 6px;
+/* Hero occupies the left column; no width cap needed — grid handles it */
+[data-theme="sharp"] .hero {
+  min-width: 0;
+  overflow: hidden;
 }
 
-/* Suggestion pills */
-[data-theme="anilist"] .suggestion-pill {
-  border-radius: 4px;
+/* Shrink the poster slightly since we have less horizontal space */
+[data-theme="sharp"] .poster,
+[data-theme="sharp"] .poster img,
+[data-theme="sharp"] .poster-placeholder {
+  width: 220px;
+  height: 310px;
 }
 
-/* btn-tag (add/delete tag buttons) */
-[data-theme="anilist"] .btn-tag {
-  border-radius: 4px;
+/* Chapters sidebar */
+[data-theme="sharp"] .chapters-section {
+  grid-column: 2;
+  position: sticky;
+  top: 56px;
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
+  border-left: 1px solid rgba(255,255,255,0.07);
+  padding: 20px 14px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-secondary) transparent;
+  background: var(--color-background);
 }

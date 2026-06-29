@@ -1977,7 +1977,7 @@ async def save_visual_theme(request: Request):
     body      = await request.json()
     user_data = auth.load_user_data(username)
     vt = body.get("active_visual_theme", "default")
-    if vt not in ("default", "anilist"):
+    if vt not in ("default", "sharp"):
         vt = "default"
     user_data["active_visual_theme"] = vt
     auth.save_user_data(username, user_data)
