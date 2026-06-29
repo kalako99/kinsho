@@ -2561,6 +2561,47 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@app.post("/api/libraries/{library_id}/scan-metadata")
+async def scan_library_metadata(request: Request, library_id: int):
+    username = auth.get_current_user(request) or "admin"
+    if not auth.resolve_permissions(username).get("is_admin"):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    mangas = manga_data.get("mangas", [])
+    manga_formats = set(metadata_fetch.ANILIST_MANGA_FORMATS)
+    auto_matched = skipped = no_match = errors = 0
+    for manga in mangas:
+        dims = load_manga_dims(library_id, manga["name"])
+        if dims.get("metadata_mtime"):
+            skipped += 1
+            continue
+        try:
+            results = await metadata_fetch.search_anilist_manga(manga["name"], per_page=8)
+            manga_type = [r for r in results if (r.get("format") or "").upper() in manga_formats]
+            if len(manga_type) == 1:
+                scored = metadata_fetch.score_all_candidates(manga["name"], manga_type)
+                metadata_fetch.apply_anilist_metadata(
+                    library_id, manga["name"], scored[0],
+                    {"description", "genres", "tags"},
+                    load_manga_dims, save_manga_dims,
+                )
+                auto_matched += 1
+            else:
+                no_match += 1
+            await asyncio.sleep(0.7)
+        except Exception:
+            errors += 1
+    return JSONResponse({
+        "auto_matched": auto_matched,
+        "skipped": skipped,
+        "no_match": no_match,
+        "errors": errors,
+        "total": len(mangas),
+    })
+
 @app.post("/api/settings/last-tab")
 async def save_last_tab(request: Request):
     username = auth.get_current_user(request) or "admin"

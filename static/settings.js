@@ -22,6 +22,7 @@ createApp({
       libStatus: { msg: '', type: '' },
       nextId: 1,
       scanStatus: {},
+      metaScanStatus: {},
 
       // ── USERNAME ──
       username:        '',
@@ -366,6 +367,26 @@ createApp({
             this.pollScanStatus(lib.id);
         } catch (e) {
             this.scanStatus = { ...this.scanStatus, [lib.id]: { msg: 'Scan failed.', type: 'err' } };
+        }
+    },
+
+    // ── BULK METADATA SCAN FOR ONE LIBRARY ──
+    async scanLibraryMetadata(lib) {
+        this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Scanning…', type: 'scanning' } };
+        try {
+            const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/scan-metadata`), { method: 'POST' });
+            const data = await res.json();
+            if (data.error) {
+                this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: data.error, type: 'err' } };
+            } else {
+                const parts = [`✓ ${data.auto_matched} matched`];
+                if (data.no_match  > 0) parts.push(`${data.no_match} unresolved`);
+                if (data.skipped   > 0) parts.push(`${data.skipped} skipped`);
+                if (data.errors    > 0) parts.push(`${data.errors} errors`);
+                this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: parts.join(' · '), type: 'ok' } };
+            }
+        } catch (e) {
+            this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Scan failed.', type: 'err' } };
         }
     },
 

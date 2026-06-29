@@ -545,7 +545,7 @@
         </svg>
         Add path
       </button>
-      <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px;">
+      <div style="margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
         <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
           ↺ Reload scan
         </button>
@@ -554,6 +554,20 @@
           style="margin: 0;"
           :class="scanStatus[lib.id] ? scanStatus[lib.id].type : ''"
           v-text="scanStatus[lib.id] ? scanStatus[lib.id].msg : ''"
+        ></span>
+      </div>
+      <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <button
+          class="btn"
+          @click="scanLibraryMetadata(lib)"
+          :disabled="metaScanStatus[lib.id] && metaScanStatus[lib.id].type === 'scanning'"
+          style="font-size:0.78rem; padding: 6px 12px;"
+        >⬇ Fetch metadata</button>
+        <span
+          class="status-msg"
+          style="margin: 0;"
+          :class="metaScanStatus[lib.id] ? metaScanStatus[lib.id].type : ''"
+          v-text="metaScanStatus[lib.id] ? metaScanStatus[lib.id].msg : ''"
         ></span>
       </div>
     </div>
@@ -584,7 +598,7 @@
       </div>
       <div v-for="lib in visibleLibraries" :key="lib.id" class="card">
         <div class="field-label" v-text="lib.name"></div>
-        <div style="display:flex; align-items:center; gap:10px; margin-top:6px;">
+        <div style="display:flex; align-items:center; gap:10px; margin-top:6px; flex-wrap:wrap;">
           <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
             ↺ Reload scan
           </button>
