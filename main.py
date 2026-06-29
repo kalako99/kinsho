@@ -1810,16 +1810,22 @@ def get_theme_css(username: str = None) -> str:
         {"name": "Amber Noir",    "primary": "#f59e0b", "secondary": "#1c1608", "background": "#0f0c07", "text": "#fdf3dc"},
         {"name": "Royal Dusk",    "primary": "#a78bfa", "secondary": "#1a1228", "background": "#0e0a1a", "text": "#ede9fe"},
     ]
+    custom_css = ""
     try:
         user = username or "admin"
         user_data = auth.load_user_data(user)
         active_name = user_data.get("active_theme", "Midnight Red")
         theme = next((t for t in BUILTIN_THEMES if t["name"] == active_name), BUILTIN_THEMES[0])
         visual_theme = user_data.get("active_visual_theme", "default")
+        if visual_theme == "custom":
+            cname = user_data.get("active_custom_theme_name", "")
+            custom_css = user_data.get("custom_themes", {}).get(cname, "")
     except Exception:
         theme = BUILTIN_THEMES[0]
         visual_theme = "default"
-    dt_script = f'<script>document.documentElement.setAttribute("data-theme","{visual_theme}");</script>'
+    dt_val = visual_theme if visual_theme in ("default", "sharp", "custom") else "default"
+    dt_script = f'<script>document.documentElement.setAttribute("data-theme","{dt_val}");</script>'
+    custom_block = f'<style id="custom-theme-style">{custom_css}</style>' if custom_css else ""
     return (
         f'<link rel="stylesheet" href="/static/style.css">'
         f"<style>"
@@ -1833,6 +1839,7 @@ def get_theme_css(username: str = None) -> str:
         f"body{{background:{theme['background']};}}"
         f"</style>"
         f"{dt_script}"
+        f"{custom_block}"
     )
 
 @app.get("/api/settings")
@@ -1845,10 +1852,12 @@ def get_settings(request: Request):
         "libraries":           data.get("libraries", []),
         "themes":              data.get("themes", [default_theme()]),
         "active_theme":        user_data.get("active_theme", "Midnight Red"),
-        "active_visual_theme": user_data.get("active_visual_theme", "default"),
-        "favourites":          user_data.get("favourites", []),
-        "backdrop_list":        user_data.get("backdrop_list",   True),
-        "backdrop_detail":      user_data.get("backdrop_detail", True),
+        "active_visual_theme":      user_data.get("active_visual_theme", "default"),
+        "active_custom_theme_name": user_data.get("active_custom_theme_name", ""),
+        "custom_themes":            user_data.get("custom_themes", {}),
+        "favourites":               user_data.get("favourites", []),
+        "backdrop_list":            user_data.get("backdrop_list",   True),
+        "backdrop_detail":          user_data.get("backdrop_detail", True),
     })
 
 @app.get("/search")
@@ -1977,9 +1986,38 @@ async def save_visual_theme(request: Request):
     body      = await request.json()
     user_data = auth.load_user_data(username)
     vt = body.get("active_visual_theme", "default")
-    if vt not in ("default", "sharp"):
+    if vt not in ("default", "sharp", "custom"):
         vt = "default"
     user_data["active_visual_theme"] = vt
+    if vt == "custom" and "active_custom_theme_name" in body:
+        user_data["active_custom_theme_name"] = body["active_custom_theme_name"]
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/custom-themes")
+async def save_custom_theme(request: Request):
+    username  = auth.get_current_user(request) or "admin"
+    body      = await request.json()
+    name      = body.get("name", "").strip()
+    css       = body.get("css", "")
+    if not name:
+        return JSONResponse({"ok": False, "error": "Name required"}, status_code=400)
+    user_data = auth.load_user_data(username)
+    if "custom_themes" not in user_data:
+        user_data["custom_themes"] = {}
+    user_data["custom_themes"][name] = css
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.delete("/api/settings/custom-themes/{name}")
+async def delete_custom_theme(name: str, request: Request):
+    username  = auth.get_current_user(request) or "admin"
+    user_data = auth.load_user_data(username)
+    themes    = user_data.get("custom_themes", {})
+    themes.pop(name, None)
+    user_data["custom_themes"] = themes
+    if user_data.get("active_custom_theme_name") == name:
+        user_data["active_custom_theme_name"] = ""
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 

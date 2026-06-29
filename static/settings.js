@@ -49,6 +49,26 @@ createApp({
       activeVisualTheme: 'default',
       visualThemeStatus: { msg: '', type: '' },
 
+      // ── CUSTOM CSS EDITOR ──
+      showCssEditor:         false,
+      cssEditorName:         '',
+      cssEditorContent:      '',
+      customThemes:          {},
+      activeCustomThemeName: '',
+      CSS_EDITOR_DEFAULT_TEMPLATE: [
+        '/* ---- Page: Home ---- */',
+        '',
+        '',
+        '/* ---- Page: Manga Detail & Volume Detail ---- */',
+        '',
+        '',
+        '/* ---- Page: Chapter Reader ---- */',
+        '',
+        '',
+        '/* ---- Global ---- */',
+        '',
+      ].join('\n'),
+
       // ── ANALYTICS ──
       analyticsLoading:       false,
       analyticsSessions:      [],
@@ -255,9 +275,14 @@ createApp({
         if (!this.BUILTIN_THEMES.find(t => t.name === this.activeTheme)) {
           this.activeTheme = 'Midnight Red';
         }
-        this.backdropList       = data.backdrop_list        !== false;
-        this.backdropDetail     = data.backdrop_detail      !== false;
-        this.activeVisualTheme  = data.active_visual_theme  || 'default';
+        this.backdropList           = data.backdrop_list            !== false;
+        this.backdropDetail         = data.backdrop_detail          !== false;
+        this.activeVisualTheme      = data.active_visual_theme      || 'default';
+        this.activeCustomThemeName  = data.active_custom_theme_name || '';
+        this.customThemes           = data.custom_themes            || {};
+        if (this.activeVisualTheme === 'custom' && this.activeCustomThemeName && this.customThemes[this.activeCustomThemeName]) {
+          this.applyCustomThemeLocally(this.customThemes[this.activeCustomThemeName]);
+        }
       } catch (e) {
         console.error('Failed to load settings:', e);
       }
@@ -447,6 +472,10 @@ createApp({
 
     async saveVisualTheme() {
       document.documentElement.setAttribute('data-theme', this.activeVisualTheme);
+      // Remove any custom style when switching away from custom
+      if (this.activeVisualTheme !== 'custom') {
+        document.getElementById('custom-theme-style')?.remove();
+      }
       try {
         const res  = await fetch(apiUrl('/api/settings/visual-theme'), {
           method:  'POST',
@@ -461,6 +490,99 @@ createApp({
         this.visualThemeStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.visualThemeStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    onCustomThemeClick() {
+      // Always open the editor when Custom radio is clicked
+      this.activeVisualTheme = 'custom';
+      this.openCssEditor();
+    },
+
+    openCssEditor() {
+      // Pre-load active custom theme if one exists, otherwise start blank
+      if (this.activeCustomThemeName && this.customThemes[this.activeCustomThemeName]) {
+        this.cssEditorName    = this.activeCustomThemeName;
+        this.cssEditorContent = this.customThemes[this.activeCustomThemeName];
+      } else {
+        this.cssEditorName    = '';
+        this.cssEditorContent = this.CSS_EDITOR_DEFAULT_TEMPLATE;
+      }
+      this.showCssEditor = true;
+    },
+
+    loadCustomTheme(name) {
+      this.cssEditorName    = name;
+      this.cssEditorContent = this.customThemes[name] || '';
+    },
+
+    async saveCssTheme() {
+      const name = this.cssEditorName.trim();
+      if (!name) return;
+      const css = this.cssEditorContent;
+      try {
+        await fetch(apiUrl('/api/settings/custom-themes'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ name, css }),
+        });
+        this.customThemes = { ...this.customThemes, [name]: css };
+        this.activeCustomThemeName = name;
+        this.activeVisualTheme     = 'custom';
+        this.applyCustomThemeLocally(css);
+        await fetch(apiUrl('/api/settings/visual-theme'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ active_visual_theme: 'custom', active_custom_theme_name: name }),
+        });
+        this.showCssEditor = false;
+      } catch (e) {
+        console.error('Failed to save custom theme:', e);
+      }
+    },
+
+    async deleteCssTheme(name) {
+      await fetch(apiUrl(`/api/settings/custom-themes/${encodeURIComponent(name)}`), { method: 'DELETE' });
+      const updated = { ...this.customThemes };
+      delete updated[name];
+      this.customThemes = updated;
+      if (this.activeCustomThemeName === name) {
+        this.activeCustomThemeName = '';
+        this.activeVisualTheme     = 'default';
+        document.documentElement.setAttribute('data-theme', 'default');
+        document.getElementById('custom-theme-style')?.remove();
+        await fetch(apiUrl('/api/settings/visual-theme'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ active_visual_theme: 'default' }),
+        });
+      }
+      // Reset editor to empty
+      this.cssEditorName    = '';
+      this.cssEditorContent = this.CSS_EDITOR_DEFAULT_TEMPLATE;
+    },
+
+    applyCustomThemeLocally(css) {
+      let el = document.getElementById('custom-theme-style');
+      if (!el) {
+        el = document.createElement('style');
+        el.id = 'custom-theme-style';
+        document.head.appendChild(el);
+      }
+      el.textContent = css;
+      document.documentElement.setAttribute('data-theme', 'custom');
+    },
+
+    async resetEditorToDefault() {
+      this.cssEditorContent = this.CSS_EDITOR_DEFAULT_TEMPLATE;
+    },
+
+    async resetEditorToSharp() {
+      try {
+        const res = await fetch(apiUrl('/static/style.css'));
+        this.cssEditorContent = await res.text();
+      } catch (e) {
+        console.error('Failed to fetch Sharp CSS:', e);
+      }
     },
 
     // ── ANALYTICS ──
