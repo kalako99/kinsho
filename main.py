@@ -20,6 +20,7 @@ import threading
 from fastapi.responses import Response
 from urllib.parse import quote, urlparse
 import auth
+import httpx
 import metadata_fetch
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -1053,25 +1054,33 @@ def _image_width(img_bytes: bytes) -> int:
     except Exception:
         return 0
 
-async def fetch_and_set_anilist_cover(library_id: int, manga: dict, candidate: dict) -> bool:
+async def fetch_and_set_cover(
+    library_id: int,
+    manga: dict,
+    anilist_candidate: dict | None,
+    mangadex_candidate: dict | None,
+) -> bool:
     """
-    Fetch a cover image for the matched candidate, process it into the manga's
+    Fetch a cover image for the matched manga, process it into the manga's
     covers directory (small + large), and set it as the manga's default cover
     (manga["cover"]). User-selected covers still take priority since the
     per-user override is checked before manga["cover"] when serving.
 
     Source selection: AniList's cover is used by default, but if it's narrower
-    than FETCHED_COVER_TARGET_WIDTH we look up the same title on MangaDex and
-    use its original-resolution cover instead when it's actually larger.
+    than FETCHED_COVER_TARGET_WIDTH the MangaDex candidate's original-resolution
+    cover is used instead when it's actually larger. Either candidate may be
+    None (e.g. MangaDex-only match, or no MangaDex fallback found).
 
     Mutates manga["cover"] in place; the caller is responsible for persisting
     the change via save_app_data. Returns True if a cover was set.
     """
-    anilist_url = (
-        candidate.get("cover_url_extra_large")
-        or candidate.get("cover_url_large")
-        or candidate.get("cover_url_medium")
-    )
+    anilist_url = None
+    if anilist_candidate:
+        anilist_url = (
+            anilist_candidate.get("cover_url_extra_large")
+            or anilist_candidate.get("cover_url_large")
+            or anilist_candidate.get("cover_url_medium")
+        )
 
     chosen_bytes = None
     chosen_url = None
@@ -1084,22 +1093,16 @@ async def fetch_and_set_anilist_cover(library_id: int, manga: dict, candidate: d
         except Exception:
             chosen_bytes = None
 
-    if width < FETCHED_COVER_TARGET_WIDTH:
-        title = (
-            candidate.get("title_english")
-            or candidate.get("title_romaji")
-            or candidate.get("title_native")
-            or manga["name"]
-        )
-        try:
-            md_url = await metadata_fetch.search_mangadex_cover(title)
-            if md_url:
+    if width < FETCHED_COVER_TARGET_WIDTH and mangadex_candidate:
+        md_url = mangadex_candidate.get("cover_url")
+        if md_url:
+            try:
                 md_bytes = await metadata_fetch.download_cover_image(md_url)
                 if _image_width(md_bytes) > width:
                     chosen_bytes = md_bytes
                     chosen_url = md_url
-        except Exception:
-            pass
+            except Exception:
+                pass
 
     if not chosen_bytes:
         return False
@@ -2611,6 +2614,23 @@ async def save_description(library_id: int, manga_id: str, request: Request):
     save_manga_dims(library_id, manga["name"], dims)
     return JSONResponse({"ok": True})
 
+def _metadata_field_done(dims: dict, field: str) -> bool:
+    """
+    Whether a metadata field has already been fetched for this manga.
+
+    Reads the per-field timestamps under dims["metadata_mtimes"]. For manga
+    imported before per-field mtimes existed, the legacy single
+    dims["metadata_mtime"] is treated as covering the three text fields it
+    used to stamp (description/genres/tags) but NOT cover, which was always
+    a separate, later addition.
+    """
+    if field in (dims.get("metadata_mtimes") or {}):
+        return True
+    if field in ("description", "genres", "tags") and dims.get("metadata_mtime"):
+        return True
+    return False
+
+
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
 async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
     username = auth.get_current_user(request) or "admin"
@@ -2633,7 +2653,7 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     body = await request.json()
     candidate = body.get("candidate", {})
-    fields = set(body.get("fields", ["description", "genres", "tags"]))
+    fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2642,14 +2662,32 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     try:
-        text_fields = fields & {"description", "genres", "tags"}
-        metadata_fetch.apply_anilist_metadata(
-            library_id, manga["name"], candidate, text_fields,
-            load_manga_dims, save_manga_dims,
+        # The chosen candidate (from the AniList search) is the primary source.
+        # Look up the same title on MangaDex to fill any field AniList is
+        # missing and to provide a higher-res cover fallback.
+        title = (
+            candidate.get("title_english")
+            or candidate.get("title_romaji")
+            or candidate.get("title_native")
+            or manga["name"]
         )
+        mangadex_best = None
+        try:
+            md_results = await metadata_fetch.search_mangadex_manga(title)
+            mangadex_best = metadata_fetch.best_match(title, md_results)
+        except Exception:
+            mangadex_best = None
+
+        applied = [f for f in fields if f in ("description", "genres", "tags")]
         if "cover" in fields:
-            if await fetch_and_set_anilist_cover(library_id, manga, candidate):
+            if await fetch_and_set_cover(library_id, manga, candidate, mangadex_best):
+                applied.append("cover")
                 save_app_data(data)
+        if applied:
+            metadata_fetch.apply_resolved_metadata(
+                library_id, manga["name"], candidate, mangadex_best, applied,
+                load_manga_dims, save_manga_dims,
+            )
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2663,9 +2701,7 @@ async def scan_library_metadata(request: Request, library_id: int):
         body = await request.json()
     except Exception:
         body = {}
-    fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
-    text_fields = fields & {"description", "genres", "tags"}
-    want_cover = "cover" in fields
+    requested_fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2674,27 +2710,69 @@ async def scan_library_metadata(request: Request, library_id: int):
     manga_formats = set(metadata_fetch.ANILIST_MANGA_FORMATS)
     auto_matched = skipped = no_match = errors = 0
     covers_changed = False
+    # Once AniList rate-limits us, stop hitting it for the rest of the scan and
+    # run on MangaDex alone — the whole point of the fallback.
+    anilist_enabled = True
+
     for manga in mangas:
         dims = load_manga_dims(library_id, manga["name"])
-        if dims.get("metadata_mtime"):
+        pending = [f for f in requested_fields if not _metadata_field_done(dims, f)]
+        if not pending:
             skipped += 1
             continue
         try:
-            results = await metadata_fetch.search_anilist_manga(manga["name"], per_page=8)
-            manga_type = [r for r in results if (r.get("format") or "").upper() in manga_formats]
-            if len(manga_type) == 1:
-                scored = metadata_fetch.score_all_candidates(manga["name"], manga_type)
-                metadata_fetch.apply_anilist_metadata(
-                    library_id, manga["name"], scored[0],
-                    text_fields,
-                    load_manga_dims, save_manga_dims,
-                )
-                if want_cover and await fetch_and_set_anilist_cover(library_id, manga, scored[0]):
-                    covers_changed = True
-                auto_matched += 1
+            name = manga["name"]
+
+            # ── AniList: accept only a single format-matched candidate ──
+            anilist_primary = None
+            if anilist_enabled:
+                try:
+                    a_results = await metadata_fetch.search_anilist_manga(name, per_page=8)
+                    a_typed = [r for r in a_results if (r.get("format") or "").upper() in manga_formats]
+                    if len(a_typed) == 1:
+                        anilist_primary = a_typed[0]
+                except httpx.HTTPStatusError as e:
+                    if e.response is not None and e.response.status_code == 429:
+                        anilist_enabled = False
+                await asyncio.sleep(0.7)
+
+            # ── MangaDex: best confident match, plus the "single entry" rule ──
+            # A raw title search returns several loosely-related rows, so the
+            # spec's "MangaDex has just one entry" is read as "exactly one
+            # strongly-matching entry" — an unambiguous single identification.
+            md_results = await metadata_fetch.search_mangadex_manga(name)
+            scored_md = metadata_fetch.score_all_candidates(name, md_results)
+            mangadex_best = scored_md[0] if scored_md and scored_md[0]["match_score"] >= 0.6 else None
+            strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
+            mangadex_single = strong_md[0] if len(strong_md) == 1 else None
+
+            # ── Decide source(s) ──
+            # AniList single match → primary, MangaDex fills gaps + cover.
+            # AniList ambiguous/none/rate-limited → fall back to MangaDex, but
+            # only when it has a single (confident) entry, per the spec.
+            if anilist_primary:
+                primary, fallback = anilist_primary, mangadex_best
+                anilist_for_cover, mangadex_for_cover = anilist_primary, mangadex_best
+            elif mangadex_single:
+                primary, fallback = mangadex_single, None
+                anilist_for_cover, mangadex_for_cover = None, mangadex_single
             else:
                 no_match += 1
-            await asyncio.sleep(0.7)
+                await asyncio.sleep(0.3)
+                continue
+
+            applied = [f for f in pending if f in ("description", "genres", "tags")]
+            if "cover" in pending:
+                if await fetch_and_set_cover(library_id, manga, anilist_for_cover, mangadex_for_cover):
+                    applied.append("cover")
+                    covers_changed = True
+            if applied:
+                metadata_fetch.apply_resolved_metadata(
+                    library_id, name, primary, fallback, applied,
+                    load_manga_dims, save_manga_dims,
+                )
+            auto_matched += 1
+            await asyncio.sleep(0.3)
         except Exception:
             errors += 1
     if covers_changed:
