@@ -144,6 +144,24 @@ async def search_anilist_manga(
     return results
 
 
+async def download_cover_image(url: str) -> bytes:
+    """
+    Download the image at `url` and return its raw bytes.
+
+    Used to fetch AniList cover images so the caller can process them into
+    the local covers directory. Like search_anilist_manga, it deliberately
+    does not swallow exceptions — error handling is the caller's job.
+
+    Raises:
+        httpx.HTTPStatusError: on non-2xx HTTP status.
+        httpx.RequestError: on network-level failures.
+    """
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.content
+
+
 # ── SUBSTEP 2: matching / confidence scoring ──────────────────────────
 #
 # Pure logic, no network calls. Takes a query title and one AniList

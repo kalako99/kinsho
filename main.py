@@ -18,7 +18,7 @@ from datetime import datetime
 import asyncio
 import threading
 from fastapi.responses import Response
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 import auth
 import metadata_fetch
 from fastapi.middleware.cors import CORSMiddleware
@@ -1034,6 +1034,34 @@ def process_cover_from_bytes(
         print(f"[Covers] Failed processing {filename}: {e}")
 
     return filename, new_mtimes
+
+async def fetch_and_set_anilist_cover(library_id: int, manga: dict, candidate: dict) -> bool:
+    """
+    Download the candidate's AniList cover image, process it into the manga's
+    covers directory (small + large), and set it as the manga's default cover
+    (manga["cover"]). User-selected covers still take priority since the
+    per-user override is checked before manga["cover"] when serving.
+
+    Mutates manga["cover"] in place; the caller is responsible for persisting
+    the change via save_app_data. Returns True if a cover was set.
+    """
+    cover_url = candidate.get("cover_url_large") or candidate.get("cover_url_medium")
+    if not cover_url:
+        return False
+    img_bytes = await metadata_fetch.download_cover_image(cover_url)
+    url_ext = os.path.splitext(urlparse(cover_url).path)[1].lower()
+    if url_ext not in ('.jpg', '.jpeg', '.png', '.webp'):
+        url_ext = '.jpg'
+    filename = f"anilist_cover{url_ext}"
+    # Pass empty stored_mtimes so a re-fetch always re-processes the image
+    # rather than skipping it as unchanged.
+    result_fname, _ = process_cover_from_bytes(
+        img_bytes, filename, library_id, manga["name"], {}, 0.0
+    )
+    if not result_fname:
+        return False
+    manga["cover"] = result_fname
+    return True
 
 def auto_organize_library_root(library: dict):
     """
@@ -2553,10 +2581,14 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     try:
+        text_fields = fields & {"description", "genres", "tags"}
         metadata_fetch.apply_anilist_metadata(
-            library_id, manga["name"], candidate, fields,
+            library_id, manga["name"], candidate, text_fields,
             load_manga_dims, save_manga_dims,
         )
+        if "cover" in fields:
+            if await fetch_and_set_anilist_cover(library_id, manga, candidate):
+                save_app_data(data)
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -2573,6 +2605,7 @@ async def scan_library_metadata(request: Request, library_id: int):
     mangas = manga_data.get("mangas", [])
     manga_formats = set(metadata_fetch.ANILIST_MANGA_FORMATS)
     auto_matched = skipped = no_match = errors = 0
+    covers_changed = False
     for manga in mangas:
         dims = load_manga_dims(library_id, manga["name"])
         if dims.get("metadata_mtime"):
@@ -2588,12 +2621,16 @@ async def scan_library_metadata(request: Request, library_id: int):
                     {"description", "genres", "tags"},
                     load_manga_dims, save_manga_dims,
                 )
+                if await fetch_and_set_anilist_cover(library_id, manga, scored[0]):
+                    covers_changed = True
                 auto_matched += 1
             else:
                 no_match += 1
             await asyncio.sleep(0.7)
         except Exception:
             errors += 1
+    if covers_changed:
+        save_app_data(data)
     return JSONResponse({
         "auto_matched": auto_matched,
         "skipped": skipped,

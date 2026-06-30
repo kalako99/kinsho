@@ -1387,12 +1387,13 @@
         <label><input type="checkbox" v-model="metaFields.description"> Description</label>
         <label><input type="checkbox" v-model="metaFields.genres"> Genres</label>
         <label><input type="checkbox" v-model="metaFields.tags"> Tags</label>
+        <label><input type="checkbox" v-model="metaFields.cover"> Cover</label>
       </div>
       <div class="popup-actions" style="margin-top:12px;">
         <button class="popup-btn soft" @click="showMetadataPopup = false">Cancel</button>
         <button
           class="popup-btn primary"
-          :disabled="metaSelectedIdx === null || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags)"
+          :disabled="metaSelectedIdx === null || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags && !metaFields.cover)"
           @click="applyMetadata"
         >{{ metaApplying ? 'Applying…' : 'Apply' }}</button>
       </div>
@@ -1480,7 +1481,7 @@ createApp({
       metaSearching:        false,
       metaCandidates:       [],
       metaSelectedIdx:      null,
-      metaFields:           { description: true, genres: true, tags: true },
+      metaFields:           { description: true, genres: true, tags: true, cover: true },
       metaApplying:         false,
       metaStatus:           { msg: '', type: '' },
     };
