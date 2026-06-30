@@ -79,6 +79,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── AUTH GATE ───────────────────────────────────────────────────────────────
+# Every /api/* endpoint requires a valid session, EXCEPT the auth endpoints
+# under /api/auth/ (login/register/me/logout/change-password each enforce their
+# own rules). Anonymous API requests get a 401 here rather than being silently
+# served as admin. Page routes handle their own /login redirect; static assets
+# and cover images are served by their own mounts and are not gated here.
+PUBLIC_API_PREFIXES = ("/api/auth/",)
+
+@app.middleware("http")
+async def require_auth_for_api(request: Request, call_next):
+    path = request.url.path
+    if (
+        path.startswith("/api/")
+        and not path.startswith(PUBLIC_API_PREFIXES)
+        and request.method != "OPTIONS"
+        and auth.get_current_user(request) is None
+    ):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    return await call_next(request)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def get_covers_dir():
@@ -1905,8 +1925,7 @@ def get_theme_css(username: str = None) -> str:
     ]
     custom_css = ""
     try:
-        user = username or "admin"
-        user_data = auth.load_user_data(user)
+        user_data = auth.load_user_data(username) if username else {}
         active_name = user_data.get("active_theme", "Midnight Red")
         theme = next((t for t in BUILTIN_THEMES if t["name"] == active_name), BUILTIN_THEMES[0])
         visual_theme = user_data.get("active_visual_theme", "default")
@@ -1937,7 +1956,7 @@ def get_theme_css(username: str = None) -> str:
 
 @app.get("/api/settings")
 def get_settings(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     data = load_app_data()
     user_data = auth.load_user_data(username)
     return JSONResponse({
@@ -2063,7 +2082,7 @@ async def remove_path_covers(request: Request):
 
 @app.post("/api/settings/themes")
 async def save_themes(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     data = load_app_data()
     data["themes"] = body.get("themes", [])
@@ -2075,7 +2094,7 @@ async def save_themes(request: Request):
 
 @app.post("/api/settings/visual-theme")
 async def save_visual_theme(request: Request):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     body      = await request.json()
     user_data = auth.load_user_data(username)
     vt = body.get("active_visual_theme", "default")
@@ -2089,7 +2108,7 @@ async def save_visual_theme(request: Request):
 
 @app.post("/api/settings/custom-themes")
 async def save_custom_theme(request: Request):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     body      = await request.json()
     name      = body.get("name", "").strip()
     css       = body.get("css", "")
@@ -2104,7 +2123,7 @@ async def save_custom_theme(request: Request):
 
 @app.delete("/api/settings/custom-themes/{name}")
 async def delete_custom_theme(name: str, request: Request):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     themes    = user_data.get("custom_themes", {})
     themes.pop(name, None)
@@ -2116,7 +2135,7 @@ async def delete_custom_theme(name: str, request: Request):
 
 @app.post("/api/settings/backdrop")
 async def save_backdrop(request: Request):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     body      = await request.json()
     user_data = auth.load_user_data(username)
     if "backdrop_list" in body:
@@ -2167,7 +2186,7 @@ def get_mangas(
     sort: Optional[str] = Query(default="last_updated"),
     page: int = Query(default=1, ge=1),
 ):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     mount_covers()
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
@@ -2225,7 +2244,7 @@ def get_mangas(
 
 @app.get("/api/mangas/{library_id}/search")
 def get_mangas_for_search(request: Request, library_id: int):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     mount_covers()
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
@@ -2257,7 +2276,7 @@ def get_mangas_for_search(request: Request, library_id: int):
 
 @app.get("/api/manga/{library_id}/{manga_id}")
 def get_manga(request: Request, library_id: int, manga_id: str):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     mount_covers()
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
@@ -2295,7 +2314,7 @@ def get_manga(request: Request, library_id: int, manga_id: str):
 
 @app.post("/api/manga/{library_id}/{manga_id}/favourite")
 async def toggle_favourite(request: Request, library_id: int, manga_id: str):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     favourites = user_data.get("favourites", [])
     existing = next(
@@ -2315,13 +2334,13 @@ async def toggle_favourite(request: Request, library_id: int, manga_id: str):
 
 @app.get("/api/lists")
 def get_lists(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     return JSONResponse({"lists": user_data.get("lists", {})})
 
 @app.post("/api/lists")
 async def create_list(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     name = body.get("name", "").strip()
     if not name:
@@ -2337,7 +2356,7 @@ async def create_list(request: Request):
 
 @app.put("/api/lists/{list_name}/add")
 async def add_to_list(list_name: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     manga_id   = body.get("manga_id", "").strip()
     manga_name = body.get("manga_name", "").strip()
@@ -2357,7 +2376,7 @@ async def add_to_list(list_name: str, request: Request):
 
 @app.put("/api/lists/{list_name}/remove")
 async def remove_from_list(list_name: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     manga_id = body.get("manga_id", "").strip()
     if not manga_id:
@@ -2377,7 +2396,7 @@ async def remove_from_list(list_name: str, request: Request):
 
 @app.get("/api/tags")
 def get_all_tags(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     perms = auth.resolve_permissions(username)
     blocked = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
     data = load_app_data()
@@ -2394,12 +2413,12 @@ def save_admin(data: dict, username: str = "admin"):
 
 @app.get("/api/admin/status")
 def get_admin_status(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     return JSONResponse(auth.load_user_data(username)) 
 
 @app.get("/api/manga/{library_id}/{manga_id}/covers")
 def get_manga_covers(request: Request, library_id: int, manga_id: str):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2440,7 +2459,7 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
 
 @app.post("/api/manga/{library_id}/{manga_id}/cover")
 async def set_manga_cover(request: Request, library_id: int, manga_id: str):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     filename = body.get("filename", "").strip()
     if not filename:
@@ -2468,7 +2487,7 @@ def rebuild_all_tags(data: dict) -> list:
 
 @app.post("/api/manga/{library_id}/{manga_id}/tags/add")
 async def add_tag(library_id: int, manga_id: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("tags"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2495,7 +2514,7 @@ async def add_tag(library_id: int, manga_id: str, request: Request):
 
 @app.post("/api/manga/{library_id}/{manga_id}/tags/remove")
 async def remove_tags(library_id: int, manga_id: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("tags"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2543,7 +2562,7 @@ def rebuild_all_genres(data: dict) -> list:
 
 @app.post("/api/manga/{library_id}/{manga_id}/genres/add")
 async def add_genre(library_id: int, manga_id: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("genres"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2567,7 +2586,7 @@ async def add_genre(library_id: int, manga_id: str, request: Request):
 
 @app.post("/api/manga/{library_id}/{manga_id}/genres/remove")
 async def remove_genres(library_id: int, manga_id: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("genres"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2597,7 +2616,7 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
 
 @app.post("/api/manga/{library_id}/{manga_id}/description")
 async def save_description(library_id: int, manga_id: str, request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("description"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2633,7 +2652,7 @@ def _metadata_field_done(dims: dict, field: str) -> bool:
 
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
 async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     perms = auth.resolve_permissions(username)
     if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
@@ -2647,7 +2666,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
 
 @app.post("/api/manga/{library_id}/{manga_id}/apply-metadata")
 async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: str):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     perms = auth.resolve_permissions(username)
     if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
@@ -2694,7 +2713,7 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
 
 @app.post("/api/libraries/{library_id}/scan-metadata")
 async def scan_library_metadata(request: Request, library_id: int):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     if not auth.resolve_permissions(username).get("is_admin"):
         return JSONResponse({"error": "Admin only"}, status_code=403)
     try:
@@ -2787,7 +2806,7 @@ async def scan_library_metadata(request: Request, library_id: int):
 
 @app.post("/api/settings/last-tab")
 async def save_last_tab(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     user_data = auth.load_user_data(username)
     user_data["last_tab"] = body.get("last_tab")
@@ -2796,7 +2815,7 @@ async def save_last_tab(request: Request):
 
 @app.get("/api/manga/{library_id}/{manga_id}/bookmarks")
 async def get_bookmarks(request: Request, library_id: int, manga_id: str):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     key       = f"{library_id}:{manga_id}"
     bookmarks = user_data.get("bookmarks", {}).get(key, [])
@@ -2804,7 +2823,7 @@ async def get_bookmarks(request: Request, library_id: int, manga_id: str):
 
 @app.post("/api/manga/{library_id}/{manga_id}/bookmarks")
 async def save_bookmarks(request: Request, library_id: int, manga_id: str):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     body      = await request.json()
     user_data = auth.load_user_data(username)
     key       = f"{library_id}:{manga_id}"
@@ -2816,7 +2835,7 @@ async def save_bookmarks(request: Request, library_id: int, manga_id: str):
 
 @app.post("/api/settings/tab-order")
 async def save_tab_order(request: Request):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     body      = await request.json()
     user_data = auth.load_user_data(username)
     user_data["tab_order"] = body.get("tab_order", [])
@@ -2825,7 +2844,7 @@ async def save_tab_order(request: Request):
 
 @app.post("/api/settings/reader")
 async def save_reader_settings(request: Request):
-    username   = auth.get_current_user(request) or "admin"
+    username   = auth.get_current_user(request)
     body       = await request.json()
     library_id = str(body.get("library_id", ""))
     if not library_id:
@@ -2844,7 +2863,7 @@ async def save_reader_settings(request: Request):
 
 @app.post("/api/reading/progress")
 async def save_reading_progress(request: Request):
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     body = await request.json()
     library_id  = str(body.get("library_id", ""))
     manga_id    = str(body.get("manga_id", ""))
@@ -2970,7 +2989,7 @@ async def save_reading_progress(request: Request):
 
 @app.get("/api/reading/history/{library_id}")
 def get_reading_history(request: Request, library_id: int):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     lib_history = user_data.get("reading_history", {}).get(str(library_id), {})
 
@@ -3036,7 +3055,7 @@ def get_category_list(
     if category not in ("favourites", "last-read", "random"):
         return JSONResponse({"error": "Invalid category"}, status_code=400)
 
-    username = auth.get_current_user(request) or "admin"
+    username = auth.get_current_user(request)
     mount_covers()
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
@@ -3134,7 +3153,7 @@ def get_category_list(
 
 @app.get("/api/reading/history/{library_id}/{manga_id}")
 def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
-    username  = auth.get_current_user(request) or "admin"
+    username  = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     entry     = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id, {})
 
@@ -3211,6 +3230,8 @@ def manga_list(request: Request):
 @app.get("/manga/{library_id}/{manga_id}")
 def manga_detail(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
@@ -3250,6 +3271,8 @@ def category_list_page(request: Request, library_id: int, category: str):
 @app.get("/manga/{library_id}/{manga_id}/chapter/{chapter_id}")
 def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id: str):
     username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
@@ -3308,10 +3331,14 @@ def get_volumes(library_id: int, manga_id: str):
 
 @app.get("/manga/{library_id}/{manga_id}/volume/{volume_id}")
 def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: str):
+    username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id":   manga_id,
         "volume_id":  volume_id,
+        "theme_css":  get_theme_css(username),
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/pages")

@@ -5,14 +5,14 @@
  */
 (function () {
   'use strict';
-  var saved    = localStorage.getItem('yomi_server_url');
+  var saved    = localStorage.getItem('kinsho_server_url');
   var isNative = !!(window.__TAURI__ || (window.Capacitor && window.Capacitor.isNative));
   if (saved === null && !isNative) {
     // Running in a real browser served by FastAPI — no URL needed
-    localStorage.setItem('yomi_server_url', '');
+    localStorage.setItem('kinsho_server_url', '');
     saved = '';
   }
   window.API_BASE       = (saved !== null) ? saved : null;
-  window.YOMI_LOCAL     = localStorage.getItem('yomi_local_mode') === 'true';
+  window.KINSHO_LOCAL   = localStorage.getItem('kinsho_local_mode') === 'true';
   window.apiUrl         = function (path) { return (window.API_BASE || '') + path; };
 })();

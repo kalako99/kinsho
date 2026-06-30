@@ -9,7 +9,7 @@ createApp({
       dataPathStatus: { msg: '', type: '' },
 
       // ── SERVER CONNECTION ──
-      serverUrl:       localStorage.getItem('yomi_server_url') || '',
+      serverUrl:       localStorage.getItem('kinsho_server_url') || '',
       serverUrlStatus: { msg: '', type: '' },
       isNativeApp:     !!(window.__TAURI__ || (window.Capacitor && window.Capacitor.isNative)),
       isLoggedIn:      false,
@@ -154,7 +154,7 @@ createApp({
       if (!url.startsWith('http://') && !url.startsWith('https://')) url = 'http://' + url;
       url = url.replace(/\/$/, '');
       this.serverUrl = url;
-      localStorage.setItem('yomi_server_url', url);
+      localStorage.setItem('kinsho_server_url', url);
       window.API_BASE = url;
       this.serverUrlStatus = { msg: '✓ Saved.', type: 'ok' };
       setTimeout(() => { this.serverUrlStatus = { msg: '', type: '' }; }, 3000);
@@ -177,8 +177,8 @@ createApp({
         });
         const data = await res.json();
         if (data.ok) {
-          localStorage.removeItem('yomi_local_mode');
-          window.YOMI_LOCAL    = false;
+          localStorage.removeItem('kinsho_local_mode');
+          window.KINSHO_LOCAL  = false;
           this.loginStatus     = { msg: '✓ Logged in.', type: 'ok' };
           this.loginUsername   = '';
           this.loginPassword   = '';
@@ -196,7 +196,7 @@ createApp({
     // ── LOAD ACCOUNT SETTINGS ──
     async loadAccount() {
       // If in local mode with no server configured, skip auth entirely
-      if (window.YOMI_LOCAL && !window.API_BASE) {
+      if (window.KINSHO_LOCAL && !window.API_BASE) {
         this.isLoggedIn = false;
         await this.loadAnalytics();
         return;
