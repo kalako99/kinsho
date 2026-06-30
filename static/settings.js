@@ -23,6 +23,7 @@ createApp({
       nextId: 1,
       scanStatus: {},
       metaScanStatus: {},
+      metaScanFields: { description: true, genres: true, tags: true, cover: true },
 
       // ── USERNAME ──
       username:        '',
@@ -372,9 +373,18 @@ createApp({
 
     // ── BULK METADATA SCAN FOR ONE LIBRARY ──
     async scanLibraryMetadata(lib) {
+        const fields = Object.entries(this.metaScanFields).filter(([, v]) => v).map(([k]) => k);
+        if (fields.length === 0) {
+            this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Select at least one field to import.', type: 'err' } };
+            return;
+        }
         this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Scanning…', type: 'scanning' } };
         try {
-            const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/scan-metadata`), { method: 'POST' });
+            const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/scan-metadata`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ fields }),
+            });
             const data = await res.json();
             if (data.error) {
                 this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: data.error, type: 'err' } };

@@ -563,6 +563,10 @@
           :disabled="metaScanStatus[lib.id] && metaScanStatus[lib.id].type === 'scanning'"
           style="font-size:0.78rem; padding: 6px 12px;"
         >⬇ Fetch metadata</button>
+        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.description"> Description</label>
+        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.genres"> Genres</label>
+        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.tags"> Tags</label>
+        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.cover"> Cover</label>
         <span
           class="status-msg"
           style="margin: 0;"

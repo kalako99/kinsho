@@ -996,6 +996,7 @@ def process_cover_from_bytes(
     manga_name: str,
     stored_mtimes: dict,
     source_mtime: float,
+    large_size: tuple = (600, 900),
 ) -> tuple[str | None, dict]:
     """
     Given raw image bytes (extracted from an archive or PDF), save small+large
@@ -1022,11 +1023,13 @@ def process_cover_from_bytes(
     new_mtimes = dict(stored_mtimes)
     try:
         img = Image.open(io.BytesIO(img_bytes))
+        if ext.lower() in ('.jpg', '.jpeg') and img.mode != 'RGB':
+            img = img.convert('RGB')
         small = img.copy()
         small.thumbnail((300, 450))
         small.save(small_dest, optimize=True, quality=85)
         large = img.copy()
-        large.thumbnail((600, 900))
+        large.thumbnail(large_size)
         large.save(large_dest, optimize=True, quality=85)
         new_mtimes[filename] = source_mtime
         print(f"[Covers] Processed {filename} -> small + large")
@@ -1035,32 +1038,86 @@ def process_cover_from_bytes(
 
     return filename, new_mtimes
 
+# Target width (px) for a fetched cover. AniList's largest cover tops out
+# around 500px, too soft for the full-width detail backdrop — when the
+# AniList source is below this, we try MangaDex for a higher-res original.
+FETCHED_COVER_TARGET_WIDTH = 900
+# Large-variant cap for fetched covers, raised above the default 600x900 so
+# a high-res MangaDex original isn't thrown away when rescaled.
+FETCHED_COVER_LARGE_SIZE = (1000, 1500)
+
+def _image_width(img_bytes: bytes) -> int:
+    """Return the pixel width of an image, or 0 if it can't be read."""
+    try:
+        return Image.open(io.BytesIO(img_bytes)).width
+    except Exception:
+        return 0
+
 async def fetch_and_set_anilist_cover(library_id: int, manga: dict, candidate: dict) -> bool:
     """
-    Download the candidate's AniList cover image, process it into the manga's
+    Fetch a cover image for the matched candidate, process it into the manga's
     covers directory (small + large), and set it as the manga's default cover
     (manga["cover"]). User-selected covers still take priority since the
     per-user override is checked before manga["cover"] when serving.
 
+    Source selection: AniList's cover is used by default, but if it's narrower
+    than FETCHED_COVER_TARGET_WIDTH we look up the same title on MangaDex and
+    use its original-resolution cover instead when it's actually larger.
+
     Mutates manga["cover"] in place; the caller is responsible for persisting
     the change via save_app_data. Returns True if a cover was set.
     """
-    cover_url = (
+    anilist_url = (
         candidate.get("cover_url_extra_large")
         or candidate.get("cover_url_large")
         or candidate.get("cover_url_medium")
     )
-    if not cover_url:
+
+    chosen_bytes = None
+    chosen_url = None
+    width = 0
+    if anilist_url:
+        try:
+            chosen_bytes = await metadata_fetch.download_cover_image(anilist_url)
+            chosen_url = anilist_url
+            width = _image_width(chosen_bytes)
+        except Exception:
+            chosen_bytes = None
+
+    if width < FETCHED_COVER_TARGET_WIDTH:
+        title = (
+            candidate.get("title_english")
+            or candidate.get("title_romaji")
+            or candidate.get("title_native")
+            or manga["name"]
+        )
+        try:
+            md_url = await metadata_fetch.search_mangadex_cover(title)
+            if md_url:
+                md_bytes = await metadata_fetch.download_cover_image(md_url)
+                if _image_width(md_bytes) > width:
+                    chosen_bytes = md_bytes
+                    chosen_url = md_url
+        except Exception:
+            pass
+
+    if not chosen_bytes:
         return False
-    img_bytes = await metadata_fetch.download_cover_image(cover_url)
-    url_ext = os.path.splitext(urlparse(cover_url).path)[1].lower()
+
+    url_ext = os.path.splitext(urlparse(chosen_url).path)[1].lower()
     if url_ext not in ('.jpg', '.jpeg', '.png', '.webp'):
         url_ext = '.jpg'
     filename = f"anilist_cover{url_ext}"
     # Pass empty stored_mtimes so a re-fetch always re-processes the image
     # rather than skipping it as unchanged.
     result_fname, _ = process_cover_from_bytes(
-        img_bytes, filename, library_id, manga["name"], {}, 0.0
+        img_bytes=chosen_bytes,
+        filename=filename,
+        library_id=library_id,
+        manga_name=manga["name"],
+        stored_mtimes={},
+        source_mtime=0.0,
+        large_size=FETCHED_COVER_LARGE_SIZE,
     )
     if not result_fname:
         return False
@@ -2602,6 +2659,13 @@ async def scan_library_metadata(request: Request, library_id: int):
     username = auth.get_current_user(request) or "admin"
     if not auth.resolve_permissions(username).get("is_admin"):
         return JSONResponse({"error": "Admin only"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
+    text_fields = fields & {"description", "genres", "tags"}
+    want_cover = "cover" in fields
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2622,10 +2686,10 @@ async def scan_library_metadata(request: Request, library_id: int):
                 scored = metadata_fetch.score_all_candidates(manga["name"], manga_type)
                 metadata_fetch.apply_anilist_metadata(
                     library_id, manga["name"], scored[0],
-                    {"description", "genres", "tags"},
+                    text_fields,
                     load_manga_dims, save_manga_dims,
                 )
-                if await fetch_and_set_anilist_cover(library_id, manga, scored[0]):
+                if want_cover and await fetch_and_set_anilist_cover(library_id, manga, scored[0]):
                     covers_changed = True
                 auto_matched += 1
             else:

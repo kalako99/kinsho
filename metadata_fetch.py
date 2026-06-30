@@ -147,6 +147,76 @@ async def search_anilist_manga(
     return results
 
 
+MANGADEX_API_URL = "https://api.mangadex.org"
+MANGADEX_UPLOADS_URL = "https://uploads.mangadex.org"
+
+
+async def search_mangadex_cover(title: str, min_score: float = 0.6) -> str | None:
+    """
+    Search MangaDex for `title` and return the original-resolution cover URL
+    of the best-matching series, or None if nothing matches confidently.
+
+    MangaDex covers are the original uploaded scans (often 1500px+ wide),
+    which is why this exists as a fallback: AniList's largest cover tops out
+    around 500px, too small for the app's full-width detail backdrop.
+
+    Matching reuses the same normalize + SequenceMatcher logic as the
+    AniList title scorer, comparing `title` against the series' main title
+    and all alt-titles, and keeping the best score. A match is only returned
+    if that best score clears `min_score` — a wrong cover is worse than none.
+
+    Raises httpx errors on network/HTTP failure (caller decides policy).
+    """
+    params = [
+        ("title", title),
+        ("limit", 5),
+        ("includes[]", "cover_art"),
+        ("contentRating[]", "safe"),
+        ("contentRating[]", "suggestive"),
+        ("contentRating[]", "erotica"),
+        ("contentRating[]", "pornographic"),
+    ]
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        response = await client.get(f"{MANGADEX_API_URL}/manga", params=params)
+        response.raise_for_status()
+        payload = response.json()
+
+    query_norm = _normalize_title(title)
+    if not query_norm:
+        return None
+
+    best_url = None
+    best_score = 0.0
+    for m in payload.get("data", []):
+        attrs = m.get("attributes") or {}
+        candidate_titles = list((attrs.get("title") or {}).values())
+        for alt in attrs.get("altTitles") or []:
+            candidate_titles.extend((alt or {}).values())
+
+        score = 0.0
+        for t in candidate_titles:
+            t_norm = _normalize_title(t or "")
+            if not t_norm:
+                continue
+            ratio = SequenceMatcher(None, query_norm, t_norm).ratio()
+            if ratio > score:
+                score = ratio
+
+        cover_file = None
+        for rel in m.get("relationships") or []:
+            if rel.get("type") == "cover_art":
+                cover_file = (rel.get("attributes") or {}).get("fileName")
+                break
+
+        if cover_file and score > best_score:
+            best_score = score
+            best_url = f"{MANGADEX_UPLOADS_URL}/covers/{m['id']}/{cover_file}"
+
+    if best_url and best_score >= min_score:
+        return best_url
+    return None
+
+
 async def download_cover_image(url: str) -> bytes:
     """
     Download the image at `url` and return its raw bytes.
