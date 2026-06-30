@@ -51,6 +51,7 @@ query ($search: String, $perPage: Int, $format: [MediaFormat]) {
       }
       status
       coverImage {
+        extraLarge
         large
         medium
       }
@@ -89,6 +90,7 @@ async def search_anilist_manga(
             "genres": list[str],
             "tags": [{"name": str, "rank": int}, ...],
             "status": str | None,
+            "cover_url_extra_large": str | None,
             "cover_url_large": str | None,
             "cover_url_medium": str | None,
             "site_url": str | None,
@@ -136,6 +138,7 @@ async def search_anilist_manga(
             "genres":           m.get("genres") or [],
             "tags":             m.get("tags") or [],
             "status":           m.get("status"),
+            "cover_url_extra_large": cover_obj.get("extraLarge"),
             "cover_url_large":  cover_obj.get("large"),
             "cover_url_medium": cover_obj.get("medium"),
             "site_url":         m.get("siteUrl"),

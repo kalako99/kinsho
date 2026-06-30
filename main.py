@@ -1045,7 +1045,11 @@ async def fetch_and_set_anilist_cover(library_id: int, manga: dict, candidate: d
     Mutates manga["cover"] in place; the caller is responsible for persisting
     the change via save_app_data. Returns True if a cover was set.
     """
-    cover_url = candidate.get("cover_url_large") or candidate.get("cover_url_medium")
+    cover_url = (
+        candidate.get("cover_url_extra_large")
+        or candidate.get("cover_url_large")
+        or candidate.get("cover_url_medium")
+    )
     if not cover_url:
         return False
     img_bytes = await metadata_fetch.download_cover_image(cover_url)
