@@ -616,6 +616,15 @@ createApp({
       }
     },
 
+    async resetEditorToAbyss() {
+      try {
+        const res = await fetch(apiUrl('/static/theme-abyss.css'));
+        this.cssEditorContent = await res.text();
+      } catch (e) {
+        console.error('Failed to fetch Abyss CSS:', e);
+      }
+    },
+
     // ── ANALYTICS ──
     async loadAnalytics() {
       this.analyticsLoading = true;

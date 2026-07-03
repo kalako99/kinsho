@@ -1,0 +1,209 @@
+/* ── ABYSS VISUAL THEME ───────────────────────────────────────────────────────
+   Applied when <html data-theme="abyss">.
+   Frosted-glass panels, pill-shaped controls, soft rounded corners, a
+   Google Sans typeface and smooth easing. Changes shapes, spacing, borders,
+   shadows and fonts only — colors always come from the active accent color
+   (CSS custom properties), never hardcoded here.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap');
+
+[data-theme="abyss"] {
+  --abyss-radius: 20px;
+  --abyss-radius-lg: 28px;
+  --abyss-radius-sm: 12px;
+  --abyss-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --abyss-glass: color-mix(in srgb, var(--color-secondary) 55%, transparent);
+}
+
+/* ── TYPOGRAPHY ──────────────────────────────────────────────────────────── */
+
+[data-theme="abyss"] body {
+  font-family: "Google Sans", "Segoe UI", sans-serif;
+  font-optical-sizing: auto;
+}
+
+[data-theme="abyss"] .section-title {
+  text-shadow: none;
+  letter-spacing: 1px;
+  border-left: 3px solid var(--color-primary);
+  padding-left: 10px;
+}
+
+/* ── SCROLLBAR & SELECTION ───────────────────────────────────────────────── */
+
+[data-theme="abyss"] * {
+  scrollbar-color: color-mix(in srgb, var(--color-primary) 80%, transparent) transparent;
+}
+[data-theme="abyss"] ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-primary) 80%, transparent);
+  border-radius: var(--abyss-radius-sm);
+}
+[data-theme="abyss"] ::-webkit-scrollbar-track { background: transparent; }
+
+[data-theme="abyss"] ::selection {
+  background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+}
+
+/* ── BUTTONS, TABS & PILLS: fully rounded ───────────────────────────────── */
+
+[data-theme="abyss"] .btn,
+[data-theme="abyss"] .popup-btn,
+[data-theme="abyss"] .page-btn,
+[data-theme="abyss"] .sort-btn,
+[data-theme="abyss"] .tab-btn,
+[data-theme="abyss"] .tag-pill,
+[data-theme="abyss"] .btn-tag,
+[data-theme="abyss"] .suggestion-pill,
+[data-theme="abyss"] .meta-badge,
+[data-theme="abyss"] .meta-badge-sm,
+[data-theme="abyss"] .status-badge,
+[data-theme="abyss"] .complete-badge,
+[data-theme="abyss"] .bb-chap-btn,
+[data-theme="abyss"] .bm-panel-btn {
+  border-radius: 999px !important;
+  transition: background 0.3s var(--abyss-ease), color 0.3s var(--abyss-ease),
+    border-color 0.3s var(--abyss-ease), box-shadow 0.3s var(--abyss-ease),
+    transform 0.3s var(--abyss-ease);
+}
+
+[data-theme="abyss"] .btn:hover,
+[data-theme="abyss"] .page-btn:hover,
+[data-theme="abyss"] .tab-btn:hover {
+  transform: translateY(-1px);
+}
+
+[data-theme="abyss"] .back-btn,
+[data-theme="abyss"] .settings-btn,
+[data-theme="abyss"] .bb-iconbtn,
+[data-theme="abyss"] .bb-chapbtn,
+[data-theme="abyss"] .btn-pencil {
+  border-radius: var(--abyss-radius-sm) !important;
+  transition: background 0.25s var(--abyss-ease), color 0.25s var(--abyss-ease);
+}
+
+/* ── GLASS SURFACES: topbar, panels, dialogs, dropdowns ─────────────────── */
+
+[data-theme="abyss"] .topbar {
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  background: var(--abyss-glass);
+  border-bottom-color: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+[data-theme="abyss"] .popup,
+[data-theme="abyss"] .list-dropdown-menu,
+[data-theme="abyss"] .cover-picker-box,
+[data-theme="abyss"] .meta-popup,
+[data-theme="abyss"] .settings-panel,
+[data-theme="abyss"] .bm-modal,
+[data-theme="abyss"] .bookmark-panel {
+  border-radius: var(--abyss-radius-lg) !important;
+  background: var(--abyss-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--color-text) 12%, transparent) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="abyss"] .bottombar {
+  border-radius: var(--abyss-radius) !important;
+  background: var(--abyss-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border-color: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+/* ── CARDS & COVERS: soft rounding, lift-on-hover ────────────────────────── */
+
+[data-theme="abyss"] .manga-thumb,
+[data-theme="abyss"] .manga-thumb .cover,
+[data-theme="abyss"] .manga-thumb .cover img,
+[data-theme="abyss"] .poster img,
+[data-theme="abyss"] .poster-placeholder,
+[data-theme="abyss"] .cover-option,
+[data-theme="abyss"] .cover-option img,
+[data-theme="abyss"] .meta-cover,
+[data-theme="abyss"] .meta-cover-ph {
+  border-radius: var(--abyss-radius) !important;
+}
+
+[data-theme="abyss"] .manga-thumb {
+  transition: transform 0.4s var(--abyss-ease);
+}
+[data-theme="abyss"] .manga-thumb:hover {
+  transform: translateY(-6px) scale(1.03);
+}
+[data-theme="abyss"] .manga-thumb:hover .cover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-primary) 60%, transparent),
+    0 16px 32px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="abyss"] .meta-candidate {
+  border-radius: var(--abyss-radius-sm) !important;
+  transition: background 0.25s var(--abyss-ease), transform 0.25s var(--abyss-ease);
+}
+[data-theme="abyss"] .meta-candidate:hover {
+  transform: translateX(2px);
+}
+
+/* ── CHAPTER / LIST ITEMS ────────────────────────────────────────────────── */
+
+[data-theme="abyss"] .mchap-item,
+[data-theme="abyss"] .bm-panel-btn,
+[data-theme="abyss"] .list-option {
+  border-radius: var(--abyss-radius-sm) !important;
+  transition: background 0.3s var(--abyss-ease), transform 0.3s var(--abyss-ease);
+}
+[data-theme="abyss"] .mchap-item:hover {
+  transform: translateX(3px);
+  background: color-mix(in srgb, var(--color-secondary) 65%, white 10%);
+}
+
+/* ── INPUTS ──────────────────────────────────────────────────────────────── */
+
+[data-theme="abyss"] input[type="text"],
+[data-theme="abyss"] input[type="password"],
+[data-theme="abyss"] .theme-select,
+[data-theme="abyss"] .list-search-input,
+[data-theme="abyss"] .meta-search-input,
+[data-theme="abyss"] .desc-textarea,
+[data-theme="abyss"] .page-slider-input {
+  border-radius: var(--abyss-radius-sm) !important;
+}
+
+[data-theme="abyss"] input[type="checkbox"],
+[data-theme="abyss"] input[type="radio"] {
+  accent-color: var(--color-primary);
+}
+
+[data-theme="abyss"] .settings-toggle-slider {
+  border-radius: 999px !important;
+  transition: background 0.3s var(--abyss-ease);
+}
+[data-theme="abyss"] .settings-toggle-slider::before {
+  transition: transform 0.3s var(--abyss-ease);
+}
+
+/* ── PROGRESS BARS ───────────────────────────────────────────────────────── */
+
+[data-theme="abyss"] .manga-thumb .progress-track,
+[data-theme="abyss"] .manga-thumb .progress-bar {
+  border-radius: 999px !important;
+}
+
+/* ── SECTION ENTRANCE ANIMATION ──────────────────────────────────────────── */
+
+@keyframes abyss-fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+[data-theme="abyss"] .section:nth-of-type(1),
+[data-theme="abyss"] .grid-section:nth-of-type(1) { animation: abyss-fade-up 0.6s var(--abyss-ease) both 0.05s; }
+[data-theme="abyss"] .section:nth-of-type(2),
+[data-theme="abyss"] .grid-section:nth-of-type(2) { animation: abyss-fade-up 0.6s var(--abyss-ease) both 0.1s; }
+[data-theme="abyss"] .section:nth-of-type(3),
+[data-theme="abyss"] .grid-section:nth-of-type(3) { animation: abyss-fade-up 0.6s var(--abyss-ease) both 0.15s; }
+[data-theme="abyss"] .section:nth-of-type(n+4),
+[data-theme="abyss"] .grid-section:nth-of-type(n+4) { animation: abyss-fade-up 0.6s var(--abyss-ease) both 0.2s; }

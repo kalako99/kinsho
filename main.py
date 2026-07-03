@@ -1970,11 +1970,12 @@ def get_theme_css(username: str = None) -> str:
     except Exception:
         theme = BUILTIN_THEMES[0]
         visual_theme = "default"
-    dt_val = visual_theme if visual_theme in ("default", "sharp", "custom") else "default"
+    dt_val = visual_theme if visual_theme in ("default", "sharp", "abyss", "custom") else "default"
     dt_script = f'<script>document.documentElement.setAttribute("data-theme","{dt_val}");</script>'
     custom_block = f'<style id="custom-theme-style">{custom_css}</style>' if custom_css else ""
     return (
         f'<link rel="stylesheet" href="/static/style.css">'
+        f'<link rel="stylesheet" href="/static/theme-abyss.css">'
         f"<style>"
         f":root{{"
         f"--color-primary:{theme['primary']};"
@@ -2133,7 +2134,7 @@ async def save_visual_theme(request: Request):
     body      = await request.json()
     user_data = auth.load_user_data(username)
     vt = body.get("active_visual_theme", "default")
-    if vt not in ("default", "sharp", "custom"):
+    if vt not in ("default", "sharp", "abyss", "custom"):
         vt = "default"
     user_data["active_visual_theme"] = vt
     if vt == "custom" and "active_custom_theme_name" in body:
