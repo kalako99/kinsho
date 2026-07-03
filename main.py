@@ -70,12 +70,25 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
+# The native app (Capacitor, Android) is a WebView that stays on its own
+# local origin and makes cross-origin fetches to whatever server IP the user
+# enters (see static/api.js / templates/login.html) — it never runs on the
+# server's own origin, so it needs an explicit CORS allowance. Capacitor's
+# default Android WebView origin is https://localhost; http://localhost and
+# capacitor://localhost are included for older/alternate scheme configs.
+# Browser-served mode doesn't need CORS at all (same-origin relative fetches).
+NATIVE_APP_ORIGINS = [
+    "https://localhost",
+    "http://localhost",
+    "capacitor://localhost",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=NATIVE_APP_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-Auth-Token"],
 )
 
 # ── AUTH GATE ───────────────────────────────────────────────────────────────
