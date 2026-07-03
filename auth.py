@@ -197,10 +197,24 @@ def _delete_session(token: str):
     _save_sessions(data)
 
 
+def _delete_sessions_for_user(username: str, except_token: Optional[str] = None):
+    """Remove every session belonging to this user, optionally keeping one token alive."""
+    data = _load_sessions()
+    data["sessions"] = {
+        t: s for t, s in data["sessions"].items()
+        if s.get("username") != username or t == except_token
+    }
+    _save_sessions(data)
+
+
+def _get_request_token(request: Request) -> Optional[str]:
+    return request.headers.get('X-Auth-Token') or request.cookies.get(COOKIE_NAME)
+
+
 # ── REQUEST HELPERS ──────────────────────────────────────────────────────────
 
 def get_current_user(request: Request) -> Optional[str]:
-    token = request.headers.get('X-Auth-Token') or request.cookies.get(COOKIE_NAME)
+    token = _get_request_token(request)
     return _resolve_session(token) if token else None
 
 
@@ -450,9 +464,20 @@ async def route_admin_create_user(request: Request):
 
 
 async def route_logout(request: Request):
-    token = request.cookies.get(COOKIE_NAME)
+    token = _get_request_token(request)
     if token:
         _delete_session(token)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+async def route_logout_everywhere(request: Request):
+    """POST /api/auth/logout-everywhere — end every session for this user, including the current one."""
+    username = get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+    _delete_sessions_for_user(username)
     response = JSONResponse({"ok": True})
     response.delete_cookie(COOKIE_NAME)
     return response
@@ -498,6 +523,12 @@ async def route_change_password(request: Request):
     user["password_hash"] = _hash_password(new_password)
     user["must_change_password"] = False
     _save_users(data)
+
+    # A password change is usually a reaction to a suspected leak — a stolen
+    # session/token shouldn't survive it. Keep only the session making this
+    # request alive so the user isn't logged out of their own change.
+    _delete_sessions_for_user(username, except_token=_get_request_token(request))
+
     return JSONResponse({"ok": True})
 
 def route_get_permissions(request: Request):

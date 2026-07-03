@@ -3949,7 +3949,11 @@ async def api_login(request: Request):
 @app.post("/api/auth/logout")
 async def api_logout(request: Request):
     return await auth.route_logout(request)
- 
+
+@app.post("/api/auth/logout-everywhere")
+async def api_logout_everywhere(request: Request):
+    return await auth.route_logout_everywhere(request)
+
 @app.get("/api/auth/me")
 def api_me(request: Request):
     return auth.route_me(request)

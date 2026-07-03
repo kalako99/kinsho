@@ -264,6 +264,12 @@ createApp({
       window.location.href = '/login';
     },
 
+    async logoutEverywhere() {
+      if (!confirm('End every other logged-in session for this account?')) return;
+      await fetch(apiUrl('/api/auth/logout-everywhere'), { method: 'POST' });
+      window.location.href = '/login';
+    },
+
     // ── LOAD SETTINGS FROM API ──
     async loadSettings() {
       try {
