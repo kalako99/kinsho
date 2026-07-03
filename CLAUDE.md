@@ -158,118 +158,112 @@ Settings has a Custom Theme Editor popup (`templates/settings.html`): named CSS 
 
 ---
 
-## Security audit findings — auth.py & permissions (2026-07-02)
+## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
 
-Audit of `auth.py` and the permission-enforcement paths in `main.py`. Findings are
-ordered by severity. These are documented, not yet fixed.
+Audit of `auth.py` and the permission-enforcement paths in `main.py`. All 11 findings
+below are now fixed. Kept as a historical record of what was wrong and why, since the
+reasoning still explains why the current code is shaped the way it is.
 
-### Critical
+### Critical — fixed
 
-1. **Per-library permissions are not enforced on any data/content API (broken access control / IDOR).**
-   The only place a user's `libraries` permission map is applied is the home-page tab
-   list in `manga_list` (`main.py:3220-3223`) — it just hides tabs. Every actual data
-   endpoint ignores it: `/api/mangas/{library_id}`, `/api/mangas/{library_id}/search`,
-   `/api/manga/{library_id}/{manga_id}`, `.../chapters`, `.../volumes`, `.../dims`, and
-   all page/thumbnail routes. Any logged-in user can read a library they were denied by
-   simply requesting its `library_id` directly. Library visibility is cosmetic only.
+1. **Per-library permissions were not enforced on any data/content API (broken access
+   control / IDOR).** The only place a user's `libraries` permission map was applied was
+   the home-page tab list in `manga_list` — it just hid tabs. Every actual data endpoint
+   ignored it, so any logged-in user could read a denied library by requesting its
+   `library_id` directly.
+   **Fix:** `auth.can_access_library(username, library_id)`, called at the top of every
+   endpoint that takes a `library_id`. Denied → 404, not 403, so a denied library isn't
+   distinguishable from a nonexistent one.
 
-2. **Blocked-tag filtering is bypassable at the content level.**
-   `blocked_tags` is applied in `get_mangas`, `get_mangas_for_search`, and `get_manga`,
-   but the reader/content endpoints (`get_chapters`, `get_manga_dims`, `get_volumes`,
-   `get_volume_pages`, `get_volume_page`, `get_chapter_pages`, `get_chapter_page`, and
-   the thumbnail routes) take no `request` and do no tag check. A user blocked from a tag
-   can still open and read the pages of a blocked manga by hitting the reader endpoints
-   directly with the manga_id.
+2. **Blocked-tag filtering was bypassable at the content level.** `blocked_tags` was
+   applied on the list/search/detail endpoints, but the reader/content endpoints
+   (chapters, dims, volumes, pages, thumbnails) took no `request` and did no tag check —
+   a user blocked from a tag could still open and read a blocked manga directly by id.
+   **Fix:** `auth.is_manga_blocked(username, tags)`, called the same way as
+   `can_access_library` across every content endpoint, the cover-image route, bookmarks,
+   reading history/progress, metadata apply, tag/genre/description writes, and the page
+   routes. Same 404-not-403 rule.
 
-3. **Username is never sanitized → path traversal / arbitrary JSON file overwrite.**
-   `route_register` only checks length ≥ 3, a small reserved set, and uniqueness — no
-   character validation. `_user_data_file` builds `os.path.join(data_path, f"{username}.json")`,
-   so a username like `../../evil` (or any name with path separators) causes
-   `save_user_data` to write outside `data_path`. Registering the username `permissions`
-   (not in the reserved set) makes the per-user file collide with and clobber
-   `permissions.json`. The `reserved` set (`{"data","bootstrap","sessions","users"}`) is
-   incomplete and does not address traversal.
+3. **Username was never sanitized → path traversal / arbitrary JSON file overwrite.**
+   Registration only checked length ≥ 3 and a 4-word reserved set — no character
+   validation. Since `_user_data_file` builds `os.path.join(data_path, f"{username}.json")`,
+   a username like `../../evil` wrote outside `data_path`, and `permissions` (not in the
+   reserved set) collided with `permissions.json`.
+   **Fix:** usernames now validated against `^[a-z0-9_-]{3,32}$` before ever becoming a
+   path component, and the reserved set covers every fixed JSON filename under
+   `data_path` (`data`, `bootstrap`, `sessions`, `users`, `permissions`).
 
-### High
+### High — fixed
 
-4. **Weak password hashing.** `_hash_password` is a single round of HMAC-SHA256 with one
-   hardcoded global salt (`b"kinsho_salt_v1"`) baked into source. No per-user salt and no
-   slow KDF (bcrypt/scrypt/argon2/PBKDF2). Hashes are fast to brute-force, identical
-   passwords yield identical hashes (visible in `users.json`), and one precomputed table
-   works against every Kinsho install because the salt is public.
+4. **Weak password hashing.** Single-round HMAC-SHA256 with one hardcoded global salt
+   baked into source — fast to brute-force, and one precomputed table worked against
+   every Kinsho install.
+   **Fix:** PBKDF2-HMAC-SHA256, 600k iterations, random per-user salt, stored as
+   `pbkdf2_sha256$<iterations>$<salt>$<hash>`. Accounts still on the old hash verify fine
+   and are silently upgraded to the new format on next successful login — no forced reset
+   except finding #5's default admin.
 
-5. **Default `admin`/`admin` account is never forced to change.** `_ensure_admin_exists`
-   creates it and only prints a console warning. Anyone reaching a fresh instance before
-   the owner sets a password gets full admin.
+5. **Default `admin`/`admin` account was never forced to change.** Anyone reaching a
+   fresh instance before the owner set a password got full admin, indefinitely.
+   **Fix:** the bootstrapped admin account is flagged `must_change_password`; every page
+   route redirects to `/settings` until it's cleared by a successful password change,
+   with a banner there explaining why.
 
-6. **Open self-registration.** `/api/auth/register` is public. Any unauthenticated
-   visitor can create a `user` account, and — because of finding #1 — that account
-   immediately has full read access to every library. If self-registration isn't
-   intended for a personal deployment, this is a direct foothold.
+6. **Open self-registration.** `POST /api/auth/register` was public, and thanks to
+   finding #1, any account it created had full read access to every library by default.
+   **Fix:** removed. Accounts are admin-only now, via `POST /api/admin/users`
+   (`require_admin`-gated) and a "Create User" form in Settings. The sign-up face was
+   also removed from the login page's flip card.
 
-7. **Cover images are served without authentication.** The `/covers` mount
-   (`main.py:130-137`) is a plain `StaticFiles` mount and is not covered by the
-   `/api/*` auth gate. Cover art for any manga in any library — including libraries a
-   user is denied and manga behind blocked tags — is readable by anyone with the URL,
-   no login required.
+7. **Cover images were served without authentication.** The `/covers` mount was a plain
+   `StaticFiles` mount, outside the `/api/*` auth gate — readable by anyone with the URL,
+   no login, regardless of library permission or blocked tags.
+   **Fix:** replaced with an authenticated `GET /covers/{library_id}/{manga_name}/{filename}`
+   route that applies `can_access_library` / `is_manga_blocked` plus a `realpath`
+   containment check against path traversal, before serving the file.
 
-### Medium / low
+### Medium / low — fixed
 
-8. **Non-constant-time password comparison.** Login (`auth.py:311`) and change-password
-   (`auth.py:414`) compare hashes with `!=` instead of `hmac.compare_digest`, leaking a
-   timing side-channel.
+8. **Non-constant-time password comparison.** Login and change-password compared hashes
+   with `!=` instead of `hmac.compare_digest`, leaking a timing side-channel.
+   **Fix:** closed as part of the #4 rewrite — `_verify_password` uses
+   `hmac.compare_digest` throughout.
 
-9. **Password change does not invalidate existing sessions.** `route_change_password`
-   updates the hash but leaves all `sessions.json` tokens valid, so a stolen session
-   survives a password reset. There is also no "log out everywhere" path.
+9. **Password change didn't invalidate existing sessions.** A stolen session survived
+   the exact password reset meant to kill it, and there was no "log out everywhere" path.
+   **Fix:** `route_change_password` now deletes every other session for that user on a
+   successful change (keeping only the session that made the request alive), and
+   `POST /api/auth/logout-everywhere` ends all sessions including the current one, wired
+   up as a button in Settings. (Also fixed in passing: `route_logout` only ever checked
+   the session cookie, never the `X-Auth-Token` header, so the native app's logout was a
+   silent no-op server-side.)
 
-10. **`route_set_user_permissions` does not validate the target username.** It writes
-    `perms_data[username] = perms` for any string (admin-only, so lower severity), so a
-    typo or crafted name silently creates ghost/`_default`-shadowing entries.
+10. **`route_set_user_permissions` didn't validate the target username.** It wrote
+    `perms_data[username] = perms` for any string, so a typo or crafted name could
+    silently create a ghost entry or overwrite the `_default` template.
+    **Fix:** 404s unless the username is a real account or the literal `_default`
+    sentinel.
 
-11. **Permissive CORS.** `allow_origins=["*"]` with `allow_methods=["*"]`
-    (`main.py:74-80`). Mitigated by `allow_credentials=False` (cookies aren't readable
-    cross-origin), but any origin can call the API with a stolen `X-Auth-Token`.
+11. **Permissive CORS.** `allow_origins=["*"]` with `allow_methods=["*"]`. Mitigated by
+    `allow_credentials=False`, but any origin could call the API with a stolen
+    `X-Auth-Token` header (which isn't subject to the same cross-origin restriction as a
+    cookie).
+    **Fix:** `allow_origins` narrowed to the Capacitor Android app's actual WebView
+    origins (`https://localhost`, `http://localhost`, `capacitor://localhost`) — the only
+    legitimate cross-origin caller, since browser-served mode never needed CORS at all
+    (same-origin relative fetches). `allow_methods`/`allow_headers` narrowed to what's
+    actually used.
 
-### Remediation direction (decided)
+### Notes for future audits
 
-Owner decisions that constrain how the above get fixed:
-
-- **Denied libraries and blocked tags must be a total lockout — never visible or
-  reachable by that user, through any route.** Hiding tabs is not enough. Enforcement
-  has to move down into the data/content layer, not the page render:
-  - Add a single server-side authorization helper (e.g. `can_access_library(username,
-    library_id)` and `is_manga_blocked(username, library_id, manga_name)`) in `auth.py`
-    or a shared module, driven by `resolve_permissions`.
-  - Call it at the top of **every** endpoint that takes a `library_id` or `manga_id`:
-    `get_mangas`, `get_mangas_for_search`, `get_manga`, `get_chapters`, `get_manga_dims`,
-    `get_volumes`, `get_volume_pages`, `get_volume_page`, `get_chapter_pages`,
-    `get_chapter_page`, both thumbnail routes, favourites/lists/bookmarks/reading-progress,
-    and the page routes `manga_detail`, `volume_reader`, `chapter_reader`,
-    `category_list_page`. Return 404 (not 403) for denied libraries/blocked manga so their
-    existence isn't confirmed.
-  - Content endpoints that currently take no `request` (finding #2) must be changed to
-    accept `request: Request` and resolve the user so the check can run.
-  - Cover images (finding #7) leak the same content: covers for denied libraries / blocked
-    manga must also be gated. Replace the plain `/covers` `StaticFiles` mount with an
-    authenticated route that resolves the user and applies the same
-    `can_access_library` / `is_manga_blocked` check before serving the file.
-  - Blocked tags apply per-manga: a manga carrying any blocked tag is treated as
-    non-existent for that user everywhere, exactly like a denied library.
-
-- **User accounts are created by an admin only — remove open self-registration.**
-  - Remove/disable the public `POST /api/auth/register` route (finding #6), or gate it
-    behind `require_admin`. Add an admin-only "create user" flow instead (an admin endpoint
-    that sets username, initial password, role, and initial permissions).
-  - Keep the `admin`/`admin` bootstrap only for first run, but treat finding #5 as still
-    open — the default admin password should be force-changed on first login.
-  - When adding the admin create-user path, fix finding #3 at the same time: validate the
-    username against a strict charset (e.g. `^[a-z0-9_-]{3,32}$`), reject path separators
-    and `..`, and expand the reserved set to cover every JSON filename under `data_path`
-    (`data`, `bootstrap`, `sessions`, `users`, `permissions`).
-
-These are direction notes, not yet implemented. Findings #4, #8, #9, #10, #11 remain
-open and are not blocked by the two decisions above.
+- `can_access_library` / `is_manga_blocked` / `must_change_password` all live in
+  `auth.py`, driven by `resolve_permissions`. Any new endpoint that takes a `library_id`
+  or `manga_id` needs the first two called at the top, same as every existing one.
+- The username charset (`^[a-z0-9_-]{3,32}$`) and reserved-word set are the only things
+  standing between a username and becoming a filesystem path component — don't add a way
+  to set a username that skips `route_admin_create_user`'s validation.
+- If the native app ever changes its WebView scheme/config, `NATIVE_APP_ORIGINS` in
+  `main.py` is the one place to update.
 
 ## Deployment goal
 
