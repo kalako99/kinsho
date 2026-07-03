@@ -296,6 +296,33 @@ def resolve_permissions(username: str) -> dict:
     perms["is_admin"] = False
     return perms
 
+
+def can_access_library(username: str, library_id) -> bool:
+    """
+    Whether this user is allowed to see the given library.
+    Admins always can. Absence of an explicit entry means allowed (permissions
+    are opt-out, matching the tab-list behavior in manga_list()) — only an
+    explicit `False` denies.
+    """
+    perms = resolve_permissions(username)
+    if perms.get("is_admin"):
+        return True
+    return perms.get("libraries", {}).get(str(library_id), True) is not False
+
+
+def is_manga_blocked(username: str, tags) -> bool:
+    """
+    Whether this manga is off-limits to this user because it carries one of
+    their blocked tags. Admins are never blocked.
+    """
+    perms = resolve_permissions(username)
+    if perms.get("is_admin"):
+        return False
+    blocked = perms.get("blocked_tags", [])
+    if not blocked:
+        return False
+    return any(t in blocked for t in (tags or []))
+
 # ── AUTH ROUTES ──────────────────────────────────────────────────────────────
 
 async def route_login(request: Request):

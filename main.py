@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, BackgroundTasks, Query
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 import json
@@ -59,7 +59,6 @@ def get_local_ip():
 @asynccontextmanager
 async def lifespan(app):
     auth._ensure_admin_exists()
-    mount_covers()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
     if os.path.exists(bg_folder):
         app.mount("/backgrounds", StaticFiles(directory=bg_folder), name="backgrounds")
@@ -84,7 +83,8 @@ app.add_middleware(
 # under /api/auth/ (login/register/me/logout/change-password each enforce their
 # own rules). Anonymous API requests get a 401 here rather than being silently
 # served as admin. Page routes handle their own /login redirect; static assets
-# and cover images are served by their own mounts and are not gated here.
+# (/static) are just JS/CSS and are not gated. Cover images (/covers) are their
+# own authenticated route (see get_cover_image) rather than a plain mount.
 PUBLIC_API_PREFIXES = ("/api/auth/",)
 
 @app.middleware("http")
@@ -125,17 +125,39 @@ _thumb_progress_lock = threading.Lock()
 
 _scan_running: set = set()  # library_ids currently being scanned
 
-# Covers are mounted dynamically after data_path is known — see mount_covers()
-covers_mounted = False
-def mount_covers():
-    global covers_mounted
-    if covers_mounted:
-        return
-    covers_dir = get_covers_dir()
-    if covers_dir:
-        app.mount("/covers", StaticFiles(directory=covers_dir), name="covers")
-        covers_mounted = True
 templates = Jinja2Templates(directory="templates")
+
+# ── COVER IMAGES ──
+# Served through an authenticated route rather than a plain StaticFiles mount:
+# cover art for a denied library / blocked manga is the same content leak as
+# the JSON endpoints, just as image bytes instead of text.
+@app.get("/covers/{library_id}/{manga_name}/{filename}")
+def get_cover_image(request: Request, library_id: int, manga_name: str, filename: str):
+    username = auth.get_current_user(request)
+    if username is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    lib_manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    manga = next((m for m in (lib_manga_data or {}).get("mangas", []) if m.get("name") == manga_name), None)
+    if manga and auth.is_manga_blocked(username, load_manga_dims(library_id, manga_name).get("tags", [])):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    covers_dir = get_covers_dir()
+    if not covers_dir:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    covers_root = os.path.realpath(covers_dir)
+    manga_dir   = os.path.realpath(os.path.join(covers_root, str(library_id), manga_name))
+    if os.path.commonpath([covers_root, manga_dir]) != covers_root:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    file_path = os.path.realpath(os.path.join(manga_dir, filename))
+    if os.path.commonpath([manga_dir, file_path]) != manga_dir:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    if not os.path.isfile(file_path):
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return FileResponse(file_path)
 
 # ── DATA MODELS ──
 class Library(BaseModel):
@@ -192,6 +214,20 @@ def load_manga_dims(library_id: int, manga_name: str) -> dict:
         return {"chapters": {}, "tags": [], "genres": [], "description": ""}
     with open(path, "r") as f:
         return json.load(f)
+
+def _is_manga_id_blocked(username: str, library_id: int, manga_id: str) -> bool:
+    """
+    Whether the manga behind this id carries one of the user's blocked tags.
+    False (not blocked) if the manga can't be resolved — endpoints that only
+    key off manga_id (bookmarks, reading history) already treat an unknown id
+    as "nothing there" rather than an error.
+    """
+    manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
+    if not manga:
+        return False
+    dims = load_manga_dims(library_id, manga["name"])
+    return auth.is_manga_blocked(username, dims.get("tags", []))
 
 def save_manga_dims(library_id: int, manga_name: str, data: dict):
     path = get_manga_dims_file(library_id, manga_name)
@@ -1884,7 +1920,6 @@ def run_scan(library_id: int):
     print(f"[Scan] data_path: {get_data_path()}")
     print(f"[Scan] covers_dir: {get_covers_dir()}")
 
-    mount_covers()
     auto_organize_library_root(lib)
     mangas = scan_library(lib)
     print(f"[Scan] Found {len(mangas)} mangas.")
@@ -2187,7 +2222,8 @@ def get_mangas(
     page: int = Query(default=1, ge=1),
 ):
     username = auth.get_current_user(request)
-    mount_covers()
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"mangas": [], "total": 0, "page": page, "per_page": 50})
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2245,7 +2281,8 @@ def get_mangas(
 @app.get("/api/mangas/{library_id}/search")
 def get_mangas_for_search(request: Request, library_id: int):
     username = auth.get_current_user(request)
-    mount_covers()
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"mangas": []})
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2253,7 +2290,7 @@ def get_mangas_for_search(request: Request, library_id: int):
     mangas = manga_data.get("mangas", [])
     user_data = auth.load_user_data(username)
     user_covers = user_data.get("covers", {}).get(str(library_id), {})
- 
+
     perms = auth.resolve_permissions(username)
     blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
     result = []
@@ -2277,7 +2314,8 @@ def get_mangas_for_search(request: Request, library_id: int):
 @app.get("/api/manga/{library_id}/{manga_id}")
 def get_manga(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
-    mount_covers()
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2315,6 +2353,8 @@ def get_manga(request: Request, library_id: int, manga_id: str):
 @app.post("/api/manga/{library_id}/{manga_id}/favourite")
 async def toggle_favourite(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     user_data = auth.load_user_data(username)
     favourites = user_data.get("favourites", [])
     existing = next(
@@ -2419,6 +2459,8 @@ def get_admin_status(request: Request):
 @app.get("/api/manga/{library_id}/{manga_id}/covers")
 def get_manga_covers(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -2426,7 +2468,10 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
- 
+    dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+
     covers_dir = get_covers_dir()
     manga_covers_dir = os.path.join(covers_dir, str(library_id), manga["name"])
     if not os.path.exists(manga_covers_dir):
@@ -2460,6 +2505,8 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
 @app.post("/api/manga/{library_id}/{manga_id}/cover")
 async def set_manga_cover(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     body = await request.json()
     filename = body.get("filename", "").strip()
     if not filename:
@@ -2488,6 +2535,8 @@ def rebuild_all_tags(data: dict) -> list:
 @app.post("/api/manga/{library_id}/{manga_id}/tags/add")
 async def add_tag(library_id: int, manga_id: str, request: Request):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
     if not auth.resolve_permissions(username).get("tags"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2505,6 +2554,8 @@ async def add_tag(library_id: int, manga_id: str, request: Request):
     if not manga:
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     if tag not in dims["tags"]:
         dims["tags"].append(tag)
     save_manga_dims(library_id, manga["name"], dims)
@@ -2520,6 +2571,8 @@ async def remove_tags(library_id: int, manga_id: str, request: Request):
     body = await request.json()
     tags_to_remove = body.get("tags", [])
     remove_globally = body.get("global", False)
+    if not remove_globally and not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
     data = load_app_data()
 
     if remove_globally:
@@ -2537,6 +2590,8 @@ async def remove_tags(library_id: int, manga_id: str, request: Request):
         if not manga:
             return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
         dims = load_manga_dims(library_id, manga["name"])
+        if auth.is_manga_blocked(username, dims.get("tags", [])):
+            return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
         dims["tags"] = [t for t in dims.get("tags", []) if t not in tags_to_remove]
         save_manga_dims(library_id, manga["name"], dims)
 
@@ -2563,6 +2618,8 @@ def rebuild_all_genres(data: dict) -> list:
 @app.post("/api/manga/{library_id}/{manga_id}/genres/add")
 async def add_genre(library_id: int, manga_id: str, request: Request):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
     if not auth.resolve_permissions(username).get("genres"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2577,6 +2634,8 @@ async def add_genre(library_id: int, manga_id: str, request: Request):
     if not manga:
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     if genre not in dims["genres"]:
         dims["genres"].append(genre)
     save_manga_dims(library_id, manga["name"], dims)
@@ -2592,6 +2651,8 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
     body = await request.json()
     genres_to_remove = body.get("genres", [])
     remove_globally = body.get("global", False)
+    if not remove_globally and not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
     data = load_app_data()
     if remove_globally:
         for lib_id, lib_data in data.get("manga_data", {}).items():
@@ -2609,6 +2670,8 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
     if not manga:
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims["genres"] = [g for g in dims.get("genres", []) if g not in genres_to_remove]
     save_manga_dims(library_id, manga["name"], dims)
     save_app_data(data)
@@ -2617,6 +2680,8 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
 @app.post("/api/manga/{library_id}/{manga_id}/description")
 async def save_description(library_id: int, manga_id: str, request: Request):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
     if not auth.resolve_permissions(username).get("description"):
         return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
@@ -2629,6 +2694,8 @@ async def save_description(library_id: int, manga_id: str, request: Request):
     if not manga:
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims["description"] = description
     save_manga_dims(library_id, manga["name"], dims)
     return JSONResponse({"ok": True})
@@ -2653,6 +2720,8 @@ def _metadata_field_done(dims: dict, field: str) -> bool:
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
 async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     perms = auth.resolve_permissions(username)
     if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
@@ -2667,6 +2736,8 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
 @app.post("/api/manga/{library_id}/{manga_id}/apply-metadata")
 async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     perms = auth.resolve_permissions(username)
     if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
@@ -2679,6 +2750,8 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
         return JSONResponse({"error": "Library not found"}, status_code=404)
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    if auth.is_manga_blocked(username, load_manga_dims(library_id, manga["name"]).get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     try:
         # The chosen candidate (from the AniList search) is the primary source.
@@ -2816,6 +2889,10 @@ async def save_last_tab(request: Request):
 @app.get("/api/manga/{library_id}/{manga_id}/bookmarks")
 async def get_bookmarks(request: Request, library_id: int, manga_id: str):
     username  = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     user_data = auth.load_user_data(username)
     key       = f"{library_id}:{manga_id}"
     bookmarks = user_data.get("bookmarks", {}).get(key, [])
@@ -2824,6 +2901,10 @@ async def get_bookmarks(request: Request, library_id: int, manga_id: str):
 @app.post("/api/manga/{library_id}/{manga_id}/bookmarks")
 async def save_bookmarks(request: Request, library_id: int, manga_id: str):
     username  = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     body      = await request.json()
     user_data = auth.load_user_data(username)
     key       = f"{library_id}:{manga_id}"
@@ -2873,12 +2954,16 @@ async def save_reading_progress(request: Request):
 
     if not library_id or not manga_id:
         return JSONResponse({"ok": False, "error": "Missing library_id or manga_id"}, status_code=400)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
 
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(library_id, {})
     manga = next((m for m in manga_data.get("mangas", []) if m["id"] == manga_id), None)
     manga_name = manga["name"] if manga else None
     dims = load_manga_dims(int(library_id), manga["name"]) if manga else {}
+    if manga and auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     is_volume_manga = (manga.get("manga_type") == "case2" or bool(dims.get("volumes"))) if manga else False
     source_name = None
     if manga and chapter_id:
@@ -2990,6 +3075,8 @@ async def save_reading_progress(request: Request):
 @app.get("/api/reading/history/{library_id}")
 def get_reading_history(request: Request, library_id: int):
     username  = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"history": []})
     user_data = auth.load_user_data(username)
     lib_history = user_data.get("reading_history", {}).get(str(library_id), {})
 
@@ -3006,6 +3093,8 @@ def get_reading_history(request: Request, library_id: int):
             continue
 
         dims = load_manga_dims(library_id, manga["name"])
+        if auth.is_manga_blocked(username, dims.get("tags", [])):
+            continue
         is_volume_manga = manga.get("manga_type") == "case2"
 
         if is_volume_manga:
@@ -3056,7 +3145,8 @@ def get_category_list(
         return JSONResponse({"error": "Invalid category"}, status_code=400)
 
     username = auth.get_current_user(request)
-    mount_covers()
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     raw_mangas = manga_data.get("mangas", [])
@@ -3154,6 +3244,10 @@ def get_category_list(
 @app.get("/api/reading/history/{library_id}/{manga_id}")
 def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
     username  = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     user_data = auth.load_user_data(username)
     entry     = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id, {})
 
@@ -3232,9 +3326,13 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if not auth.can_access_library(username, library_id):
+        return RedirectResponse("/", status_code=302)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if manga and auth.is_manga_blocked(username, load_manga_dims(library_id, manga["name"]).get("tags", [])):
+        return RedirectResponse("/", status_code=302)
     manga_type = manga.get("manga_type", "loose") if manga else "loose"
     if manga_type == "case2":
         template = "volume_detail.html"
@@ -3254,6 +3352,8 @@ def category_list_page(request: Request, library_id: int, category: str):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if not auth.can_access_library(username, library_id):
+        return RedirectResponse("/", status_code=302)
     if category not in ("favourites", "last-read", "random"):
         return RedirectResponse("/", status_code=302)
     titles = {
@@ -3273,6 +3373,10 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if not auth.can_access_library(username, library_id):
+        return RedirectResponse("/", status_code=302)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
@@ -3281,7 +3385,10 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapters")
-def get_chapters(library_id: int, manga_id: str):
+def get_chapters(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3290,6 +3397,8 @@ def get_chapters(library_id: int, manga_id: str):
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapters = [
         {"id": cid, "name": ch["name"], "path": ch["path"]}
         for cid, ch in dims.get("chapters", {}).items()
@@ -3299,7 +3408,10 @@ def get_chapters(library_id: int, manga_id: str):
 
 
 @app.get("/api/manga/{library_id}/{manga_id}/dims")
-def get_manga_dims(library_id: int, manga_id: str):
+def get_manga_dims(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3308,12 +3420,17 @@ def get_manga_dims(library_id: int, manga_id: str):
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     return JSONResponse(dims, headers={"Cache-Control": "private, max-age=120"})
 
 # ── VOLUME ROUTES (Case 2) ──
 
 @app.get("/api/manga/{library_id}/{manga_id}/volumes")
-def get_volumes(library_id: int, manga_id: str):
+def get_volumes(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3322,6 +3439,8 @@ def get_volumes(library_id: int, manga_id: str):
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     volumes = [
         {"id": vid, "name": v["name"], "path": v["path"], "cover_image": v.get("cover_image"), "total_pages": len(v.get("pages", []))}
         for vid, v in dims.get("volumes", {}).items()
@@ -3334,6 +3453,10 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if not auth.can_access_library(username, library_id):
+        return RedirectResponse("/", status_code=302)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id":   manga_id,
@@ -3342,7 +3465,10 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/pages")
-def get_volume_pages(library_id: int, manga_id: str, volume_id: str):
+def get_volume_pages(request: Request, library_id: int, manga_id: str, volume_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3351,6 +3477,8 @@ def get_volume_pages(library_id: int, manga_id: str, volume_id: str):
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     volume = dims.get("volumes", {}).get(volume_id)
     if not volume:
         return JSONResponse({"error": "Volume not found"}, status_code=404)
@@ -3395,7 +3523,10 @@ def get_volume_pages(library_id: int, manga_id: str, volume_id: str):
     return JSONResponse({"pages": pages, "count": len(pages)})
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{page_index:int}")
-def get_volume_page(library_id: int, manga_id: str, volume_id: str, page_index: int, scale: float = 1.5):
+def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, page_index: int, scale: float = 1.5):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3404,6 +3535,8 @@ def get_volume_page(library_id: int, manga_id: str, volume_id: str, page_index: 
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     volume = dims.get("volumes", {}).get(volume_id)
     if not volume:
         return JSONResponse({"error": "Volume not found"}, status_code=404)
@@ -3505,7 +3638,10 @@ def get_volume_page(library_id: int, manga_id: str, volume_id: str, page_index: 
 # ── ARCHIVE CHAPTER PAGE ROUTE (Case 1 & Case 3) ──
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/pages")
-def get_chapter_pages(library_id: int, manga_id: str, chapter_id: str):
+def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3514,6 +3650,8 @@ def get_chapter_pages(library_id: int, manga_id: str, chapter_id: str):
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapter = dims.get("chapters", {}).get(chapter_id)
     if not chapter:
         return JSONResponse({"error": "Chapter not found"}, status_code=404)
@@ -3540,8 +3678,11 @@ def get_chapter_pages(library_id: int, manga_id: str, chapter_id: str):
         return JSONResponse({"pages": pages, "count": len(pages)})
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}")
-def get_chapter_page(library_id: int, manga_id: str, chapter_id: str, filename_or_index: str):
+def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str):
     from fastapi.responses import FileResponse
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3550,6 +3691,8 @@ def get_chapter_page(library_id: int, manga_id: str, chapter_id: str, filename_o
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapter = dims.get("chapters", {}).get(chapter_id)
     if not chapter:
         return JSONResponse({"error": "Chapter not found"}, status_code=404)
@@ -3588,11 +3731,14 @@ def get_chapter_page(library_id: int, manga_id: str, chapter_id: str, filename_o
 # ── THUMBNAIL ROUTES (on-demand, in-memory) ──
 
 @app.get("/api/manga/{library_id}/{manga_id}/thumb/{source_id}/{page_index:int}")
-def get_thumb_on_demand(library_id: int, manga_id: str, source_id: str, page_index: int):
+def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source_id: str, page_index: int):
     """
     Extract and return a single thumbnail on demand, in memory, never written to disk.
     Reuses the existing page caches (_cached_archive_page, etc.).
     """
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3602,6 +3748,8 @@ def get_thumb_on_demand(library_id: int, manga_id: str, source_id: str, page_ind
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
 
     # Resolve source: try chapters first, then volumes
     source = dims.get("chapters", {}).get(source_id)
@@ -3696,12 +3844,15 @@ def get_thumb_on_demand(library_id: int, manga_id: str, source_id: str, page_ind
     )
 
 @app.get("/api/manga/{library_id}/{manga_id}/thumb-full/{source_id}/{page_index:int}")
-def get_thumb_full_on_demand(library_id: int, manga_id: str, source_id: str, page_index: int):
+def get_thumb_full_on_demand(request: Request, library_id: int, manga_id: str, source_id: str, page_index: int):
     """
     Return the full-resolution page image for a given source/page.
     Used by the thumb strip to pre-load the actual image behind each visible thumbnail.
     Delegates to the existing page endpoints' logic via the shared caches.
     """
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3711,6 +3862,8 @@ def get_thumb_full_on_demand(library_id: int, manga_id: str, source_id: str, pag
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
     dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
 
     source = dims.get("chapters", {}).get(source_id)
     is_volume = source is None
