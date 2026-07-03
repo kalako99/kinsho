@@ -3,6 +3,9 @@ const { createApp } = Vue;
 createApp({
   data() {
     return {
+      // ── SECTION NAV ──
+      activeSection: 'general',
+
       // ── DATA PATH ──
       dataPath: '',
       dataPathSaved: false,

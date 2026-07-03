@@ -190,6 +190,69 @@
       margin: 8px 20px 0;
     }
 
+    /* ── SECTION NAV (General / Libraries / Appearance / Permissions) ── */
+    .settings-layout {
+      display: flex;
+      align-items: flex-start;
+      max-width: 1080px;
+      margin: 0 auto;
+    }
+    .settings-nav {
+      flex: 0 0 190px;
+      position: sticky;
+      top: 57px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      padding: 20px 12px;
+      box-sizing: border-box;
+    }
+    .nav-item {
+      background: none;
+      border: none;
+      text-align: left;
+      padding: 10px 14px;
+      border-radius: 8px;
+      color: var(--color-muted, #888);
+      font-size: 0.85rem;
+      font-weight: 600;
+      font-family: 'Segoe UI', sans-serif;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+    .nav-item:hover { background: var(--color-secondary, #1a1a1a); color: var(--color-text, #f0f0f0); }
+    .nav-item.active { background: var(--color-secondary, #1a1a1a); color: var(--color-primary, #e94560); }
+    .settings-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    @media (max-width: 720px) {
+      .settings-layout { flex-direction: column; }
+      .settings-nav {
+        position: sticky;
+        top: 57px;
+        z-index: 90;
+        width: 100%;
+        flex-direction: row;
+        overflow-x: auto;
+        gap: 6px;
+        padding: 10px 14px;
+        background: var(--color-background, #0f0f0f);
+        border-bottom: 1px solid var(--color-border, #2a2a2a);
+        scrollbar-width: none;
+      }
+      .settings-nav::-webkit-scrollbar { display: none; }
+      .nav-item {
+        flex-shrink: 0;
+        white-space: nowrap;
+        padding: 8px 14px;
+        border-radius: 20px;
+        border: 1px solid var(--color-border, #333);
+      }
+      .nav-item.active { border-color: var(--color-primary, #e94560); }
+    }
+
     .theme-select {
       width: 100%;
       background: var(--color-background, #0f0f0f);
@@ -375,6 +438,19 @@
     <span class="topbar-title">Settings</span>
   </div>
 
+  <div class="settings-layout">
+    <nav class="settings-nav">
+      <button class="nav-item" :class="{ active: activeSection === 'general' }" @click="activeSection = 'general'">General</button>
+      <button class="nav-item" :class="{ active: activeSection === 'libraries' }" @click="activeSection = 'libraries'">Libraries</button>
+      <button class="nav-item" :class="{ active: activeSection === 'appearance' }" @click="activeSection = 'appearance'">Appearance</button>
+      <button v-if="isAdmin" class="nav-item" :class="{ active: activeSection === 'permissions' }" @click="activeSection = 'permissions'">Permissions</button>
+    </nav>
+
+    <div class="settings-content">
+
+  <!-- ══════════════════════ GENERAL ══════════════════════ -->
+  <template v-if="activeSection === 'general'">
+
   <!-- ── SERVER CONNECTION (native app only) ── -->
   <div class="settings-section" v-if="isNativeApp">
     <div class="section-label">Server Connection</div>
@@ -476,7 +552,12 @@
       <div class="section-hint" style="margin-top:6px;">Ends every other logged-in session for this account (other browsers, devices, the native app).</div>
     </template>
   </div>
- 
+
+  </template><!-- /General: server connection + account -->
+
+  <!-- ══════════════════════ LIBRARIES ══════════════════════ -->
+  <template v-if="activeSection === 'libraries'">
+
   <template v-if="isAdmin">
   <hr class="divider">
 
@@ -630,7 +711,10 @@
 
   </div>
 
-  <hr class="divider">
+  </template><!-- /Libraries -->
+
+  <!-- ══════════════════════ APPEARANCE ══════════════════════ -->
+  <template v-if="activeSection === 'appearance'">
 
   <div class="settings-section">
     <div class="section-label">Accent Colors</div>
@@ -709,6 +793,11 @@
       <div class="status-msg" :class="backdropStatus.type" v-text="backdropStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
   </div>
+
+  </template><!-- /Appearance -->
+
+  <!-- ══════════════════════ GENERAL (continued): ANALYTICS ══════════════════════ -->
+  <template v-if="activeSection === 'general'">
 
   <!-- ── ANALYTICS ── -->
   <hr class="divider">
@@ -792,9 +881,10 @@
     </template>
   </div>
 
-  <!-- ── USER PERMISSIONS (admin only) ── -->
-  <template v-if="isAdmin">
-  <hr class="divider">
+  </template><!-- /General: analytics -->
+
+  <!-- ══════════════════════ PERMISSIONS (admin only) ══════════════════════ -->
+  <template v-if="activeSection === 'permissions' && isAdmin">
 
   <div class="settings-section">
     <div class="section-label">Create User</div>
@@ -989,7 +1079,11 @@
 
     <div class="status-msg" :class="permStatus.type" style="text-align:center; margin-top:10px;" v-text="permStatus.msg"></div>
   </div>
-  </template><!-- /v-if isAdmin: User Permissions -->
+
+  </template><!-- /Permissions -->
+
+    </div><!-- /settings-content -->
+  </div><!-- /settings-layout -->
 
   <!-- ── CSS EDITOR POPUP ── -->
   <div class="css-editor-overlay" v-if="showCssEditor">
