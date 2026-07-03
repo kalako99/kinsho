@@ -259,7 +259,7 @@
         body:        JSON.stringify({ username, password }),
       });
       const data = await res.json();
-      if (data.ok) { window.location.href = '/'; }
+      if (data.ok) { window.location.href = data.must_change_password ? '/settings' : '/'; }
       else         { showStatus(data.error || 'Login failed.', true); }
     } catch {
       showStatus('Could not reach server.', true);

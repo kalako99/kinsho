@@ -7,6 +7,7 @@ Handles: users.json, sessions.json, login, admin-only account creation,
 import json
 import os
 import re
+import secrets
 import uuid
 import hashlib
 import hmac
@@ -75,9 +76,41 @@ def _save_users(data: dict):
         json.dump(data, f, indent=2)
 
 
+# PBKDF2-HMAC-SHA256 with a random per-user salt, per OWASP's current
+# minimum iteration count for that algorithm. Stored as
+# "pbkdf2_sha256$<iterations>$<salt_hex>$<hash_hex>" so the iteration count
+# travels with the hash and can be raised later without breaking old rows.
+_PBKDF2_ITERATIONS = 600_000
+
+
+def _pbkdf2(password: str, salt_hex: str, iterations: int) -> str:
+    return hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), iterations).hex()
+
+
 def _hash_password(password: str) -> str:
-    salt = b"kinsho_salt_v1"
-    return hmac.new(salt, password.encode(), digestmod=hashlib.sha256).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = _pbkdf2(password, salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt}${digest}"
+
+
+def _hash_password_legacy(password: str) -> str:
+    """
+    The original single-round HMAC-SHA256 with one hardcoded global salt.
+    Kept only to verify accounts created before the PBKDF2 migration —
+    _verify_password upgrades them to the new format on next successful login.
+    """
+    return hmac.new(b"kinsho_salt_v1", password.encode(), digestmod=hashlib.sha256).hexdigest()
+
+
+def _verify_password(stored_hash: str, password: str) -> bool:
+    if stored_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, expected = stored_hash.split("$")
+            candidate = _pbkdf2(password, salt, int(iterations))
+        except (ValueError, TypeError):
+            return False
+        return hmac.compare_digest(candidate, expected)
+    return hmac.compare_digest(_hash_password_legacy(password), stored_hash)
 
 
 def _find_user(username: str) -> Optional[dict]:
@@ -90,16 +123,17 @@ def _ensure_admin_exists():
     data = _load_users()
     if not data["users"]:
         admin = {
-            "username":      "admin",
-            "password_hash": _hash_password("admin"),
-            "role":          "admin",
-            "allowed_tabs":  None,
-            "created_at":    datetime.now().isoformat(),
+            "username":            "admin",
+            "password_hash":       _hash_password("admin"),
+            "role":                "admin",
+            "allowed_tabs":        None,
+            "created_at":          datetime.now().isoformat(),
+            "must_change_password": True,
         }
         data["users"].append(admin)
         _save_users(data)
         print("[Auth] Default admin account created (password: admin). "
-              "Change it after first login.")
+              "You will be required to change it on first login.")
 
         admin_file = _user_data_file("admin")
         if admin_file and not os.path.exists(admin_file):
@@ -330,6 +364,11 @@ def is_manga_blocked(username: str, tags) -> bool:
         return False
     return any(t in blocked for t in (tags or []))
 
+
+def must_change_password(username: str) -> bool:
+    user = _find_user(username)
+    return bool(user and user.get("must_change_password"))
+
 # ── AUTH ROUTES ──────────────────────────────────────────────────────────────
 
 async def route_login(request: Request):
@@ -342,11 +381,21 @@ async def route_login(request: Request):
         return JSONResponse({"ok": False, "error": "Username and password required."}, status_code=400)
 
     user = _find_user(username)
-    if not user or user["password_hash"] != _hash_password(password):
+    if not user or not _verify_password(user["password_hash"], password):
         return JSONResponse({"ok": False, "error": "Invalid username or password."}, status_code=401)
 
+    # Transparently migrate accounts still on the legacy hash format.
+    if not user["password_hash"].startswith("pbkdf2_sha256$"):
+        data = _load_users()
+        stored = next(u for u in data["users"] if u["username"] == username)
+        stored["password_hash"] = _hash_password(password)
+        _save_users(data)
+
     token    = _create_session(username)
-    response = JSONResponse({"ok": True, "username": username, "role": user["role"], "token": token})
+    response = JSONResponse({
+        "ok": True, "username": username, "role": user["role"], "token": token,
+        "must_change_password": bool(user.get("must_change_password")),
+    })
     response.set_cookie(
         key=COOKIE_NAME, value=token,
         httponly=True, samesite="lax",
@@ -422,6 +471,7 @@ def route_me(request: Request):
         "role":         user["role"] if user else "user",
         "allowed_tabs": user.get("allowed_tabs") if user else None,
         "permissions":  perms,
+        "must_change_password": bool(user and user.get("must_change_password")),
     })
 
 
@@ -442,10 +492,11 @@ async def route_change_password(request: Request):
 
     data  = _load_users()
     user  = next((u for u in data["users"] if u["username"] == username), None)
-    if not user or user["password_hash"] != _hash_password(current_password):
+    if not user or not _verify_password(user["password_hash"], current_password):
         return JSONResponse({"ok": False, "error": "Current password is incorrect."}, status_code=401)
 
     user["password_hash"] = _hash_password(new_password)
+    user["must_change_password"] = False
     _save_users(data)
     return JSONResponse({"ok": True})
 

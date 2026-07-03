@@ -26,10 +26,11 @@ createApp({
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
 
       // ── USERNAME ──
-      username:        '',
-      currentPassword: '',
-      newPassword:     '',
-      passwordStatus:  { msg: '', type: '' },
+      username:           '',
+      currentPassword:    '',
+      newPassword:        '',
+      passwordStatus:     { msg: '', type: '' },
+      mustChangePassword: false,
 
       // ── BACKDROP ──
       backdropList:   true,
@@ -103,7 +104,7 @@ createApp({
 
       // ── ADMIN: CREATE USER ──
       newUsername:      '',
-      newPassword:      '',
+      newUserPassword:  '',
       newRole:          'user',
       createUserStatus: { msg: '', type: '' },
     };
@@ -211,10 +212,11 @@ createApp({
         const res  = await fetch(apiUrl('/api/auth/me'));
         const data = await res.json();
         if (data.ok) {
-          this.isLoggedIn    = true;
-          this.username      = data.username;
-          this.isAdmin       = data.role === 'admin';
-          this.myPermissions = data.permissions || {};
+          this.isLoggedIn         = true;
+          this.username           = data.username;
+          this.isAdmin            = data.role === 'admin';
+          this.myPermissions      = data.permissions || {};
+          this.mustChangePassword = !!data.must_change_password;
         } else {
           this.isLoggedIn = false;
           this.username   = '';
@@ -244,9 +246,10 @@ createApp({
         });
         const data = await res.json();
         if (data.ok) {
-          this.passwordStatus  = { msg: '✓ Password changed.', type: 'ok' };
-          this.currentPassword = '';
-          this.newPassword     = '';
+          this.passwordStatus     = { msg: '✓ Password changed.', type: 'ok' };
+          this.currentPassword    = '';
+          this.newPassword        = '';
+          this.mustChangePassword = false;
         } else {
           this.passwordStatus = { msg: data.error || 'Something went wrong.', type: 'err' };
         }
@@ -947,7 +950,7 @@ createApp({
     // ── CREATE USER (admin only) ──
     async createUser() {
       const username = this.newUsername.trim().toLowerCase();
-      const password = this.newPassword;
+      const password = this.newUserPassword;
       if (!username || !password) {
         this.createUserStatus = { msg: 'Username and password required.', type: 'err' };
         return;
@@ -962,7 +965,7 @@ createApp({
         if (data.ok) {
           this.createUserStatus = { msg: `✓ Created ${data.username}.`, type: 'ok' };
           this.newUsername = '';
-          this.newPassword = '';
+          this.newUserPassword = '';
           this.newRole = 'user';
           await this.loadUserPermissions();
         } else {

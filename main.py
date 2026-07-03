@@ -2010,10 +2010,6 @@ def get_settings(request: Request):
         "backdrop_detail":          user_data.get("backdrop_detail", True),
     })
 
-@app.get("/search")
-def search_page(request: Request):
-    return templates.TemplateResponse(request, "search_page.html")
-
 @app.post("/api/settings/data-path")
 async def set_data_path(request: Request):
     err = auth.require_admin(request)
@@ -3298,6 +3294,8 @@ def search_page(request: Request):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     return templates.TemplateResponse(request, "search_page.html", {
         "theme_css": get_theme_css(username),
     })
@@ -3307,6 +3305,8 @@ def manga_list(request: Request):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     data = load_app_data()
     admin = load_admin()
     libraries = data.get("libraries", [])
@@ -3329,6 +3329,8 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     if not auth.can_access_library(username, library_id):
         return RedirectResponse("/", status_code=302)
     data = load_app_data()
@@ -3355,6 +3357,8 @@ def category_list_page(request: Request, library_id: int, category: str):
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     if not auth.can_access_library(username, library_id):
         return RedirectResponse("/", status_code=302)
     if category not in ("favourites", "last-read", "random"):
@@ -3376,6 +3380,8 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     if not auth.can_access_library(username, library_id):
         return RedirectResponse("/", status_code=302)
     if _is_manga_id_blocked(username, library_id, manga_id):
@@ -3456,6 +3462,8 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
     username = auth.get_current_user(request)
     if not username:
         return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
     if not auth.can_access_library(username, library_id):
         return RedirectResponse("/", status_code=302)
     if _is_manga_id_blocked(username, library_id, manga_id):

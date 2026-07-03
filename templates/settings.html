@@ -434,6 +434,14 @@
 
     <!-- LOGGED IN: show password change + logout -->
     <template v-else>
+      <div
+        v-if="mustChangePassword"
+        class="card"
+        style="border-color:var(--color-primary,#e94560); background:color-mix(in srgb, var(--color-primary,#e94560) 12%, var(--color-secondary,#1a1a1a));"
+      >
+        <div style="font-size:0.85rem; font-weight:600; color:var(--color-primary,#e94560);">You're still on the default admin password</div>
+        <div style="font-size:0.78rem; color:var(--color-muted,#888); margin-top:4px;">Set a new password below before continuing — other pages will keep redirecting here until you do.</div>
+      </div>
       <div class="card">
         <div class="field-label">Change password</div>
         <div class="field-row" style="margin-bottom: 8px;">
@@ -796,7 +804,7 @@
       />
       <input
         type="password"
-        v-model="newPassword"
+        v-model="newUserPassword"
         placeholder="Password (min. 4 characters)"
         style="width:100%; background:var(--color-background,#0f0f0f); border:1px solid var(--color-border,#333); border-radius:8px; padding:9px 12px; color:var(--color-text,#f0f0f0); font-size:0.85rem; font-family:'Segoe UI',sans-serif; outline:none; box-sizing:border-box;"
       />
