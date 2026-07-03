@@ -565,6 +565,8 @@ async def route_set_user_permissions(request: Request, username: str):
     err = require_admin(request)
     if err:
         return err
+    if username != "_default" and not _find_user(username):
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
     body  = await request.json()
     perms = body.get("permissions", {})
     allowed_keys = {"tags", "genres", "description", "libraries", "blocked_tags"}
