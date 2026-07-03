@@ -1,11 +1,12 @@
 """
 auth.py — KINSHO authentication layer
-Handles: users.json, sessions.json, login, register, session validation,
-         change password, and per-user data file helpers.
+Handles: users.json, sessions.json, login, admin-only account creation,
+         session validation, change password, and per-user data file helpers.
 """
 
 import json
 import os
+import re
 import uuid
 import hashlib
 import hmac
@@ -19,6 +20,12 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 SESSION_DURATION_DAYS = 30
 COOKIE_NAME           = "kinsho_session"
+
+# Usernames become JSON filenames (`{username}.json`) under data_path, so the
+# charset is restricted to what's safe there and the reserved set covers
+# every fixed JSON filename data_path already uses.
+VALID_USERNAME_RE  = re.compile(r'^[a-z0-9_-]{3,32}$')
+RESERVED_USERNAMES = {"data", "bootstrap", "sessions", "users", "permissions"}
 
 # ── FILE HELPERS ─────────────────────────────────────────────────────────────
 
@@ -349,21 +356,26 @@ async def route_login(request: Request):
     return response
 
 
-async def route_register(request: Request):
-    _ensure_admin_exists()
+async def route_admin_create_user(request: Request):
+    """POST /api/admin/users — admin-only account creation. { username, password, role }"""
+    err = require_admin(request)
+    if err:
+        return err
+
     body     = await request.json()
     username = body.get("username", "").strip().lower()
     password = body.get("password", "")
+    role     = body.get("role", "user")
+    if role not in ("user", "admin"):
+        role = "user"
 
     if not username or not password:
         return JSONResponse({"ok": False, "error": "Username and password required."}, status_code=400)
-    if len(username) < 3:
-        return JSONResponse({"ok": False, "error": "Username must be at least 3 characters."}, status_code=400)
     if len(password) < 4:
         return JSONResponse({"ok": False, "error": "Password must be at least 4 characters."}, status_code=400)
-
-    reserved = {"data", "bootstrap", "sessions", "users"}
-    if username in reserved:
+    if not VALID_USERNAME_RE.match(username):
+        return JSONResponse({"ok": False, "error": "Username must be 3-32 characters: lowercase letters, numbers, underscore, or hyphen only."}, status_code=400)
+    if username in RESERVED_USERNAMES:
         return JSONResponse({"ok": False, "error": "That username is reserved."}, status_code=400)
     if _find_user(username):
         return JSONResponse({"ok": False, "error": "Username already taken."}, status_code=409)
@@ -371,29 +383,21 @@ async def route_register(request: Request):
     new_user = {
         "username":      username,
         "password_hash": _hash_password(password),
-        "role":          "user",
+        "role":          role,
         "allowed_tabs":  None,
         "created_at":    datetime.now().isoformat(),
     }
     data = _load_users()
     data["users"].append(new_user)
     _save_users(data)
-    save_user_data(username, {"is_admin": False})
+    save_user_data(username, {"is_admin": role == "admin"})
 
     perms_data    = load_permissions()
     default_perms = perms_data.get("_default", _DEFAULT_PERMISSIONS.copy())
     perms_data[username] = {k: v for k, v in default_perms.items()}
     save_permissions(perms_data)
 
-    token    = _create_session(username)
-    response = JSONResponse({"ok": True, "username": username, "role": "user", "token": token})
-    response.set_cookie(
-        key=COOKIE_NAME, value=token,
-        httponly=True, samesite="lax",
-        max_age=SESSION_DURATION_DAYS * 86400,
-    )
-    response.headers["X-Auth-Token"] = token
-    return response
+    return JSONResponse({"ok": True, "username": username, "role": role})
 
 
 async def route_logout(request: Request):

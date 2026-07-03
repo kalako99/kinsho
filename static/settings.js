@@ -100,6 +100,12 @@ createApp({
       blockedTagInput:       '',
       blockedTagSuggestions: [],
       allTagsList:           [],
+
+      // ── ADMIN: CREATE USER ──
+      newUsername:      '',
+      newPassword:      '',
+      newRole:          'user',
+      createUserStatus: { msg: '', type: '' },
     };
   },
 
@@ -936,6 +942,36 @@ createApp({
 
     toggleAdminStatsUser(username) {
       this.adminStatsExpanded = this.adminStatsExpanded === username ? null : username;
+    },
+
+    // ── CREATE USER (admin only) ──
+    async createUser() {
+      const username = this.newUsername.trim().toLowerCase();
+      const password = this.newPassword;
+      if (!username || !password) {
+        this.createUserStatus = { msg: 'Username and password required.', type: 'err' };
+        return;
+      }
+      try {
+        const res  = await fetch(apiUrl('/api/admin/users'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ username, password, role: this.newRole }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          this.createUserStatus = { msg: `✓ Created ${data.username}.`, type: 'ok' };
+          this.newUsername = '';
+          this.newPassword = '';
+          this.newRole = 'user';
+          await this.loadUserPermissions();
+        } else {
+          this.createUserStatus = { msg: data.error || 'Could not create user.', type: 'err' };
+        }
+      } catch (e) {
+        this.createUserStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.createUserStatus = { msg: '', type: '' }; }, 3000);
     },
 
     // ── LOAD USER PERMISSIONS (admin only) ──

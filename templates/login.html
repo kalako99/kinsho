@@ -66,37 +66,8 @@
     }
     .server-indicator:hover { color: var(--color-primary); }
 
-    /* ── FLIP CONTAINER (unchanged) ── */
-    #signup_toggle { display: none; }
-
-    .container {
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      perspective: 1000px;
+    .login-card {
       width: 340px;
-      height: 380px;
-    }
-
-    .form {
-      width: 100%;
-      height: 100%;
-      position: relative;
-      transform-style: preserve-3d;
-      transition: transform 0.75s cubic-bezier(0.77, 0, 0.175, 1);
-    }
-
-    #signup_toggle:checked + .container .form {
-      transform: rotateY(-180deg);
-    }
-
-    .form_front,
-    .form_back {
-      position: absolute;
-      width: 100%;
-      height: 100%;
-      backface-visibility: hidden;
-      -webkit-backface-visibility: hidden;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -104,12 +75,6 @@
       background: var(--color-secondary);
       border: 1px solid var(--color-border);
       border-radius: 11px;
-    }
-
-    .form_back {
-      transform: rotateY(-180deg);
-      height: auto;
-      min-height: 100%;
     }
 
     .form_details {
@@ -152,21 +117,6 @@
       margin-top: 2px;
     }
     .btn:hover { background: color-mix(in srgb, var(--color-primary) 80%, black 20%); }
-
-    .switch {
-      font-size: 0.75rem;
-      color: var(--color-muted);
-      text-align: center;
-      margin-top: 2px;
-    }
-    .signup_tog {
-      color: var(--color-primary);
-      font-weight: 700;
-      cursor: pointer;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    .signup_tog:hover { filter: brightness(1.2); }
   </style>
 </head>
 <body>
@@ -194,36 +144,11 @@
 
     <!-- ── AUTH STEP ── -->
     <div id="auth-step">
-      <input id="signup_toggle" type="checkbox">
-      <div class="container">
-        <div class="form">
-
-          <!-- LOGIN FACE -->
-          <div class="form_front">
-            <div class="form_details">Login</div>
-            <input type="text"     class="input" placeholder="Username" autocomplete="username">
-            <input type="password" class="input" placeholder="Password" autocomplete="current-password">
-            <button class="btn" type="button">Login</button>
-            <span class="switch">
-              Don't have an account?
-              <label for="signup_toggle" class="signup_tog">Sign Up</label>
-            </span>
-          </div>
-
-          <!-- SIGN UP FACE -->
-          <div class="form_back">
-            <div class="form_details">Sign Up</div>
-            <input type="text"     class="input" placeholder="Username"         autocomplete="username">
-            <input type="password" class="input" placeholder="Password"         autocomplete="new-password">
-            <input type="password" class="input" placeholder="Confirm password" autocomplete="new-password">
-            <button class="btn" type="button">Create Account</button>
-            <span class="switch">
-              Already have an account?
-              <label for="signup_toggle" class="signup_tog">Sign In</label>
-            </span>
-          </div>
-
-        </div>
+      <div class="login-card">
+        <div class="form_details">Login</div>
+        <input type="text"     class="input" placeholder="Username" autocomplete="username">
+        <input type="password" class="input" placeholder="Password" autocomplete="current-password">
+        <button class="btn" type="button">Login</button>
       </div>
       <!-- Tap to change server -->
       <div class="server-indicator" id="server-indicator" title="Change server">
@@ -314,27 +239,15 @@
       el = document.createElement('div');
       el.id = 'status-msg';
       el.style.cssText = 'font-size:.75rem;text-align:center;margin-top:6px;min-height:18px;';
-      document.querySelector('.form_front').appendChild(el);
-    }
-    el.style.color = isError ? '#e94560' : '#4caf50';
-    el.textContent = msg;
-  }
-
-  function showStatusBack(msg, isError) {
-    let el = document.getElementById('status-msg-back');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = 'status-msg-back';
-      el.style.cssText = 'font-size:.75rem;text-align:center;margin-top:6px;min-height:18px;';
-      document.querySelector('.form_back').appendChild(el);
+      document.querySelector('.login-card').appendChild(el);
     }
     el.style.color = isError ? '#e94560' : '#4caf50';
     el.textContent = msg;
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────
-  document.querySelector('.form_front .btn').addEventListener('click', async () => {
-    const inputs   = document.querySelectorAll('.form_front .input');
+  document.querySelector('.login-card .btn').addEventListener('click', async () => {
+    const inputs   = document.querySelectorAll('.login-card .input');
     const username = inputs[0].value.trim();
     const password = inputs[1].value;
     if (!username || !password) { showStatus('Please fill in all fields.', true); return; }
@@ -353,35 +266,9 @@
     }
   });
 
-  // ── REGISTER ─────────────────────────────────────────────────────
-  document.querySelector('.form_back .btn').addEventListener('click', async () => {
-    const inputs   = document.querySelectorAll('.form_back .input');
-    const username = inputs[0].value.trim();
-    const password = inputs[1].value;
-    const confirm  = inputs[2].value;
-    if (!username || !password || !confirm) { showStatusBack('Please fill in all fields.', true); return; }
-    if (password !== confirm) { showStatusBack('Passwords do not match.', true); return; }
-    try {
-      const res  = await fetch(apiUrl('/api/auth/register'), {
-        method:      'POST',
-        headers:     { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body:        JSON.stringify({ username, password }),
-      });
-      const data = await res.json();
-      if (data.ok) { window.location.href = '/'; }
-      else         { showStatusBack(data.error || 'Registration failed.', true); }
-    } catch {
-      showStatusBack('Could not reach server.', true);
-    }
-  });
-
   // ── ENTER KEY ─────────────────────────────────────────────────────
-  document.querySelectorAll('.form_front .input').forEach(i =>
-    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.form_front .btn').click(); })
-  );
-  document.querySelectorAll('.form_back .input').forEach(i =>
-    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.form_back .btn').click(); })
+  document.querySelectorAll('.login-card .input').forEach(i =>
+    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.login-card .btn').click(); })
   );
 </script>
 </body>

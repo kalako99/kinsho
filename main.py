@@ -80,11 +80,13 @@ app.add_middleware(
 
 # ── AUTH GATE ───────────────────────────────────────────────────────────────
 # Every /api/* endpoint requires a valid session, EXCEPT the auth endpoints
-# under /api/auth/ (login/register/me/logout/change-password each enforce their
-# own rules). Anonymous API requests get a 401 here rather than being silently
-# served as admin. Page routes handle their own /login redirect; static assets
-# (/static) are just JS/CSS and are not gated. Cover images (/covers) are their
-# own authenticated route (see get_cover_image) rather than a plain mount.
+# under /api/auth/ (login/me/logout/change-password each enforce their own
+# rules — there is no public register; accounts are admin-only, created via
+# POST /api/admin/users). Anonymous API requests get a 401 here rather than
+# being silently served as admin. Page routes handle their own /login
+# redirect; static assets (/static) are just JS/CSS and are not gated. Cover
+# images (/covers) are their own authenticated route (see get_cover_image)
+# rather than a plain mount.
 PUBLIC_API_PREFIXES = ("/api/auth/",)
 
 @app.middleware("http")
@@ -3935,11 +3937,7 @@ def login_page(request: Request):
 @app.post("/api/auth/login")
 async def api_login(request: Request):
     return await auth.route_login(request)
- 
-@app.post("/api/auth/register")
-async def api_register(request: Request):
-    return await auth.route_register(request)
- 
+
 @app.post("/api/auth/logout")
 async def api_logout(request: Request):
     return await auth.route_logout(request)
@@ -3959,6 +3957,10 @@ def api_get_permissions(request: Request):
 @app.post("/api/admin/permissions/{username}")
 async def api_set_user_permissions(request: Request, username: str):
     return await auth.route_set_user_permissions(request, username)
+
+@app.post("/api/admin/users")
+async def api_create_user(request: Request):
+    return await auth.route_admin_create_user(request)
 
 # ── READING SESSION ROUTES ────────────────────────────────────────────────────
 
