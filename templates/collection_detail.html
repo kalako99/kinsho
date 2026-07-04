@@ -293,10 +293,13 @@
       color: #555;
       font-size: 0.7rem;
     }
-    .member-complete-badge {
+    .manga-thumb .cover .member-complete-badge {
       position: absolute;
       top: 6px;
       right: 6px;
+      width: auto;
+      height: auto;
+      display: inline-block;
       background: var(--color-primary, #e94560);
       color: #fff;
       font-size: 0.6rem;
@@ -572,6 +575,62 @@
     .suggestion-pill:hover {
       border-color: var(--color-primary, #e94560);
       color: var(--color-primary, #e94560);
+    }
+    .add-member-popup {
+      width: 480px;
+      max-width: 92vw;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .add-member-results {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      margin-bottom: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-height: 0;
+    }
+    .add-member-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .add-member-row:hover { background: rgba(255,255,255,0.06); }
+    .add-member-row-cover {
+      width: 36px;
+      height: 54px;
+      flex-shrink: 0;
+      border-radius: 4px;
+      overflow: hidden;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+    }
+    .add-member-row-cover img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .add-member-row-cover span {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.5rem;
+      color: #555;
+      text-align: center;
+    }
+    .add-member-row-name {
+      font-size: 0.82rem;
+      color: var(--color-text, #f0f0f0);
     }
     .popup-actions {
       display: flex;
@@ -1160,19 +1219,25 @@
 
   <!-- ADD SERIES POPUP -->
   <div class="popup-overlay" v-if="showAddMemberPopup" @click.self="showAddMemberPopup = false">
-    <div class="popup" style="width:420px;">
+    <div class="popup add-member-popup">
       <div class="popup-title">Add Series</div>
       <select v-model="addMemberLibraryId" class="desc-textarea" style="min-height:auto; padding:8px 10px; margin-bottom:10px; cursor:pointer;" @change="searchAddMember">
         <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
       </select>
       <input type="text" v-model="addMemberSearch" placeholder="Search this library…" @input="searchAddMember"/>
-      <div class="popup-suggestions" style="flex-direction:column; align-items:stretch; max-height:260px;">
+      <div class="add-member-results">
         <div v-if="addMemberLoading" class="state-msg" style="padding:16px;">Searching…</div>
         <div
           v-for="m in addMemberResults" :key="m.id"
-          class="list-option"
+          class="add-member-row"
           @click="addMember(m)"
-        >{{ m.name }}</div>
+        >
+          <div class="add-member-row-cover">
+            <img v-if="m.cover_url" :src="m.cover_url" :alt="m.name">
+            <span v-else>No Cover</span>
+          </div>
+          <div class="add-member-row-name">{{ m.name }}</div>
+        </div>
         <div v-if="!addMemberLoading && addMemberResults.length === 0" style="font-size:0.75rem; color:#555; padding:6px 8px;">No results.</div>
       </div>
       <div class="popup-actions">

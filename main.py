@@ -2580,7 +2580,11 @@ def get_collections(request: Request):
     if not user_data.get("hide_admin_collections", False):
         for cid, rec in load_shared_collections().items():
             visible = _visible_members(username, rec.get("members", []))
-            if not visible:
+            # Total lockout only applies to viewers who can't manage the
+            # collection themselves — an editor (any admin) must always see
+            # their own shared collections, empty or not, or a brand-new
+            # collection would 404 out of existence the instant it's created.
+            if not visible and not _can_edit_collection(username, True):
                 continue
             result.append(_collection_summary(username, cid, rec, True, visible))
     return JSONResponse({"collections": result})
@@ -2632,7 +2636,7 @@ def get_collection(request: Request, collection_id: str):
     if record is None:
         return JSONResponse({"error": "Collection not found"}, status_code=404)
     visible = _visible_members(username, record.get("members", []))
-    if is_shared and not visible:
+    if is_shared and not visible and not _can_edit_collection(username, is_shared):
         return JSONResponse({"error": "Collection not found"}, status_code=404)
     members_out = []
     for m in visible:
@@ -2841,7 +2845,7 @@ def get_collection_cover_options(request: Request, collection_id: str):
     if record is None:
         return JSONResponse({"error": "Collection not found"}, status_code=404)
     visible = _visible_members(username, record.get("members", []))
-    if is_shared and not visible:
+    if is_shared and not visible and not _can_edit_collection(username, is_shared):
         return JSONResponse({"error": "Collection not found"}, status_code=404)
     user_data = auth.load_user_data(username)
     override = user_data.get("collection_covers", {}).get(collection_id)
@@ -3794,7 +3798,7 @@ def collection_detail_page(request: Request, collection_id: str):
     record, is_shared = _find_collection(username, collection_id)
     if record is not None:
         visible = _visible_members(username, record.get("members", []))
-        if is_shared and not visible:
+        if is_shared and not visible and not _can_edit_collection(username, is_shared):
             record = None
     if record is None:
         return RedirectResponse("/collections", status_code=302)

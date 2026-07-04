@@ -1053,7 +1053,7 @@
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
               </svg>
-              Add to Collection
+              {{ inAnyCollection ? 'Change Collection' : 'Add to Collection' }}
             </button>
             <div class="list-dropdown-menu" v-if="showCollectionDropdown" @click.stop>
               <input
@@ -1509,6 +1509,10 @@ createApp({
       return this.allCollections.some(c => c.name.toLowerCase() === q);
     },
 
+    inAnyCollection() {
+      return this.allCollections.some(c => c.has_manga);
+    },
+
     sortedChapters() {
       if (!this.manga) return [];
       const chapters = [...this.manga.chapters];
@@ -1631,25 +1635,43 @@ createApp({
       this.collectionSearch = '';
     },
 
+    async _removeFromCollection(collectionId) {
+      await fetch(apiUrl(`/api/collections/${collectionId}/members/remove`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_id: this.libraryId, manga_id: this.mangaId }),
+      });
+    },
+
+    async _addToCollection(collectionId) {
+      await fetch(apiUrl(`/api/collections/${collectionId}/members/add`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name }),
+      });
+    },
+
+    // A manga can only belong to one collection at a time: picking a
+    // different one moves it (removes from the current, adds to the new);
+    // picking the one it's already in removes it (back to unassigned).
     async toggleCollectionMembership(c) {
-      const url  = c.has_manga ? `/api/collections/${c.id}/members/remove` : `/api/collections/${c.id}/members/add`;
-      const body = c.has_manga
-        ? { library_id: this.libraryId, manga_id: this.mangaId }
-        : { library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name };
-      await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const current = this.allCollections.find(x => x.has_manga);
+      if (current && current.id === c.id) {
+        await this._removeFromCollection(c.id);
+      } else {
+        if (current) await this._removeFromCollection(current.id);
+        await this._addToCollection(c.id);
+      }
       await this.loadCollections();
     },
 
     async createAndAddToCollection() {
       const name = this.collectionSearch.trim();
       if (!name) return;
+      const current = this.allCollections.find(x => x.has_manga);
+      if (current) await this._removeFromCollection(current.id);
       const res  = await fetch(apiUrl('/api/collections'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
       const data = await res.json();
       if (data.ok) {
-        await fetch(apiUrl(`/api/collections/${data.id}/members/add`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name }),
-        });
+        await this._addToCollection(data.id);
       }
       this.collectionSearch = '';
       await this.loadCollections();
