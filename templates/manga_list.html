@@ -523,6 +523,23 @@
       </div>
   </div>
 
+  <div class="section" v-if="showCollectionsRow && collectionsRow.length > 0">
+    <div class="section-header">
+      <span class="section-title">Collections</span>
+      <div class="row-more-btn visible">
+        <a href="#" @click.prevent="goToCollections">View more →</a>
+      </div>
+    </div>
+    <div class="manga-row" v-drag-scroll>
+        <manga-thumb
+          v-for="c in collectionsRow"
+          :key="c.id"
+          :manga="c"
+          @click="openCollection(c.id)"
+        />
+      </div>
+  </div>
+
   <div class="grid-section">
     <div class="section-header">
       <span class="section-title">Last Updated</span>

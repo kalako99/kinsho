@@ -40,6 +40,11 @@ createApp({
       backdropDetail: true,
       backdropStatus: { msg: '', type: '' },
 
+      // ── COLLECTIONS PREFERENCES ──
+      showCollectionsRow:     true,
+      hideAdminCollections:   false,
+      collectionsPrefsStatus: { msg: '', type: '' },
+
       // ── ACCENT COLORS ──
       BUILTIN_THEMES: [
         { name: 'Midnight Red',  primary: '#e94560', secondary: '#1d1113', background: '#120b0d', text: '#f0f0f0', bg_image: null },
@@ -297,6 +302,8 @@ createApp({
         }
         this.backdropList           = data.backdrop_list            !== false;
         this.backdropDetail         = data.backdrop_detail          !== false;
+        this.showCollectionsRow     = data.show_collections_row     !== false;
+        this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
         this.activeCustomThemeName  = data.active_custom_theme_name || '';
         this.customThemes           = data.custom_themes            || {};
@@ -517,6 +524,26 @@ createApp({
         this.backdropStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.backdropStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    async saveCollectionsPrefs() {
+      try {
+        const res  = await fetch(apiUrl('/api/settings/collections-prefs'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            show_collections_row:   this.showCollectionsRow,
+            hide_admin_collections: this.hideAdminCollections,
+          }),
+        });
+        const data = await res.json();
+        this.collectionsPrefsStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.collectionsPrefsStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.collectionsPrefsStatus = { msg: '', type: '' }; }, 2000);
     },
 
     async saveVisualTheme() {

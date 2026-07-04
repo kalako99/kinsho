@@ -1046,54 +1046,51 @@
               {{ manga.is_favourite ? 'Favourited' : 'Add to Favourites' }}
             </button>
           </div>
-          <div class="poster-row2" v-click-outside="closeListDropdown">
+          <div class="poster-row2" v-click-outside="closeCollectionDropdown">
             <div class="list-dropdown-wrap">
-            <button class="btn btn-soft" style="width:200px;" @click="toggleListDropdown">
+            <button class="btn btn-soft" style="width:200px;" @click="toggleCollectionDropdown">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
                 <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
               </svg>
-              Add to List
+              Add to Collection
             </button>
-            <div class="list-dropdown-menu" v-if="showListDropdown" @click.stop>
+            <div class="list-dropdown-menu" v-if="showCollectionDropdown" @click.stop>
               <input
                 class="list-search-input"
                 type="text"
-                v-model="listSearch"
-                placeholder="Search or create list…"
-                ref="listSearchRef"
-                @keyup.enter="onListSearchEnter"
+                v-model="collectionSearch"
+                placeholder="Search or create collection…"
+                ref="collectionSearchRef"
+                @keyup.enter="onCollectionSearchEnter"
               />
               <div class="list-options">
-                <template v-if="filteredLists.length > 0">
+                <template v-if="filteredCollections.length > 0">
                   <div
                     class="list-option"
-                    v-for="list in filteredLists"
-                    :key="list.name"
-                    @click="toggleList(list.name)"
+                    v-for="c in filteredCollections"
+                    :key="c.id"
+                    @click="toggleCollectionMembership(c)"
                   >
-                    <div class="list-option-check" :class="{ checked: list.hasmanga }">
-                      <svg v-if="list.hasmania" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                        <polyline points="20 6 9 17 4 12"/>
-                      </svg>
-                      <svg v-if="list.hasmanga" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                    <div class="list-option-check" :class="{ checked: c.has_manga }">
+                      <svg v-if="c.has_manga" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
                         <polyline points="20 6 9 17 4 12"/>
                       </svg>
                     </div>
-                    {{ list.name }}
+                    {{ c.name }}
                   </div>
                 </template>
                 <div
                   class="list-create-option"
-                  v-if="listSearch.trim() && !exactListMatch"
-                  @click="createAndAddToList"
+                  v-if="collectionSearch.trim() && !exactCollectionMatch"
+                  @click="createAndAddToCollection"
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
-                  Create "{{ listSearch.trim() }}"
+                  Create "{{ collectionSearch.trim() }}"
                 </div>
-                <div v-if="filteredLists.length === 0 && !listSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No lists yet.</div>
+                <div v-if="filteredCollections.length === 0 && !collectionSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No collections yet.</div>
               </div>
             </div>
             </div>
@@ -1471,10 +1468,10 @@ createApp({
       showCoverPicker:      false,
       coverPickerLoading:   false,
       availableCovers:      [],
-      // lists
-      allLists:             {},
-      showListDropdown:     false,
-      listSearch:           '',
+      // collections
+      allCollections:       [],
+      showCollectionDropdown: false,
+      collectionSearch:     '',
       // fetch metadata popup
       showMetadataPopup:    false,
       metaSearch:           '',
@@ -1502,17 +1499,14 @@ createApp({
         .slice(0, 10);
     },
 
-    filteredLists() {
-      const q = this.listSearch.trim().toLowerCase();
-      return Object.entries(this.allLists).map(([name, entry]) => ({
-        name,
-        hasmanga: (entry.manga_ids || []).includes(this.mangaId),
-      })).filter(l => !q || l.name.toLowerCase().includes(q));
+    filteredCollections() {
+      const q = this.collectionSearch.trim().toLowerCase();
+      return this.allCollections.filter(c => !q || c.name.toLowerCase().includes(q));
     },
 
-    exactListMatch() {
-      const q = this.listSearch.trim().toLowerCase();
-      return Object.keys(this.allLists).some(n => n.toLowerCase() === q);
+    exactCollectionMatch() {
+      const q = this.collectionSearch.trim().toLowerCase();
+      return this.allCollections.some(c => c.name.toLowerCase() === q);
     },
 
     sortedChapters() {
@@ -1539,7 +1533,7 @@ createApp({
       this.loadAllTags(),
       this.loadAllGenres(),
       this.loadReadChapters(),
-      this.loadLists(),
+      this.loadCollections(),
       this.loadReadingTime(),
     ]);
     document.addEventListener('visibilitychange', () => {
@@ -1607,50 +1601,65 @@ createApp({
       }
     },
 
-    async loadLists() {
+    async loadCollections() {
       try {
-        const res = await fetch(apiUrl('/api/lists'));
+        const res = await fetch(apiUrl('/api/collections'));
         const data = await res.json();
-        this.allLists = data.lists || {};
-      } catch (e) { this.allLists = {}; }
+        const editable = (data.collections || []).filter(c => c.can_edit);
+        const details = await Promise.all(
+          editable.map(c => fetch(apiUrl(`/api/collections/${c.id}`)).then(r => r.json()))
+        );
+        this.allCollections = editable.map((c, i) => ({
+          id:        c.id,
+          name:      c.name,
+          has_manga: (details[i].members || []).some(
+            m => m.library_id === this.libraryId && m.manga_id === this.mangaId
+          ),
+        }));
+      } catch (e) { this.allCollections = []; }
     },
 
-    toggleListDropdown() {
-      this.showListDropdown = !this.showListDropdown;
-      if (this.showListDropdown) {
-        this.$nextTick(() => { if (this.$refs.listSearchRef) this.$refs.listSearchRef.focus(); });
+    toggleCollectionDropdown() {
+      this.showCollectionDropdown = !this.showCollectionDropdown;
+      if (this.showCollectionDropdown) {
+        this.$nextTick(() => { if (this.$refs.collectionSearchRef) this.$refs.collectionSearchRef.focus(); });
       }
     },
 
-    closeListDropdown() {
-      this.showListDropdown = false;
-      this.listSearch = '';
+    closeCollectionDropdown() {
+      this.showCollectionDropdown = false;
+      this.collectionSearch = '';
     },
 
-    async toggleList(listName) {
-      const entry = this.allLists[listName];
-      const hasIt = (entry.manga_ids || []).includes(this.mangaId);
-      const url   = hasIt ? `/api/lists/${encodeURIComponent(listName)}/remove`
-                          : `/api/lists/${encodeURIComponent(listName)}/add`;
-      const body  = hasIt ? { manga_id: this.mangaId }
-                          : { manga_id: this.mangaId, manga_name: this.manga.name };
-      await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      await this.loadLists();
+    async toggleCollectionMembership(c) {
+      const url  = c.has_manga ? `/api/collections/${c.id}/members/remove` : `/api/collections/${c.id}/members/add`;
+      const body = c.has_manga
+        ? { library_id: this.libraryId, manga_id: this.mangaId }
+        : { library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name };
+      await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      await this.loadCollections();
     },
 
-    async createAndAddToList() {
-      const name = this.listSearch.trim();
+    async createAndAddToCollection() {
+      const name = this.collectionSearch.trim();
       if (!name) return;
-      await fetch(apiUrl('/api/lists'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-      await fetch(apiUrl(`/api/lists/${encodeURIComponent(name)}/add`), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ manga_id: this.mangaId, manga_name: this.manga.name }) });
-      await this.loadLists();
+      const res  = await fetch(apiUrl('/api/collections'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      const data = await res.json();
+      if (data.ok) {
+        await fetch(apiUrl(`/api/collections/${data.id}/members/add`), {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name }),
+        });
+      }
+      this.collectionSearch = '';
+      await this.loadCollections();
     },
 
-    onListSearchEnter() {
-      if (this.listSearch.trim() && !this.exactListMatch) {
-        this.createAndAddToList();
-      } else if (this.filteredLists.length === 1) {
-        this.toggleList(this.filteredLists[0].name);
+    onCollectionSearchEnter() {
+      if (this.collectionSearch.trim() && !this.exactCollectionMatch) {
+        this.createAndAddToCollection();
+      } else if (this.filteredCollections.length === 1) {
+        this.toggleCollectionMembership(this.filteredCollections[0]);
       }
     },
 

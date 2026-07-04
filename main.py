@@ -12,6 +12,7 @@ import random
 import shutil
 import zipfile
 import io
+import uuid
 from PIL import Image
 from typing import List, Optional
 from datetime import datetime
@@ -2021,6 +2022,8 @@ def get_settings(request: Request):
         "favourites":               user_data.get("favourites", []),
         "backdrop_list":            user_data.get("backdrop_list",   True),
         "backdrop_detail":          user_data.get("backdrop_detail", True),
+        "show_collections_row":     user_data.get("show_collections_row", True),
+        "hide_admin_collections":   user_data.get("hide_admin_collections", False),
     })
 
 @app.post("/api/settings/data-path")
@@ -2189,6 +2192,18 @@ async def save_backdrop(request: Request):
         user_data["backdrop_list"]   = bool(body["backdrop_list"])
     if "backdrop_detail" in body:
         user_data["backdrop_detail"] = bool(body["backdrop_detail"])
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/collections-prefs")
+async def save_collections_prefs(request: Request):
+    username  = auth.get_current_user(request)
+    body      = await request.json()
+    user_data = auth.load_user_data(username)
+    if "show_collections_row" in body:
+        user_data["show_collections_row"]   = bool(body["show_collections_row"])
+    if "hide_admin_collections" in body:
+        user_data["hide_admin_collections"] = bool(body["hide_admin_collections"])
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
@@ -2384,65 +2399,509 @@ async def toggle_favourite(request: Request, library_id: int, manga_id: str):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True, "is_favourite": is_favourite})
 
-@app.get("/api/lists")
-def get_lists(request: Request):
+# ── COLLECTIONS ──────────────────────────────────────────────────────────────
+# A collection groups whole manga entries (possibly across libraries) under one
+# name, with its own description/tags/genres and a member order. Collections
+# created by an admin are *shared* (visible to everyone, filtered per-viewer by
+# the same can_access_library/is_manga_blocked rules as everything else);
+# collections created by anyone else are *private* to that user, same scope as
+# the old `lists` feature this replaces.
+
+def _collections_file() -> Optional[str]:
+    data_path = get_data_path()
+    if not data_path:
+        return None
+    return os.path.join(data_path, "collections.json")
+
+def load_shared_collections() -> dict:
+    path = _collections_file()
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_shared_collections(data: dict):
+    path = _collections_file()
+    if not path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def _new_collection_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+def _find_collection(username: str, collection_id: str):
+    """Return (record, is_shared) or (None, None)."""
+    shared = load_shared_collections()
+    if collection_id in shared:
+        return shared[collection_id], True
+    user_data = auth.load_user_data(username)
+    private = user_data.get("collections", {})
+    if collection_id in private:
+        return private[collection_id], False
+    return None, None
+
+def _save_collection(username: str, collection_id: str, record: dict, is_shared: bool):
+    if is_shared:
+        shared = load_shared_collections()
+        shared[collection_id] = record
+        save_shared_collections(shared)
+    else:
+        user_data = auth.load_user_data(username)
+        private = user_data.get("collections", {})
+        private[collection_id] = record
+        user_data["collections"] = private
+        auth.save_user_data(username, user_data)
+
+def _delete_collection_record(username: str, collection_id: str, is_shared: bool):
+    if is_shared:
+        shared = load_shared_collections()
+        shared.pop(collection_id, None)
+        save_shared_collections(shared)
+    else:
+        user_data = auth.load_user_data(username)
+        private = user_data.get("collections", {})
+        private.pop(collection_id, None)
+        user_data["collections"] = private
+        auth.save_user_data(username, user_data)
+
+def _can_edit_collection(username: str, is_shared: bool) -> bool:
+    if not is_shared:
+        return True
+    return bool(auth.resolve_permissions(username).get("is_admin"))
+
+def _lookup_manga(library_id: int, manga_id: str) -> Optional[dict]:
+    manga_data = load_app_data().get("manga_data", {}).get(str(library_id), {})
+    return next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+
+def _visible_members(username: str, members: list) -> list:
+    """Members filtered by library access + blocked tags — same total-lockout rule as everywhere else."""
+    visible = []
+    for m in members:
+        if not auth.can_access_library(username, m["library_id"]):
+            continue
+        manga = _lookup_manga(m["library_id"], m["manga_id"])
+        if not manga:
+            continue
+        dims = load_manga_dims(m["library_id"], manga["name"])
+        if auth.is_manga_blocked(username, dims.get("tags", [])):
+            continue
+        visible.append(m)
+    return visible
+
+def _resolve_member_cover_urls(username: str, library_id: int, manga_id: str) -> tuple:
+    """Return (cover_url, cover_url_large) or (None, None)."""
+    manga = _lookup_manga(library_id, manga_id)
+    if not manga:
+        return None, None
+    user_data = auth.load_user_data(username)
+    user_covers = user_data.get("covers", {}).get(str(library_id), {})
+    cover = user_covers.get(manga_id) or manga.get("cover")
+    if not cover:
+        return None, None
+    filename = os.path.basename(cover)
+    name, ext = os.path.splitext(filename)
+    base = f"/covers/{library_id}/{quote(manga['name'])}"
+    return f"{base}/{filename}", f"{base}/{name}+{ext}"
+
+def _resolve_member_cover_url(username: str, library_id: int, manga_id: str) -> Optional[str]:
+    return _resolve_member_cover_urls(username, library_id, manga_id)[0]
+
+def _resolve_collection_cover_urls(username: str, collection_id: str, visible_members: list) -> tuple:
+    """Return (cover_url, cover_url_large) or (None, None)."""
+    user_data = auth.load_user_data(username)
+    override = user_data.get("collection_covers", {}).get(collection_id)
+    if override:
+        filename = override["filename"]
+        name, ext = os.path.splitext(filename)
+        base = f"/covers/{override['library_id']}/{quote(override['manga_name'])}"
+        return f"{base}/{filename}", f"{base}/{name}+{ext}"
+    if not visible_members:
+        return None, None
+    first = visible_members[0]
+    return _resolve_member_cover_urls(username, first["library_id"], first["manga_id"])
+
+def _resolve_collection_cover(username: str, collection_id: str, visible_members: list) -> Optional[str]:
+    return _resolve_collection_cover_urls(username, collection_id, visible_members)[0]
+
+def _sync_collection_derived_fields(record: dict):
+    """Recompute description (from the first member) / tags / genres (union of
+    all members) whenever membership or order changes — but only for fields the
+    owner/admin hasn't manually customized. Uses the full member list, not any
+    one viewer's filtered view, since these are shared/owner-level fields."""
+    members = record.get("members", [])
+    if not record.get("description_customized"):
+        description = ""
+        if members:
+            first = members[0]
+            manga = _lookup_manga(first["library_id"], first["manga_id"])
+            if manga:
+                description = load_manga_dims(first["library_id"], manga["name"]).get("description", "")
+        record["description"] = description
+    if not record.get("tags_customized") or not record.get("genres_customized"):
+        tagset, genreset = set(), set()
+        for m in members:
+            manga = _lookup_manga(m["library_id"], m["manga_id"])
+            if not manga:
+                continue
+            dims = load_manga_dims(m["library_id"], manga["name"])
+            tagset.update(dims.get("tags", []))
+            genreset.update(dims.get("genres", []))
+        if not record.get("tags_customized"):
+            record["tags"] = sorted(tagset)
+        if not record.get("genres_customized"):
+            record["genres"] = sorted(genreset)
+
+def _collection_summary(username: str, cid: str, record: dict, is_shared: bool, visible_members: list) -> dict:
+    cover_url, cover_url_large = _resolve_collection_cover_urls(username, cid, visible_members)
+    return {
+        "id":             cid,
+        "name":           record.get("name", ""),
+        "shared":         is_shared,
+        "can_edit":       _can_edit_collection(username, is_shared),
+        "member_count":   len(visible_members),
+        "cover_url":      cover_url,
+        "cover_url_large": cover_url_large,
+    }
+
+@app.get("/api/collections")
+def get_collections(request: Request):
     username = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
-    return JSONResponse({"lists": user_data.get("lists", {})})
+    result = []
+    for cid, rec in user_data.get("collections", {}).items():
+        visible = _visible_members(username, rec.get("members", []))
+        result.append(_collection_summary(username, cid, rec, False, visible))
+    if not user_data.get("hide_admin_collections", False):
+        for cid, rec in load_shared_collections().items():
+            visible = _visible_members(username, rec.get("members", []))
+            if not visible:
+                continue
+            result.append(_collection_summary(username, cid, rec, True, visible))
+    return JSONResponse({"collections": result})
 
-@app.post("/api/lists")
-async def create_list(request: Request):
+@app.post("/api/collections")
+async def create_collection(request: Request):
     username = auth.get_current_user(request)
     body = await request.json()
     name = body.get("name", "").strip()
     if not name:
         return JSONResponse({"ok": False, "error": "Empty name"}, status_code=400)
-    user_data = auth.load_user_data(username)
-    lists = user_data.get("lists", {})
-    if name in lists:
-        return JSONResponse({"ok": False, "error": "List already exists"}, status_code=409)
-    lists[name] = {"manga_ids": [], "manga_names": []}
-    user_data["lists"] = lists
-    auth.save_user_data(username, user_data)
-    return JSONResponse({"ok": True, "name": name})
+    is_shared = bool(auth.resolve_permissions(username).get("is_admin"))
+    cid = _new_collection_id()
+    record = {
+        "id": cid, "name": name, "shared": is_shared,
+        "members": [],
+        "description": "", "description_customized": False,
+        "tags": [], "tags_customized": False,
+        "genres": [], "genres_customized": False,
+        "created_at": datetime.now().isoformat(),
+    }
+    _save_collection(username, cid, record, is_shared)
+    return JSONResponse({"ok": True, "id": cid, "shared": is_shared})
 
-@app.put("/api/lists/{list_name}/add")
-async def add_to_list(list_name: str, request: Request):
+@app.get("/api/collections/membership")
+def get_collections_membership(request: Request):
+    """manga_id (per library) -> collection_id, for the app-wide click-interception:
+    clicking a manga tile that belongs to a collection visible to this user opens
+    the collection instead of the manga's own page."""
     username = auth.get_current_user(request)
+    user_data = auth.load_user_data(username)
+    membership = {}
+    for cid, rec in user_data.get("collections", {}).items():
+        for m in _visible_members(username, rec.get("members", [])):
+            membership.setdefault(f"{m['library_id']}:{m['manga_id']}", cid)
+    if not user_data.get("hide_admin_collections", False):
+        for cid, rec in load_shared_collections().items():
+            visible = _visible_members(username, rec.get("members", []))
+            if not visible:
+                continue
+            for m in visible:
+                membership.setdefault(f"{m['library_id']}:{m['manga_id']}", cid)
+    return JSONResponse({"membership": membership})
+
+@app.get("/api/collections/{collection_id}")
+def get_collection(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
+    visible = _visible_members(username, record.get("members", []))
+    if is_shared and not visible:
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
+    members_out = []
+    for m in visible:
+        manga = _lookup_manga(m["library_id"], m["manga_id"])
+        cover_url, cover_url_large = _resolve_member_cover_urls(username, m["library_id"], m["manga_id"])
+        members_out.append({
+            "library_id":      m["library_id"],
+            "manga_id":        m["manga_id"],
+            "manga_name":      m["manga_name"],
+            "cover_url":       cover_url,
+            "cover_url_large": cover_url_large,
+            "manga_type":      manga.get("manga_type") if manga else None,
+            "is_complete":     manga.get("is_complete", False) if manga else False,
+        })
+    cover_url, cover_url_large = _resolve_collection_cover_urls(username, collection_id, visible)
+    return JSONResponse({
+        "id":              collection_id,
+        "name":            record.get("name", ""),
+        "shared":          is_shared,
+        "can_edit":        _can_edit_collection(username, is_shared),
+        "description":     record.get("description", ""),
+        "tags":            record.get("tags", []),
+        "genres":          record.get("genres", []),
+        "members":         members_out,
+        "cover_url":       cover_url,
+        "cover_url_large": cover_url_large,
+    })
+
+@app.delete("/api/collections/{collection_id}")
+def delete_collection(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    _delete_collection_record(username, collection_id, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/collections/{collection_id}/rename")
+async def rename_collection(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
     body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "Empty name"}, status_code=400)
+    record["name"] = name
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/collections/{collection_id}/description")
+async def set_collection_description(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    record["description"] = body.get("description", "").strip()
+    record["description_customized"] = True
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/collections/{collection_id}/tags/add")
+async def add_collection_tag(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    tag = body.get("tag", "").strip()
+    if not tag:
+        return JSONResponse({"ok": False, "error": "Empty tag"}, status_code=400)
+    tags = record.get("tags", [])
+    if tag not in tags:
+        tags.append(tag)
+    record["tags"] = tags
+    record["tags_customized"] = True
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True, "tags": tags})
+
+@app.post("/api/collections/{collection_id}/tags/remove")
+async def remove_collection_tags(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    tags_to_remove = body.get("tags", [])
+    record["tags"] = [t for t in record.get("tags", []) if t not in tags_to_remove]
+    record["tags_customized"] = True
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True, "tags": record["tags"]})
+
+@app.post("/api/collections/{collection_id}/genres/add")
+async def add_collection_genre(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    genre = body.get("genre", "").strip()
+    if not genre:
+        return JSONResponse({"ok": False, "error": "Empty genre"}, status_code=400)
+    genres = record.get("genres", [])
+    if genre not in genres:
+        genres.append(genre)
+    record["genres"] = genres
+    record["genres_customized"] = True
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True, "genres": genres})
+
+@app.post("/api/collections/{collection_id}/genres/remove")
+async def remove_collection_genres(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    genres_to_remove = body.get("genres", [])
+    record["genres"] = [g for g in record.get("genres", []) if g not in genres_to_remove]
+    record["genres_customized"] = True
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True, "genres": record["genres"]})
+
+@app.put("/api/collections/{collection_id}/members/add")
+async def add_collection_member(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    library_id = body.get("library_id")
     manga_id   = body.get("manga_id", "").strip()
     manga_name = body.get("manga_name", "").strip()
-    if not manga_id or not manga_name:
-        return JSONResponse({"ok": False, "error": "Missing manga_id or manga_name"}, status_code=400)
+    if library_id is None or not manga_id or not manga_name:
+        return JSONResponse({"ok": False, "error": "Missing library_id, manga_id or manga_name"}, status_code=400)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    members = record.get("members", [])
+    if not any(m["library_id"] == library_id and m["manga_id"] == manga_id for m in members):
+        members.append({"library_id": library_id, "manga_id": manga_id, "manga_name": manga_name})
+    record["members"] = members
+    _sync_collection_derived_fields(record)
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.put("/api/collections/{collection_id}/members/remove")
+async def remove_collection_member(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    library_id = body.get("library_id")
+    manga_id   = body.get("manga_id", "").strip()
+    members = record.get("members", [])
+    record["members"] = [m for m in members if not (m["library_id"] == library_id and m["manga_id"] == manga_id)]
+    _sync_collection_derived_fields(record)
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.put("/api/collections/{collection_id}/reorder")
+async def reorder_collection_members(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    if not _can_edit_collection(username, is_shared):
+        return JSONResponse({"ok": False, "error": "Permission denied"}, status_code=403)
+    body = await request.json()
+    order = body.get("order", [])  # [{library_id, manga_id}, ...] in the desired sequence
+    members = record.get("members", [])
+    key_order = [(o.get("library_id"), o.get("manga_id")) for o in order]
+    by_key = {(m["library_id"], m["manga_id"]): m for m in members}
+    reordered = [by_key[k] for k in key_order if k in by_key]
+    # append anything the caller didn't include (shouldn't normally happen)
+    reordered += [m for m in members if (m["library_id"], m["manga_id"]) not in key_order]
+    record["members"] = reordered
+    _sync_collection_derived_fields(record)
+    _save_collection(username, collection_id, record, is_shared)
+    return JSONResponse({"ok": True})
+
+@app.get("/api/collections/{collection_id}/cover-options")
+def get_collection_cover_options(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
+    visible = _visible_members(username, record.get("members", []))
+    if is_shared and not visible:
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
     user_data = auth.load_user_data(username)
-    lists = user_data.get("lists", {})
-    if list_name not in lists:
-        return JSONResponse({"ok": False, "error": "List not found"}, status_code=404)
-    entry = lists[list_name]
-    if manga_id not in entry["manga_ids"]:
-        entry["manga_ids"].append(manga_id)
-        entry["manga_names"].append(manga_name)
-    user_data["lists"] = lists
+    override = user_data.get("collection_covers", {}).get(collection_id)
+    covers_dir = get_covers_dir()
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    options = []
+    for m in visible:
+        manga = _lookup_manga(m["library_id"], m["manga_id"])
+        if not manga:
+            continue
+        manga_covers_dir = os.path.join(covers_dir, str(m["library_id"]), manga["name"]) if covers_dir else None
+        if not manga_covers_dir or not os.path.exists(manga_covers_dir):
+            continue
+        large_files = sorted(
+            [f for f in os.listdir(manga_covers_dir)
+             if os.path.splitext(f)[0].endswith('+') and os.path.splitext(f)[1].lower() in extensions],
+            key=natural_sort_key
+        )
+        for filename in large_files:
+            name, ext = os.path.splitext(filename)
+            small_name = name[:-1] + ext
+            is_selected = bool(override and override.get("library_id") == m["library_id"]
+                                and override.get("manga_id") == m["manga_id"] and override.get("filename") == small_name)
+            options.append({
+                "library_id":  m["library_id"],
+                "manga_id":    m["manga_id"],
+                "manga_name":  m["manga_name"],
+                "filename":    small_name,
+                "url_large":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{filename}",
+                "url_small":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{small_name}",
+                "is_selected": is_selected,
+            })
+    return JSONResponse({"covers": options, "has_override": bool(override)})
+
+@app.post("/api/collections/{collection_id}/cover")
+async def set_collection_cover(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"ok": False, "error": "Collection not found"}, status_code=404)
+    body = await request.json()
+    library_id = body.get("library_id")
+    manga_id   = body.get("manga_id", "").strip()
+    manga_name = body.get("manga_name", "").strip()
+    filename   = body.get("filename", "").strip()
+    if library_id is None or not manga_id or not manga_name or not filename:
+        return JSONResponse({"ok": False, "error": "Missing fields"}, status_code=400)
+    user_data = auth.load_user_data(username)
+    overrides = user_data.get("collection_covers", {})
+    overrides[collection_id] = {"library_id": library_id, "manga_id": manga_id, "manga_name": manga_name, "filename": filename}
+    user_data["collection_covers"] = overrides
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
-@app.put("/api/lists/{list_name}/remove")
-async def remove_from_list(list_name: str, request: Request):
+@app.delete("/api/collections/{collection_id}/cover")
+def clear_collection_cover(request: Request, collection_id: str):
     username = auth.get_current_user(request)
-    body = await request.json()
-    manga_id = body.get("manga_id", "").strip()
-    if not manga_id:
-        return JSONResponse({"ok": False, "error": "Missing manga_id"}, status_code=400)
     user_data = auth.load_user_data(username)
-    lists = user_data.get("lists", {})
-    if list_name not in lists:
-        return JSONResponse({"ok": False, "error": "List not found"}, status_code=404)
-    entry = lists[list_name]
-    if manga_id in entry["manga_ids"]:
-        idx = entry["manga_ids"].index(manga_id)
-        entry["manga_ids"].pop(idx)
-        entry["manga_names"].pop(idx)
-    user_data["lists"] = lists
+    overrides = user_data.get("collection_covers", {})
+    overrides.pop(collection_id, None)
+    user_data["collection_covers"] = overrides
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
@@ -3310,6 +3769,36 @@ def search_page(request: Request):
     if auth.must_change_password(username):
         return RedirectResponse("/settings", status_code=302)
     return templates.TemplateResponse(request, "search_page.html", {
+        "theme_css": get_theme_css(username),
+    })
+
+@app.get("/collections")
+def collections_list_page(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
+    return templates.TemplateResponse(request, "collections_list.html", {
+        "theme_css": get_theme_css(username),
+    })
+
+@app.get("/collection/{collection_id}")
+def collection_detail_page(request: Request, collection_id: str):
+    username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is not None:
+        visible = _visible_members(username, record.get("members", []))
+        if is_shared and not visible:
+            record = None
+    if record is None:
+        return RedirectResponse("/collections", status_code=302)
+    return templates.TemplateResponse(request, "collection_detail.html", {
+        "collection_id": collection_id,
         "theme_css": get_theme_css(username),
     })
 

@@ -156,6 +156,85 @@ Settings has a Custom Theme Editor popup (`templates/settings.html`): named CSS 
 
 `metadata_fetch.py` is wired in: `GET /api/manga/{library_id}/{manga_id}/search-metadata` and `POST .../apply-metadata` in `main.py`, with a "Fetch Metadata" popup in `manga_detail.html` (search AniList/MangaDex, pick a candidate, choose which fields to apply, save into `dims.json`).
 
+### 5. Settings page reorganized into sections — done
+
+Replaced the single long scrolling Settings page with a Jellyfin-dashboard-style
+layout: a left sidebar (collapses to horizontal pill tabs under 720px, same
+visual pattern as the library tabs on the home page) with four sections,
+toggled via `activeSection` in `static/settings.js` — no functional change to
+any individual setting, just regrouped:
+
+- **General** — server connection (native app only), account (login/change
+  password/logout/logout-everywhere), reading-time analytics.
+- **Libraries** — data folder path, library management.
+- **Appearance** — accent colors, theme, backdrop toggles, collections
+  preferences (see below).
+- **Permissions** (admin only) — create user, per-user permissions.
+
+### 6. Collections — done
+
+Replaces the old private-only `lists` feature (renamed for consistency with
+other manga/comic readers — e.g. Komga's Collections). A collection groups
+whole manga entries, possibly across libraries, under one name with its own
+description/tags/genres and member order.
+
+- **Shared vs. private.** Collections created by an admin are *shared*
+  (visible to every user); collections created by anyone else are *private* to
+  that user, same scope `lists` had. A regular user who wants a private
+  collection as an admin uses a separate non-admin account for that — the app
+  doesn't special-case it.
+- **Storage.** Shared collections live in `{data_path}/collections.json`;
+  private ones live under `collections` in `{data_path}/{username}.json`. Both
+  share the same record shape: `id`, `name`, `shared`, `members` (ordered list
+  of `{library_id, manga_id, manga_name}`), and `description`/`tags`/`genres`
+  each paired with a `*_customized` flag.
+- **Derived fields, until customized.** While `description_customized` is
+  false, the description mirrors whichever member is currently first —
+  reordering updates it live. While `tags_customized`/`genres_customized` are
+  false, they're the union of every member's tags/genres, recomputed whenever
+  membership changes. The first manual edit to a field flips its flag and
+  locks it — future reorders/membership changes stop touching it.
+  (`_sync_collection_derived_fields` in `main.py`.)
+- **Cover is a per-viewer preference**, not a collection-wide setting — same
+  mechanic as the existing per-user manga cover override
+  (`user_data["covers"]`), just keyed by collection id
+  (`user_data["collection_covers"]`). Default before any override: the
+  current first member's own resolved cover.
+  `GET /api/collections/{id}/cover-options` aggregates every visible member's
+  available covers into one picker.
+- **Visibility filtering.** Every read of a collection's members runs through
+  `can_access_library`/`is_manga_blocked` per viewer — same total-lockout rule
+  as the rest of the app. For a shared collection, if filtering leaves zero
+  visible members for a given user, the whole collection is treated as
+  nonexistent for them (omitted from listings, 404 on direct navigation) —
+  not just shown empty.
+- **Permissions.** Any admin can manage any shared collection (reorder, edit
+  metadata, add/remove members) — same as any other admin-only resource in
+  this app. A non-admin viewing a shared collection can only browse it and set
+  their own cover override. Private collections are fully owned by their
+  creator.
+- **Pages.** `templates/collection_detail.html` (built by copying
+  `volume_detail.html` and reworking it) shows the collection's hero
+  (name/description/tags/genres, all editable if `can_edit`) plus a
+  drag-to-reorder grid of member tiles — the tiles reuse the manga-list page's
+  `.manga-thumb` styling, not `volume_detail`'s volume-card styling.
+  `templates/collections_list.html` + `static/collections_list.js` is the
+  `/collections` browse page (modeled on `category_list.html`), listing a
+  user's own + visible shared collections as manga-styled tiles.
+- **Click-interception.** If a manga belongs to a collection visible to the
+  current user, clicking its tile *anywhere* in the app (library tab grid,
+  Favourites/Last Read/Random rows, search results, category pages) opens the
+  collection's page instead of the manga's own page — the frontend fetches a
+  `manga_id → collection_id` membership map once
+  (`GET /api/collections/membership`) and every tile click-handler consults it
+  before navigating. The only way to reach a manga's own detail page when it's
+  in a visible collection is by drilling into it from inside the collection
+  page. This is implemented independently in `static/app.js`,
+  `static/category_list.js`, and `templates/search_page.html`.
+- **Settings toggles** (Appearance tab): show/hide the Collections row on the
+  home page (`show_collections_row`), and hide the admin's shared collections
+  entirely (`hide_admin_collections`) — both per-user.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

@@ -53,6 +53,8 @@ const app = createApp({
       activeTheme: null,
       bgLayerStyle: null,
       bgIsRaster: false,
+
+      collectionMembership: {},
     };
   },
 
@@ -69,9 +71,20 @@ const app = createApp({
       this.seed = this.getOrCreateSeed();
     }
     await this.loadPage(1);
+    await this.loadCollectionMembership();
   },
 
   methods: {
+    async loadCollectionMembership() {
+      try {
+        const res  = await fetch(apiUrl('/api/collections/membership'));
+        const data = await res.json();
+        this.collectionMembership = data.membership || {};
+      } catch (e) {
+        this.collectionMembership = {};
+      }
+    },
+
     getOrCreateSeed() {
       const override = sessionStorage.getItem(`category_random_seed_override_${this.libraryId}`);
       if (override) return override;
@@ -104,7 +117,10 @@ const app = createApp({
       }
     },
 
-    openManga(id) { window.location.href = `/manga/${this.libraryId}/${id}`; },
+    openManga(id) {
+      const cid = this.collectionMembership[`${this.libraryId}:${id}`];
+      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.libraryId}/${id}`;
+    },
     goBack()      { window.location.href = '/'; },
 
     async loadTheme() {

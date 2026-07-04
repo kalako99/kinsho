@@ -310,31 +310,31 @@
         @click="toggleTag(tag)"
       >{{ tag }}</span>
     </div>
-    <div class="filter-label">List</div>
+    <div class="filter-label">Collection</div>
     <div style="margin-bottom:16px;">
-      <div class="list-dropdown-wrap" v-click-outside="closeListFilterDropdown">
+      <div class="list-dropdown-wrap" v-click-outside="closeCollectionFilterDropdown">
         <div
           class="list-dropdown-trigger"
-          :class="{ open: showListFilterDropdown }"
-          @click="showListFilterDropdown = !showListFilterDropdown"
+          :class="{ open: showCollectionFilterDropdown }"
+          @click="showCollectionFilterDropdown = !showCollectionFilterDropdown"
         >
-          <span>{{ selectedList || 'No List' }}</span>
+          <span>{{ selectedCollection || 'No Collection' }}</span>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="6 9 12 15 18 9"/>
           </svg>
         </div>
-        <div class="list-dropdown-menu" v-if="showListFilterDropdown" @click.stop>
+        <div class="list-dropdown-menu" v-if="showCollectionFilterDropdown" @click.stop>
           <div
             class="list-dropdown-option"
-            :class="{ selected: selectedList === null }"
-            @click="selectList(null)"
-          >No List</div>
+            :class="{ selected: selectedCollection === null }"
+            @click="selectCollection(null)"
+          >No Collection</div>
           <div
             class="list-dropdown-option"
-            :class="{ selected: selectedList === name }"
-            v-for="(entry, name) in allLists"
+            :class="{ selected: selectedCollection === name }"
+            v-for="(ids, name) in allCollections"
             :key="name"
-            @click="selectList(name)"
+            @click="selectCollection(name)"
           >{{ name }}</div>
         </div>
       </div>
@@ -393,9 +393,10 @@ createApp({
       genreSearch:    '',
       tagSearch:      '',
       onlyCompleted:  false,
-      selectedList:   null,
-      showListFilterDropdown: false,
-      allLists:       {},
+      selectedCollection:   null,
+      showCollectionFilterDropdown: false,
+      allCollections:       {},
+      collectionMembership: {},
       mangas:         [],
       loading:        true,
     };
@@ -415,9 +416,9 @@ createApp({
           if (!this.selectedTags.every(t => mt.includes(t))) return false;
         }
         if (this.onlyCompleted && !m.is_complete) return false;
-        if (this.selectedList) {
-          const entry = this.allLists[this.selectedList];
-          if (!entry || !(entry.manga_ids || []).includes(m.id)) return false;
+        if (this.selectedCollection) {
+          const mangaIds = this.allCollections[this.selectedCollection] || [];
+          if (!mangaIds.includes(m.id)) return false;
         }
         return true;
       });
@@ -439,7 +440,7 @@ createApp({
       this.loadMangas(),
       this.loadGenres(),
       this.loadTags(),
-      this.loadLists(),
+      this.loadCollectionsFilter(),
     ]);
     this.$nextTick(() => {
       if (this.$refs.searchInput) this.$refs.searchInput.focus();
@@ -483,12 +484,30 @@ createApp({
       } catch (e) { this.allTags = []; }
     },
 
-    async loadLists() {
+    async loadCollectionsFilter() {
       try {
-        const res = await fetch(apiUrl('/api/lists'));
-        const data = await res.json();
-        this.allLists = data.lists || {};
-      } catch (e) { this.allLists = {}; }
+        const [membershipRes, collectionsRes] = await Promise.all([
+          fetch(apiUrl('/api/collections/membership')),
+          fetch(apiUrl('/api/collections')),
+        ]);
+        const membership = (await membershipRes.json()).membership || {};
+        const collectionsList = (await collectionsRes.json()).collections || [];
+        this.collectionMembership = membership;
+        const idToName = {};
+        collectionsList.forEach(c => { idToName[c.id] = c.name; });
+        const grouped = {};
+        for (const [key, cid] of Object.entries(membership)) {
+          const [libId, mangaId] = key.split(':');
+          if (parseInt(libId) !== this.libraryId) continue;
+          const name = idToName[cid];
+          if (!name) continue;
+          (grouped[name] = grouped[name] || []).push(mangaId);
+        }
+        this.allCollections = grouped;
+      } catch (e) {
+        this.allCollections = {};
+        this.collectionMembership = {};
+      }
     },
 
     toggleGenre(genre) {
@@ -503,17 +522,18 @@ createApp({
       else this.selectedTags.splice(i, 1);
     },
 
-    selectList(name) {
-      this.selectedList = name;
-      this.showListFilterDropdown = false;
+    selectCollection(name) {
+      this.selectedCollection = name;
+      this.showCollectionFilterDropdown = false;
     },
 
-    closeListFilterDropdown() {
-      this.showListFilterDropdown = false;
+    closeCollectionFilterDropdown() {
+      this.showCollectionFilterDropdown = false;
     },
 
     openManga(id) {
-      window.location.href = `/manga/${this.libraryId}/${id}`;
+      const cid = this.collectionMembership[`${this.libraryId}:${id}`];
+      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.libraryId}/${id}`;
     },
 
     goBack() {

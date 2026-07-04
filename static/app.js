@@ -83,6 +83,9 @@ const app = createApp({
       lastRead:    [],
       random:      [],
       favourites:  [],
+      collectionsRow:       [],
+      showCollectionsRow:   true,
+      collectionMembership: {},
 
       // ── GRID DATA + PAGINATION ──
       lastUpdated:      [],
@@ -106,6 +109,7 @@ const app = createApp({
     if (this.activeTab !== null) {
       await this.loadMangas(this.activeTab);
     }
+    await this.loadCollectionsRow();
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && this.activeTab !== null) {
         this.loadMangas(this.activeTab);
@@ -114,6 +118,47 @@ const app = createApp({
   },
 
   methods: {
+    // ── LOAD COLLECTIONS ROW ──
+    async loadCollectionsRow() {
+      try {
+        const settingsRes = await fetch(apiUrl('/api/settings'));
+        const settings = await settingsRes.json();
+        this.showCollectionsRow = settings.show_collections_row !== false;
+      } catch (e) {
+        this.showCollectionsRow = true;
+      }
+      try {
+        const res  = await fetch(apiUrl('/api/collections'));
+        const data = await res.json();
+        this.collectionsRow = this.showCollectionsRow
+          ? (data.collections || []).slice(0, 20).map(c => ({
+              id:          c.id,
+              title:       c.name,
+              cover:       c.cover_url,
+              is_complete: false,
+              progress:    0,
+            }))
+          : [];
+      } catch (e) {
+        console.error('Failed to load collections row:', e);
+        this.collectionsRow = [];
+      }
+      await this.loadCollectionMembership();
+    },
+
+    async loadCollectionMembership() {
+      try {
+        const res  = await fetch(apiUrl('/api/collections/membership'));
+        const data = await res.json();
+        this.collectionMembership = data.membership || {};
+      } catch (e) {
+        this.collectionMembership = {};
+      }
+    },
+
+    openCollection(id) { window.location.href = `/collection/${id}`; },
+    goToCollections()  { window.location.href = '/collections'; },
+
     // ── LOAD MANGAS FOR ACTIVE TAB FROM API ──
     async loadMangas(libraryId) {
       try {
@@ -264,7 +309,10 @@ const app = createApp({
       }
     },
 
-    openManga(id)    { window.location.href = `/manga/${this.activeTab}/${id}`; },
+    openManga(id) {
+      const cid = this.collectionMembership[`${this.activeTab}:${id}`];
+      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.activeTab}/${id}`;
+    },
 
     goMore(section) {
       const map = {

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   {{ theme_css | safe }}
-  <title>Manga Detail — KINSHO</title>
+  <title>Collection — KINSHO</title>
   <script src="/static/api.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"></script>
   <style>
@@ -249,89 +249,108 @@
     .mchap-list {
       padding: 8px 0;
     }
-    .volume-grid {
+    /* ── SERIES (member) GRID — same tile as the manga list page ── */
+    .member-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-      gap: 16px;
+      grid-template-columns: repeat(auto-fill, minmax(clamp(100px, 13vw, 160px), 1fr));
+      gap: 16px 12px;
       padding: 20px;
     }
-    .volume-card {
+    .manga-thumb {
       cursor: pointer;
-      border-radius: 8px;
-      overflow: hidden;
-      background: var(--color-secondary, #1a1a1a);
       transition: transform 0.2s;
+      position: relative;
     }
-    .volume-card:hover { transform: translateY(-4px); }
-    .volume-cover {
+    .manga-thumb:hover { transform: translateY(-4px); }
+    .manga-thumb:hover .cover { box-shadow: 0 8px 24px rgba(0,0,0,0.55); }
+    .manga-thumb.dragging-source { opacity: 0.4; }
+    .manga-thumb.drag-over .cover { outline: 2px solid var(--color-primary, #e94560); outline-offset: 2px; }
+    .manga-thumb .cover {
+      width: 100%;
+      height: calc(clamp(100px, 13vw, 160px) * 3 / 2);
+      background: var(--color-secondary, #1a1a1a);
+      border-radius: 11px;
+      border: 1px solid #333;
+      overflow: hidden;
+      position: relative;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .manga-thumb .cover img {
+      position: absolute;
+      top: 0; left: 0;
       width: 100%;
       height: 100%;
-      background: #222;
+      object-fit: cover;
+      border-radius: 11px;
+      display: block;
+    }
+    .manga-thumb .cover span {
       display: flex;
+      width: 100%;
+      height: 100%;
       align-items: center;
       justify-content: center;
       color: #555;
       font-size: 0.7rem;
     }
-    .volume-cover img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
+    .member-complete-badge {
+      position: absolute;
+      top: 6px;
+      right: 6px;
+      background: var(--color-primary, #e94560);
+      color: #fff;
+      font-size: 0.6rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      pointer-events: none;
     }
-    .volume-title {
-      padding: 8px;
-      font-size: 0.75rem;
-      font-weight: 600;
+    .member-remove-btn {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: rgba(0,0,0,0.7);
+      border: none;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s;
+      z-index: 2;
+    }
+    .manga-thumb:hover .member-remove-btn { opacity: 1; }
+    .member-remove-btn:hover { background: var(--color-primary, #e94560); }
+    .manga-thumb .card-body { padding: 5px 2px 0; }
+    .manga-thumb .thumb-title {
+      font-size: 0.72rem;
       color: var(--color-text, #f0f0f0);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .volume-progress {
-      padding: 0 8px 8px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .volume-progress-track {
-      flex: 1;
-      height: 3px;
-      background: #333;
-      border-radius: 2px;
-      overflow: hidden;
-    }
-    .volume-progress-bar {
-      height: 100%;
-      background: var(--color-primary, #e94560);
-      border-radius: 2px;
-      transition: width 0.3s;
-    }
-    .volume-progress-label {
-      font-size: 0.62rem;
-      color: #777;
-      flex-shrink: 0;
-      white-space: nowrap;
-    }
-    .volume-cover-wrap {
-      position: relative;
-      width: 100%;
-      aspect-ratio: 2/3;
-    }
-    .volume-read-badge {
-      position: absolute;
-      top: 6px;
-      right: 6px;
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      background: var(--color-primary, #e94560);
+    .add-member-tile {
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #fff;
-      z-index: 2;
+      flex-direction: column;
+      gap: 6px;
+      width: 100%;
+      height: calc(clamp(100px, 13vw, 160px) * 3 / 2);
+      border-radius: 11px;
+      border: 1px dashed #444;
+      background: none;
+      color: #888;
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
     }
+    .add-member-tile:hover { border-color: var(--color-primary, #e94560); color: var(--color-primary, #e94560); }
     .sec-head {
       display: flex;
       align-items: center;
@@ -915,8 +934,7 @@
 </head>
 <body>
 <script>
-  window.__LIBRARY_ID__ = {{ library_id }};
-  window.__MANGA_ID__   = {{ manga_id | tojson }};
+  window.__COLLECTION_ID__ = {{ collection_id | tojson }};
 </script>
 {% raw %}
 
@@ -928,120 +946,68 @@
         <polyline points="15 18 9 12 15 6"/>
       </svg>
     </button>
-    <span class="topbar-title">{{ manga ? manga.name : 'Loading…' }}</span>
+    <span class="topbar-title">{{ collection ? collection.name : 'Loading…' }}</span>
   </div>
 
   <div v-if="loading" class="state-msg">Loading…</div>
 
-  <template v-else-if="manga">
+  <template v-else-if="collection">
 
     <!-- HERO -->
     <div class="hero">
-      <div v-if="showBackdrop" class="hero-bg" :style="manga.cover_url_large ? `background-image:url('${manga.cover_url_large}')` : ''"></div>
+      <div v-if="showBackdrop" class="hero-bg" :style="collection.cover_url_large ? `background-image:url('${collection.cover_url_large}')` : ''"></div>
       <div v-if="showBackdrop" class="hero-overlay"></div>
       <div class="hero-inner">
 
         <!-- POSTER -->
         <div class="poster">
-          <div v-if="manga.cover_url_large" class="poster-clickable" @click="openCoverPicker">
-            <img :src="manga.cover_url_large" :alt="manga.name">
-            <span v-if="manga.is_complete" class="complete-badge">COMPLETE</span>
+          <div v-if="collection.cover_url_large" class="poster-clickable" @click="openCoverPicker">
+            <img :src="collection.cover_url_large" :alt="collection.name">
           </div>
           <div v-else class="poster-placeholder" style="cursor:pointer;" @click="openCoverPicker">No Cover</div>
         </div>
 
         <!-- META -->
         <div class="hero-head">
-          <div class="manga-title">{{ manga.name }}</div>
+          <div v-if="!editingName" class="manga-title">
+            {{ collection.name }}
+            <button class="btn-pencil" v-if="canEdit" @click="startEditName" title="Rename collection" style="vertical-align:middle;">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
+          </div>
+          <div v-else style="display:flex; gap:8px; align-items:center; margin-bottom:10px;">
+            <input type="text" v-model="nameInput" class="desc-textarea" style="min-height:auto; padding:8px 10px;" @keyup.enter="saveName"/>
+            <button class="popup-btn soft" @click="cancelEditName">Cancel</button>
+            <button class="popup-btn primary" @click="saveName" :disabled="!nameInput.trim()">Save</button>
+          </div>
           <div class="manga-meta">
-            <span class="meta-badge chapters">{{ manga.volumes ? manga.volumes.length : 0 }} Volumes</span>
+            <span class="meta-badge chapters">{{ collection.members.length }} Series</span>
+            <span class="meta-badge" v-if="collection.shared">Shared</span>
           </div>
-          <div class="poster-actions">
-            <button class="btn btn-primary" @click="startReading">
+          <div class="poster-actions" v-if="canEdit">
+            <button class="btn btn-soft" @click="openAddMemberPopup">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M2 4.5h7.5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/>
-                <path d="M22 4.5h-7.5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/>
+                <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
               </svg>
-              {{ lastVolumeId ? 'Continue Reading' : 'Start Reading' }}
+              Add Series
             </button>
-            <button class="btn btn-soft" :class="{ active: manga.is_favourite }" @click="toggleFavourite">
+            <button class="btn btn-soft" @click="deleteCollection">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M12 2.5l3.09 6.26 6.91 1-5 4.87 1.18 6.87L12 18.27l-6.18 3.25L7 14.65 2 9.78l6.91-1L12 2.5z"/>
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-1 14H6L5 6"/>
               </svg>
-              {{ manga.is_favourite ? 'Favourited' : 'Add to Favourites' }}
+              Delete Collection
             </button>
-          </div>
-          <div class="list-dropdown-wrap" style="margin-top:10px;" v-click-outside="closeCollectionDropdown">
-            <button class="btn btn-soft" style="width:200px;" @click="toggleCollectionDropdown">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
-                <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
-              </svg>
-              Add to Collection
-            </button>
-            <div class="list-dropdown-menu" v-if="showCollectionDropdown" @click.stop>
-              <input
-                class="list-search-input"
-                type="text"
-                v-model="collectionSearch"
-                placeholder="Search or create collection…"
-                ref="collectionSearchRef"
-                @keyup.enter="onCollectionSearchEnter"
-              />
-              <div class="list-options">
-                <template v-if="filteredCollections.length > 0">
-                  <div
-                    class="list-option"
-                    v-for="c in filteredCollections"
-                    :key="c.id"
-                    @click="toggleCollectionMembership(c)"
-                  >
-                    <div class="list-option-check" :class="{ checked: c.has_manga }">
-                      <svg v-if="c.has_manga" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                        <polyline points="20 6 9 17 4 12"/>
-                      </svg>
-                    </div>
-                    {{ c.name }}
-                  </div>
-                </template>
-                <div
-                  class="list-create-option"
-                  v-if="collectionSearch.trim() && !exactCollectionMatch"
-                  @click="createAndAddToCollection"
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-                  </svg>
-                  Create "{{ collectionSearch.trim() }}"
-                </div>
-                <div v-if="filteredCollections.length === 0 && !collectionSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No collections yet.</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- STATUS / LAST UPDATED -->
-          <div class="status-row">
-            <span class="status-badge" :class="manga.is_complete ? 'complete' : 'ongoing'">
-              {{ manga.is_complete ? 'Complete' : 'Ongoing' }}
-            </span>
-            <span v-if="manga.last_updated" class="status-badge updated">
-              Last updated: {{ formatLastUpdated(manga.last_updated) }}
-            </span>
-          </div>
-
-          <!-- READING TIME -->
-          <div v-if="readingTimeMinutes > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
-            <div class="section-label" style="margin-bottom:4px;">READING TIME</div>
-            <div style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
-              {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
-            </div>
           </div>
 
           <!-- DESCRIPTION -->
           <div class="desc-area">
             <div class="section-label">
               DESCRIPTION
-              <button class="btn-pencil" v-if="canEditDescription" @click="startEditDesc" title="Edit description">
+              <button class="btn-pencil" v-if="canEdit" @click="startEditDesc" title="Edit description">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                   <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
@@ -1049,7 +1015,7 @@
               </button>
             </div>
             <div v-if="!editingDesc">
-              <p v-if="manga.description" class="desc-text">{{ manga.description }}</p>
+              <p v-if="collection.description" class="desc-text">{{ collection.description }}</p>
               <p v-else class="desc-empty">No description yet.</p>
             </div>
             <div v-else>
@@ -1062,17 +1028,17 @@
           </div>
 
           <!-- GENRES -->
-          <div class="tags-area" v-if="canEditGenres">
+          <div class="tags-area" v-if="canEdit">
             <div class="section-label">GENRES</div>
             <div class="tags-row">
               <span
-                v-for="genre in manga.genres || []"
+                v-for="genre in collection.genres || []"
                 :key="genre"
                 class="tag-pill"
                 :class="{ selected: genreDeleteMode && selectedGenres.includes(genre) }"
                 @click="onGenreClick(genre)"
               >{{ genre }}</span>
-              <span v-if="!manga.genres || manga.genres.length === 0" style="font-size:0.75rem; color:#555;">No genres yet.</span>
+              <span v-if="!collection.genres || collection.genres.length === 0" style="font-size:0.75rem; color:#555;">No genres yet.</span>
             </div>
             <div class="tag-actions">
               <button class="btn-tag" @click="openAddGenre">
@@ -1095,27 +1061,23 @@
           <div class="tags-area" v-else>
             <div class="section-label">GENRES</div>
             <div class="tags-row">
-              <span
-                v-for="genre in manga.genres || []"
-                :key="genre"
-                class="tag-pill"
-                @click="onGenreClick(genre)"
-              >{{ genre }}</span>
+              <span v-for="genre in collection.genres || []" :key="genre" class="tag-pill">{{ genre }}</span>
+              <span v-if="!collection.genres || collection.genres.length === 0" style="font-size:0.75rem; color:#555;">No genres yet.</span>
             </div>
           </div>
 
           <!-- TAGS -->
-          <div class="tags-area" v-if="canEditTags">
+          <div class="tags-area" v-if="canEdit">
             <div class="section-label">TAGS</div>
             <div class="tags-row">
               <span
-                v-for="tag in manga.tags || []"
+                v-for="tag in collection.tags || []"
                 :key="tag"
                 class="tag-pill"
                 :class="{ selected: deleteMode && selectedTags.includes(tag) }"
                 @click="onTagClick(tag)"
               >{{ tag }}</span>
-              <span v-if="!manga.tags || manga.tags.length === 0" style="font-size:0.75rem; color:#555;">No tags yet.</span>
+              <span v-if="!collection.tags || collection.tags.length === 0" style="font-size:0.75rem; color:#555;">No tags yet.</span>
             </div>
             <div class="tag-actions">
               <button class="btn-tag" @click="openAddTag">
@@ -1138,12 +1100,8 @@
           <div class="tags-area" v-else>
             <div class="section-label">TAGS</div>
             <div class="tags-row">
-              <span
-                v-for="tag in manga.tags || []"
-                :key="tag"
-                class="tag-pill"
-                @click="onTagClick(tag)"
-              >{{ tag }}</span>
+              <span v-for="tag in collection.tags || []" :key="tag" class="tag-pill">{{ tag }}</span>
+              <span v-if="!collection.tags || collection.tags.length === 0" style="font-size:0.75rem; color:#555;">No tags yet.</span>
             </div>
           </div>
 
@@ -1151,46 +1109,77 @@
       </div>    <!-- /hero-inner -->
     </div>      <!-- /hero -->
 
-    <!-- VOLUMES -->
+    <!-- SERIES (members) -->
     <div class="chapters-section">
       <div class="sec-head">
-        <span class="sec-title">Volumes</span>
+        <span class="sec-title">Series</span>
       </div>
 
-      <div v-if="!manga.volumes || manga.volumes.length === 0" class="state-msg">No volumes found.</div>
+      <div v-if="collection.members.length === 0 && !canEdit" class="state-msg">No series in this collection.</div>
 
-      <div class="volume-grid" v-else>
+      <div class="member-grid" v-else>
         <div
-          class="volume-card"
-          v-for="vol in manga.volumes"
-          :key="vol.id"
-          @click="openVolume(vol.id)"
+          class="manga-thumb"
+          v-for="m in collection.members"
+          :key="m.library_id + ':' + m.manga_id"
+          :draggable="canEdit"
+          @dragstart="onMemberDragStart($event, m.library_id + ':' + m.manga_id)"
+          @dragover.prevent="onMemberDragOver($event, m.library_id + ':' + m.manga_id)"
+          @dragleave="onMemberDragLeave($event)"
+          @drop.prevent="onMemberDrop($event, m.library_id + ':' + m.manga_id)"
+          @dragend="onMemberDragEnd"
+          @click="openMember(m)"
         >
-          <div class="volume-cover-wrap">
-            <div class="volume-cover">
-              <img v-if="vol.cover_url" :src="vol.cover_url" :alt="vol.name">
-              <span v-else>No Cover</span>
-            </div>
-            <div v-if="readVolumeIds.has(vol.id)" class="volume-read-badge">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
-                <polyline points="20 6 9 17 4 12"/>
+          <div class="cover">
+            <img v-if="m.cover_url" :src="m.cover_url" :alt="m.manga_name">
+            <span v-else>No Cover</span>
+            <span v-if="m.is_complete" class="member-complete-badge">COMPLETE</span>
+            <button v-if="canEdit" class="member-remove-btn" title="Remove from collection" @click.stop="removeMember(m)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
               </svg>
-            </div>
+            </button>
           </div>
-          <div class="volume-title">{{ vol.name }}</div>
-          <div class="volume-progress" v-if="volumeProgress(vol)">
-            <div class="volume-progress-track">
-              <div class="volume-progress-bar" :style="{ width: volumeProgress(vol).pct + '%' }"></div>
-            </div>
-            <span class="volume-progress-label">{{ volumeProgress(vol).label }}</span>
+          <div class="card-body">
+            <div class="thumb-title">{{ m.manga_name }}</div>
           </div>
         </div>
+
+        <button v-if="canEdit" class="add-member-tile" @click="openAddMemberPopup">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          Add Series
+        </button>
       </div>
     </div>
 
   </template>
 
-  <div v-else class="state-msg">Manga not found.</div>
+  <div v-else class="state-msg">Collection not found.</div>
+
+  <!-- ADD SERIES POPUP -->
+  <div class="popup-overlay" v-if="showAddMemberPopup" @click.self="showAddMemberPopup = false">
+    <div class="popup" style="width:420px;">
+      <div class="popup-title">Add Series</div>
+      <select v-model="addMemberLibraryId" class="desc-textarea" style="min-height:auto; padding:8px 10px; margin-bottom:10px; cursor:pointer;" @change="searchAddMember">
+        <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
+      </select>
+      <input type="text" v-model="addMemberSearch" placeholder="Search this library…" @input="searchAddMember"/>
+      <div class="popup-suggestions" style="flex-direction:column; align-items:stretch; max-height:260px;">
+        <div v-if="addMemberLoading" class="state-msg" style="padding:16px;">Searching…</div>
+        <div
+          v-for="m in addMemberResults" :key="m.id"
+          class="list-option"
+          @click="addMember(m)"
+        >{{ m.name }}</div>
+        <div v-if="!addMemberLoading && addMemberResults.length === 0" style="font-size:0.75rem; color:#555; padding:6px 8px;">No results.</div>
+      </div>
+      <div class="popup-actions">
+        <button class="popup-btn soft" @click="showAddMemberPopup = false">Close</button>
+      </div>
+    </div>
+  </div>
 
   <!-- ADD TAG POPUP -->
   <div class="popup-overlay" v-if="showAddPopup" @click.self="showAddPopup = false">
@@ -1211,14 +1200,13 @@
   <div class="popup-overlay" v-if="showDeletePopup" @click.self="cancelDelete">
     <div class="popup">
       <div class="popup-title">Remove Tags</div>
-      <div class="popup-confirm-msg">What would you like to do with these tags?</div>
+      <div class="popup-confirm-msg">Remove these tags from the collection?</div>
       <div class="popup-confirm-tags">
         <span v-for="t in selectedTags" :key="t" class="tag-pill selected">{{ t }}</span>
       </div>
       <div class="popup-actions">
         <button class="popup-btn soft" @click="cancelDelete">Cancel</button>
-        <button class="popup-btn soft" @click="confirmDelete(false)">Remove TAG</button>
-        <button class="popup-btn primary" @click="confirmDelete(true)">Remove TAG Completely</button>
+        <button class="popup-btn primary" @click="confirmDelete">Remove</button>
       </div>
     </div>
   </div>
@@ -1242,14 +1230,13 @@
   <div class="popup-overlay" v-if="showDeleteGenrePopup" @click.self="cancelDeleteGenre">
     <div class="popup">
       <div class="popup-title">Remove Genres</div>
-      <div class="popup-confirm-msg">What would you like to do with these genres?</div>
+      <div class="popup-confirm-msg">Remove these genres from the collection?</div>
       <div class="popup-confirm-tags">
         <span v-for="g in selectedGenres" :key="g" class="tag-pill selected">{{ g }}</span>
       </div>
       <div class="popup-actions">
         <button class="popup-btn soft" @click="cancelDeleteGenre">Cancel</button>
-        <button class="popup-btn soft" @click="confirmDeleteGenre(false)">Remove from this Manga</button>
-        <button class="popup-btn primary" @click="confirmDeleteGenre(true)">Remove Completely</button>
+        <button class="popup-btn primary" @click="confirmDeleteGenre">Remove</button>
       </div>
     </div>
   </div>
@@ -1259,17 +1246,21 @@
     <div class="cover-picker-box" @click.stop>
       <div class="cover-picker-header">
         <span class="cover-picker-title">Choose Cover</span>
-        <button class="cover-picker-close" @click.stop="showCoverPicker = false">Close</button>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button v-if="coverHasOverride" class="cover-picker-close" @click.stop="resetCoverToDefault">Reset to Default</button>
+          <button class="cover-picker-close" @click.stop="showCoverPicker = false">Close</button>
+        </div>
       </div>
       <div v-if="coverPickerLoading" class="state-msg">Loading covers…</div>
       <div v-else-if="availableCovers.length === 0" class="state-msg">No covers found.</div>
       <div class="cover-picker-grid" v-else>
         <div
           v-for="cover in availableCovers"
-          :key="cover.filename"
+          :key="cover.library_id + ':' + cover.manga_id + ':' + cover.filename"
           class="cover-option"
           :class="{ selected: cover.is_selected }"
           @click="selectCover(cover)"
+          :title="cover.manga_name"
         >
           <img :src="cover.url_large" :alt="cover.filename">
           <span class="cover-option-badge" v-if="cover.is_selected">Active</span>
@@ -1286,19 +1277,20 @@ const { createApp } = Vue;
 createApp({
   data() {
     return {
-      libraryId:            window.__LIBRARY_ID__,
-      mangaId:              window.__MANGA_ID__,
-      manga:                null,
+      collectionId:         window.__COLLECTION_ID__,
+      collection:           null,
       loading:              true,
       showBackdrop:         true,
-      isAdmin:              false,
-      readingTimeMinutes:   null,
-      canEditTags:          false,
-      canEditGenres:        false,
-      canEditDescription:   false,
+      canEdit:              false,
+
+      // rename
+      editingName:          false,
+      nameInput:            '',
+
       // description
       editingDesc:          false,
       descInput:            '',
+
       // tags
       allTags:              [],
       tagInput:             '',
@@ -1306,6 +1298,7 @@ createApp({
       deleteMode:           false,
       selectedTags:         [],
       showDeletePopup:      false,
+
       // genres
       allGenres:            [],
       genreInput:           '',
@@ -1313,22 +1306,26 @@ createApp({
       genreDeleteMode:      false,
       selectedGenres:       [],
       showDeleteGenrePopup: false,
+
       // cover picker
       showCoverPicker:      false,
       coverPickerLoading:   false,
       availableCovers:      [],
-      // collections
-      allCollections:       [],
-      showCollectionDropdown: false,
-      collectionSearch:     '',
-      // reading progress
-      lastVolumeId:         null,
-      lastPage:             0,
-      readVolumeIds:        new Set(),
-      volumePages:          {},
+      coverHasOverride:     false,
+
+      // add member popup
+      showAddMemberPopup:   false,
+      libraries:            [],
+      addMemberLibraryId:   null,
+      addMemberSearch:      '',
+      addMemberResults:     [],
+      addMemberLoading:     false,
+
+      // drag reorder
+      _dragKey:             null,
     };
   },
-  
+
   computed: {
     filteredSuggestions() {
       const input = this.tagInput.trim().toLowerCase();
@@ -1343,227 +1340,78 @@ createApp({
         .filter(g => input === '' || g.toLowerCase().includes(input))
         .slice(0, 10);
     },
-
-    filteredCollections() {
-      const q = this.collectionSearch.trim().toLowerCase();
-      return this.allCollections.filter(c => !q || c.name.toLowerCase().includes(q));
-    },
-
-    exactCollectionMatch() {
-      const q = this.collectionSearch.trim().toLowerCase();
-      return this.allCollections.some(c => c.name.toLowerCase() === q);
-    },
   },
 
   async mounted() {
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
     }).catch(() => {});
-    await this.loadManga();
+    await this.loadCollection();
     await Promise.all([
-      this.loadAdminStatus(),
       this.loadAllTags(),
       this.loadAllGenres(),
-      this.loadReadChapters(),
-      this.loadCollections(),
-      this.loadReadingTime(),
+      this.loadLibraries(),
     ]);
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') {
-        this.loadReadChapters();
-      }
-    });
-    this.prefetchDims();
   },
 
   methods: {
-    async loadManga() {
+    async loadCollection() {
       try {
-        const [mangaRes, volumesRes] = await Promise.all([
-          fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}`)),
-          fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/volumes`)),
-        ]);
-        if (!mangaRes.ok) { this.loading = false; return; }
-        this.manga = await mangaRes.json();
-        const volumesData = await volumesRes.json();
-        const covers_base = `/covers/${this.libraryId}/${encodeURIComponent(this.manga.name)}`;
-        this.manga.volumes = (volumesData.volumes || []).map(v => ({
-          ...v,
-          cover_url:   v.cover_image ? `${covers_base}/${encodeURIComponent(v.cover_image)}` : null,
-          total_pages: v.total_pages || v.page_count || 0,
-        }));
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}`));
+        if (!res.ok) { this.loading = false; this.collection = null; return; }
+        this.collection = await res.json();
+        this.canEdit = this.collection.can_edit;
       } catch (e) {
-        console.error('Failed to load manga:', e);
+        console.error('Failed to load collection:', e);
+        this.collection = null;
       } finally {
         this.loading = false;
       }
     },
 
-    async loadReadingProgress() {
-      try {
-        const res = await fetch(apiUrl(`/api/reading/history/${this.libraryId}/${this.mangaId}?t=${Date.now()}`));
-        const data = await res.json();
-        this.lastVolumeId  = data.last_volume_id || null;
-        this.lastPage      = data.last_page || 0;
-        this.readVolumeIds = new Set(data.completed_volume_ids || []);
-        this.volumePages   = data.volume_pages || {};
-      } catch (e) {
-        console.error('Failed to load reading progress:', e);
-      }
-    },
-
-    volumeProgress(vol) {
-      const page  = (this.volumePages[vol.id]) || 0;
-      const total = vol.total_pages || 0;
-      if (page <= 0 || total <= 0) return null;
-      return {
-        pct:   Math.round(page / total * 100),
-        label: `${page}/${total}`,
-      };
-    },
-
-    async toggleFavourite() {
-      try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/favourite`), {
-          method: 'POST',
-        });
-        const data = await res.json();
-        if (data.ok) this.manga.is_favourite = data.is_favourite;
-      } catch (e) {
-        console.error('Failed to toggle favourite:', e);
-      }
-    },
-
-    startReading() {
-      if (!this.manga || !this.manga.volumes || this.manga.volumes.length === 0) return;
-      if (this.lastVolumeId) {
-        window.location.href = `/manga/${this.libraryId}/${this.mangaId}/volume/${this.lastVolumeId}?page=${this.lastPage}`;
-      } else {
-        const first = this.manga.volumes[0];
-        window.location.href = `/manga/${this.libraryId}/${this.mangaId}/volume/${first.id}`;
-      }
-    },
-
-    openVolume(volumeId) {
-      window.location.href = `/manga/${this.libraryId}/${this.mangaId}/volume/${volumeId}`;
-    },
-
-    async loadCollections() {
-      try {
-        const res = await fetch(apiUrl('/api/collections'));
-        const data = await res.json();
-        const editable = (data.collections || []).filter(c => c.can_edit);
-        const details = await Promise.all(
-          editable.map(c => fetch(apiUrl(`/api/collections/${c.id}`)).then(r => r.json()))
-        );
-        this.allCollections = editable.map((c, i) => ({
-          id:        c.id,
-          name:      c.name,
-          has_manga: (details[i].members || []).some(
-            m => m.library_id === this.libraryId && m.manga_id === this.mangaId
-          ),
-        }));
-      } catch (e) { this.allCollections = []; }
-    },
-
-    toggleCollectionDropdown() {
-      this.showCollectionDropdown = !this.showCollectionDropdown;
-      if (this.showCollectionDropdown) {
-        this.$nextTick(() => { if (this.$refs.collectionSearchRef) this.$refs.collectionSearchRef.focus(); });
-      }
-    },
-
-    closeCollectionDropdown() {
-      this.showCollectionDropdown = false;
-      this.collectionSearch = '';
-    },
-
-    async toggleCollectionMembership(c) {
-      const url  = c.has_manga ? `/api/collections/${c.id}/members/remove` : `/api/collections/${c.id}/members/add`;
-      const body = c.has_manga
-        ? { library_id: this.libraryId, manga_id: this.mangaId }
-        : { library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name };
-      await fetch(apiUrl(url), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      await this.loadCollections();
-    },
-
-    async createAndAddToCollection() {
-      const name = this.collectionSearch.trim();
-      if (!name) return;
-      const res  = await fetch(apiUrl('/api/collections'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
-      const data = await res.json();
-      if (data.ok) {
-        await fetch(apiUrl(`/api/collections/${data.id}/members/add`), {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ library_id: this.libraryId, manga_id: this.mangaId, manga_name: this.manga.name }),
-        });
-      }
-      this.collectionSearch = '';
-      await this.loadCollections();
-    },
-
-    onCollectionSearchEnter() {
-      if (this.collectionSearch.trim() && !this.exactCollectionMatch) {
-        this.createAndAddToCollection();
-      } else if (this.filteredCollections.length === 1) {
-        this.toggleCollectionMembership(this.filteredCollections[0]);
-      }
-    },
-
     goBack() {
-      window.location.href = '/';
+      window.location.href = '/collections';
     },
 
-    prefetchDims() {
-      // Cancel any in-flight dims prefetch for a different manga.
-      if (window.__dimsPrefetchController__) {
-        window.__dimsPrefetchController__.abort();
-      }
-      const controller = new AbortController();
-      window.__dimsPrefetchController__ = controller;
-      fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
-        signal:   controller.signal,
-        priority: 'low',
-      })
-        .then(r => r.json())
-        .catch(() => {});
+    openMember(m) {
+      window.location.href = `/manga/${m.library_id}/${m.manga_id}`;
     },
 
-    async loadAdminStatus() {
+    startEditName() {
+      this.nameInput = this.collection.name;
+      this.editingName = true;
+    },
+    cancelEditName() {
+      this.editingName = false;
+    },
+    async saveName() {
+      const name = this.nameInput.trim();
+      if (!name) return;
       try {
-        const res  = await fetch(apiUrl('/api/auth/me'));
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/rename`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        });
         const data = await res.json();
         if (data.ok) {
-          this.isAdmin = data.role === 'admin';
-          const p = data.permissions || {};
-          this.canEditTags        = this.isAdmin || p.tags        === true;
-          this.canEditGenres      = this.isAdmin || p.genres      === true;
-          this.canEditDescription = this.isAdmin || p.description === true;
+          this.collection.name = name;
+          this.editingName = false;
         }
       } catch (e) {
-        this.isAdmin            = false;
-        this.canEditTags        = false;
-        this.canEditGenres      = false;
-        this.canEditDescription = false;
+        console.error('Failed to rename collection:', e);
       }
     },
 
-    async loadReadingTime() {
+    async deleteCollection() {
+      if (!confirm('Delete this collection? This cannot be undone.')) return;
       try {
-        const name = this.manga?.name || '';
-        if (!name) return;
-        const res  = await fetch(apiUrl(`/api/reading/stats?manga_name=${encodeURIComponent(name)}`));
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}`), { method: 'DELETE' });
         const data = await res.json();
-        if (data.ok) this.readingTimeMinutes = data.total_minutes;
+        if (data.ok) window.location.href = '/collections';
       } catch (e) {
-        this.readingTimeMinutes = null;
+        console.error('Failed to delete collection:', e);
       }
-    },
-
-    formatLastUpdated(isoString) {
-      const d = new Date(isoString);
-      if (isNaN(d.getTime())) return '';
-      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
     },
 
     async loadAllTags() {
@@ -1587,7 +1435,7 @@ createApp({
     },
 
     startEditDesc() {
-      this.descInput = this.manga.description || '';
+      this.descInput = this.collection.description || '';
       this.editingDesc = true;
     },
 
@@ -1598,14 +1446,14 @@ createApp({
 
     async saveDesc() {
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/description`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/description`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ description: this.descInput }),
         });
         const data = await res.json();
         if (data.ok) {
-          this.manga.description = this.descInput;
+          this.collection.description = this.descInput;
           this.editingDesc = false;
         }
       } catch (e) {
@@ -1614,10 +1462,7 @@ createApp({
     },
 
     onGenreClick(genre) {
-      if (!this.genreDeleteMode) {
-        window.location.href = `/search?lib=${this.libraryId}&genre=${encodeURIComponent(genre)}`;
-        return;
-      }
+      if (!this.genreDeleteMode) return;
       if (this.selectedGenres.includes(genre)) {
         this.selectedGenres = this.selectedGenres.filter(g => g !== genre);
       } else {
@@ -1635,16 +1480,16 @@ createApp({
       const genre = this.genreInput.trim();
       if (!genre) return;
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/genres/add`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/genres/add`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ genre }),
         });
         const data = await res.json();
         if (data.ok) {
-          this.manga.genres = data.genres;
-          this.allGenres = data.all_genres;
+          this.collection.genres = data.genres;
           this.genreInput = '';
+          await this.loadAllGenres();
         }
       } catch (e) {
         console.error('Failed to add genre:', e);
@@ -1670,22 +1515,15 @@ createApp({
       this.selectedGenres = [];
     },
 
-    async confirmDeleteGenre(globally) {
+    async confirmDeleteGenre() {
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/genres/remove`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/genres/remove`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ genres: this.selectedGenres, global: globally }),
+          body: JSON.stringify({ genres: this.selectedGenres }),
         });
         const data = await res.json();
-        if (data.ok) {
-          if (globally) {
-            this.manga.genres = (this.manga.genres || []).filter(g => !this.selectedGenres.includes(g));
-          } else {
-            this.manga.genres = data.genres;
-          }
-          this.allGenres = data.all_genres;
-        }
+        if (data.ok) this.collection.genres = data.genres;
       } catch (e) {
         console.error('Failed to remove genres:', e);
       }
@@ -1695,10 +1533,7 @@ createApp({
     },
 
     onTagClick(tag) {
-      if (!this.deleteMode) {
-        window.location.href = `/search?lib=${this.libraryId}&tag=${encodeURIComponent(tag)}`;
-        return;
-      }
+      if (!this.deleteMode) return;
       if (this.selectedTags.includes(tag)) {
         this.selectedTags = this.selectedTags.filter(t => t !== tag);
       } else {
@@ -1716,16 +1551,16 @@ createApp({
       const tag = this.tagInput.trim();
       if (!tag) return;
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/tags/add`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/tags/add`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tag }),
         });
         const data = await res.json();
         if (data.ok) {
-          this.manga.tags = data.tags;
-          this.allTags = data.all_tags;
+          this.collection.tags = data.tags;
           this.tagInput = '';
+          await this.loadAllTags();
         }
       } catch (e) {
         console.error('Failed to add tag:', e);
@@ -1751,22 +1586,15 @@ createApp({
       this.selectedTags = [];
     },
 
-    async confirmDelete(globally) {
+    async confirmDelete() {
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/tags/remove`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/tags/remove`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tags: this.selectedTags, global: globally }),
+          body: JSON.stringify({ tags: this.selectedTags }),
         });
         const data = await res.json();
-        if (data.ok) {
-          if (globally) {
-            this.manga.tags = (this.manga.tags || []).filter(t => !this.selectedTags.includes(t));
-          } else {
-            this.manga.tags = data.tags;
-          }
-          this.allTags = data.all_tags;
-        }
+        if (data.ok) this.collection.tags = data.tags;
       } catch (e) {
         console.error('Failed to remove tags:', e);
       }
@@ -1779,9 +1607,10 @@ createApp({
       this.showCoverPicker = true;
       this.coverPickerLoading = true;
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/covers`));
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/cover-options`));
         const data = await res.json();
         this.availableCovers = data.covers || [];
+        this.coverHasOverride = !!data.has_override;
       } catch (e) {
         console.error('Failed to load covers:', e);
         this.availableCovers = [];
@@ -1792,32 +1621,157 @@ createApp({
 
     async selectCover(cover) {
       try {
-        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/cover`), {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/cover`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: cover.filename }),
+          body: JSON.stringify({
+            library_id: cover.library_id,
+            manga_id:   cover.manga_id,
+            manga_name: cover.manga_name,
+            filename:   cover.filename,
+          }),
         });
         const data = await res.json();
         if (data.ok) {
-          // Update the displayed cover immediately
-          this.manga.cover_url_large = cover.url_large;
-          this.manga.cover_url = cover.url_small;
-          // Update selected state in the picker
-          this.availableCovers.forEach(c => { c.is_selected = c.filename === cover.filename; });
+          this.collection.cover_url_large = cover.url_large;
+          this.collection.cover_url = cover.url_small;
+          this.availableCovers.forEach(c => {
+            c.is_selected = c.library_id === cover.library_id && c.manga_id === cover.manga_id && c.filename === cover.filename;
+          });
+          this.coverHasOverride = true;
           this.showCoverPicker = false;
         }
       } catch (e) {
         console.error('Failed to set cover:', e);
       }
     },
-  },
-}).directive('click-outside', {
-  mounted(el, binding) {
-    el._clickOutside = (e) => { if (!el.contains(e.target)) binding.value(e); };
-    document.addEventListener('click', el._clickOutside);
-  },
-  unmounted(el) {
-    document.removeEventListener('click', el._clickOutside);
+
+    async resetCoverToDefault() {
+      try {
+        await fetch(apiUrl(`/api/collections/${this.collectionId}/cover`), { method: 'DELETE' });
+        await this.loadCollection();
+        this.showCoverPicker = false;
+      } catch (e) {
+        console.error('Failed to reset cover:', e);
+      }
+    },
+
+    async loadLibraries() {
+      try {
+        const res = await fetch(apiUrl('/api/settings'));
+        const data = await res.json();
+        this.libraries = data.libraries || [];
+        if (this.libraries.length && this.addMemberLibraryId === null) {
+          this.addMemberLibraryId = this.libraries[0].id;
+        }
+      } catch (e) {
+        this.libraries = [];
+      }
+    },
+
+    openAddMemberPopup() {
+      this.showAddMemberPopup = true;
+      this.addMemberSearch = '';
+      this.addMemberResults = [];
+      if (this.addMemberLibraryId !== null) this.searchAddMember();
+    },
+
+    async searchAddMember() {
+      if (this.addMemberLibraryId === null) return;
+      this.addMemberLoading = true;
+      try {
+        const res = await fetch(apiUrl(`/api/mangas/${this.addMemberLibraryId}/search`));
+        const data = await res.json();
+        const q = this.addMemberSearch.trim().toLowerCase();
+        const existing = new Set((this.collection.members || []).map(m => `${m.library_id}:${m.manga_id}`));
+        this.addMemberResults = (data.mangas || [])
+          .filter(m => !q || m.name.toLowerCase().includes(q))
+          .filter(m => !existing.has(`${this.addMemberLibraryId}:${m.id}`))
+          .slice(0, 30);
+      } catch (e) {
+        this.addMemberResults = [];
+      } finally {
+        this.addMemberLoading = false;
+      }
+    },
+
+    async addMember(m) {
+      try {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/members/add`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ library_id: this.addMemberLibraryId, manga_id: m.id, manga_name: m.name }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          await this.loadCollection();
+          this.addMemberResults = this.addMemberResults.filter(r => r.id !== m.id);
+        }
+      } catch (e) {
+        console.error('Failed to add series to collection:', e);
+      }
+    },
+
+    async removeMember(m) {
+      try {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/members/remove`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ library_id: m.library_id, manga_id: m.manga_id }),
+        });
+        const data = await res.json();
+        if (data.ok) await this.loadCollection();
+      } catch (e) {
+        console.error('Failed to remove series from collection:', e);
+      }
+    },
+
+    onMemberDragStart(e, key) {
+      this._dragKey = key;
+      requestAnimationFrame(() => { e.target.classList.add('dragging-source'); });
+      e.dataTransfer.effectAllowed = 'move';
+    },
+
+    onMemberDragOver(e, key) {
+      if (key === this._dragKey) return;
+      document.querySelectorAll('.manga-thumb').forEach(el => el.classList.remove('drag-over'));
+      e.target.closest('.manga-thumb')?.classList.add('drag-over');
+    },
+
+    onMemberDragLeave(e) {
+      e.target.closest('.manga-thumb')?.classList.remove('drag-over');
+    },
+
+    async onMemberDrop(e, targetKey) {
+      if (targetKey === this._dragKey) return;
+      const members = this.collection.members;
+      const keyOf = m => `${m.library_id}:${m.manga_id}`;
+      const fromIdx = members.findIndex(m => keyOf(m) === this._dragKey);
+      const toIdx   = members.findIndex(m => keyOf(m) === targetKey);
+      if (fromIdx === -1 || toIdx === -1) return;
+      const reordered = [...members];
+      const [moved] = reordered.splice(fromIdx, 1);
+      reordered.splice(toIdx, 0, moved);
+      this.collection.members = reordered;
+      try {
+        await fetch(apiUrl(`/api/collections/${this.collectionId}/reorder`), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order: reordered.map(m => ({ library_id: m.library_id, manga_id: m.manga_id })) }),
+        });
+      } finally {
+        // description/tags/genres may derive from the new first member — refresh
+        await this.loadCollection();
+      }
+    },
+
+    onMemberDragEnd() {
+      this._dragKey = null;
+      document.querySelectorAll('.manga-thumb').forEach(el => {
+        el.classList.remove('dragging-source');
+        el.classList.remove('drag-over');
+      });
+    },
   },
 }).mount('#app');
 </script>

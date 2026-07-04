@@ -794,6 +794,26 @@
     </div>
   </div>
 
+  <!-- ── COLLECTIONS PREFERENCES ── -->
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Collections</div>
+    <div class="section-hint">Personalize how collections show up on the library page.</div>
+
+    <div class="card" style="display:flex; flex-direction:column; gap:14px;">
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Show Collections row on Library page</span>
+        <input type="checkbox" v-model="showCollectionsRow" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Hide the admin's shared collections</span>
+        <input type="checkbox" v-model="hideAdminCollections" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <div class="status-msg" :class="collectionsPrefsStatus.type" v-text="collectionsPrefsStatus.msg" style="min-height:0; margin:0;"></div>
+    </div>
+  </div>
+
   </template><!-- /Appearance -->
 
   <!-- ══════════════════════ GENERAL (continued): ANALYTICS ══════════════════════ -->
