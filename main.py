@@ -335,6 +335,29 @@ def comicinfo_items_for_manga(dims: dict) -> list:
                 items.append({"source_path": c["path"], "source_type": source_type})
     return items
 
+def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
+    """
+    A ComicInfo.xml sitting directly in the manga's own folder (next to the
+    cover, sibling to the chapter/volume subfolders) is treated as
+    authoritative for the whole series and takes priority — it's a
+    deliberate one-file-for-the-series choice, so there's no need to
+    intersect it against individual chapters. Falls back to aggregating one
+    from each chapter/volume when there's no manga-level file.
+
+    manga_path may be a single archive file rather than a folder (a whole
+    manga stored as one CBZ with chapter subdirectories inside it) — skip
+    the root-level check in that case, since there's no sibling folder to
+    look in; the per-chapter aggregation already reads that same archive.
+    """
+    if os.path.isdir(manga_path):
+        root_level = comicinfo.locate_and_read(manga_path, "loose", open_archive, read_archive_entry_bytes)
+        if root_level:
+            return root_level
+    ordered_items = comicinfo_items_for_manga(dims)
+    if not ordered_items:
+        return None
+    return comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes)
+
 # ── LRU PAGE CACHE ──
 # Keyed by (archive_path, entry_name) or (pdf_path, page_index)
 # Returns raw image bytes. Cache up to 64 pages in memory.
@@ -1929,24 +1952,22 @@ def scan_library(library: dict) -> tuple:
         # everything else (manual edit, a prior fetch, or a prior run of
         # this same pass) — never overwrites a value that's already set.
         if not dims.get("description") or not dims.get("genres") or not dims.get("tags"):
-            ordered_items = comicinfo_items_for_manga(dims)
-            if ordered_items:
-                found = comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes)
-                if found:
-                    dims_changed = False
-                    if not dims.get("description") and found["description"]:
-                        dims["description"] = found["description"]
-                        dims_changed = True
-                    if not dims.get("genres") and found["genres"]:
-                        dims["genres"] = found["genres"]
-                        dims_changed = True
-                        comicinfo_changed = True
-                    if not dims.get("tags") and found["tags"]:
-                        dims["tags"] = found["tags"]
-                        dims_changed = True
-                        comicinfo_changed = True
-                    if dims_changed:
-                        save_manga_dims(library_id, manga_name, dims)
+            found = find_comicinfo_for_manga(manga.get("path", ""), dims)
+            if found:
+                dims_changed = False
+                if not dims.get("description") and found["description"]:
+                    dims["description"] = found["description"]
+                    dims_changed = True
+                if not dims.get("genres") and found["genres"]:
+                    dims["genres"] = found["genres"]
+                    dims_changed = True
+                    comicinfo_changed = True
+                if not dims.get("tags") and found["tags"]:
+                    dims["tags"] = found["tags"]
+                    dims_changed = True
+                    comicinfo_changed = True
+                if dims_changed:
+                    save_manga_dims(library_id, manga_name, dims)
 
     result = list(mangas.values())
     result.sort(key=lambda m: natural_sort_key(m["name"]))
@@ -3269,8 +3290,7 @@ def get_local_metadata(request: Request, library_id: int, manga_id: str):
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
-    ordered_items = comicinfo_items_for_manga(dims)
-    found = comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes) if ordered_items else None
+    found = find_comicinfo_for_manga(manga.get("path", ""), dims)
     if not found:
         return JSONResponse({"candidate": None})
 

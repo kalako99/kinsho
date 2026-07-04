@@ -311,6 +311,12 @@ chapter/volume folder — and uses it to fill in a manga's `description`/
   leak into the series). `main.py`'s `comicinfo_items_for_manga()` builds the
   ordered chapter/volume list from `dims.json` (skips PDF/EPUB volumes —
   this is a CBZ/CBR + loose-folder convention only).
+  `find_comicinfo_for_manga()` is the actual entry point both call sites use:
+  a `ComicInfo.xml` sitting directly in the manga's own folder (next to the
+  cover, sibling to the chapter/volume subfolders — one file for the whole
+  series) takes priority over the per-chapter aggregation when present, since
+  it's a deliberate series-level choice rather than something to intersect
+  against individual chapters.
 - **Automatic, at scan/rescan time** — `scan_library`'s existing
   post-processing pass (the one that sets the COMPLETE flag) also runs this
   aggregation per manga and **only fills currently-empty**
