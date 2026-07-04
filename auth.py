@@ -11,6 +11,7 @@ import secrets
 import uuid
 import hashlib
 import hmac
+import base64
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -216,6 +217,33 @@ def _get_request_token(request: Request) -> Optional[str]:
 def get_current_user(request: Request) -> Optional[str]:
     token = _get_request_token(request)
     return _resolve_session(token) if token else None
+
+
+def get_user_from_basic_auth(request: Request) -> Optional[str]:
+    """
+    Verify HTTP Basic credentials against users.json — used only by the OPDS
+    routes, since practically every OPDS client (Chunky, Panels, KOReader,
+    Mihon's generic OPDS source) only knows how to authenticate that way, not
+    via the session cookie / X-Auth-Token the rest of the app uses.
+    """
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Basic "):
+        return None
+    try:
+        decoded = base64.b64decode(header[6:]).decode("utf-8")
+        username, password = decoded.split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    username = username.strip().lower()
+    user = _find_user(username)
+    if not user or not _verify_password(user["password_hash"], password):
+        return None
+    return username
+
+
+def get_opds_user(request: Request) -> Optional[str]:
+    """Session cookie/token first (previewing in a browser), Basic Auth fallback (every real OPDS client)."""
+    return get_current_user(request) or get_user_from_basic_auth(request)
 
 
 def require_user(request: Request) -> Optional[JSONResponse]:

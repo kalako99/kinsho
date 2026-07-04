@@ -23,6 +23,7 @@ from urllib.parse import quote, urlparse
 import auth
 import httpx
 import metadata_fetch
+import opds
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -110,7 +111,7 @@ async def require_auth_for_api(request: Request, call_next):
         path.startswith("/api/")
         and not path.startswith(PUBLIC_API_PREFIXES)
         and request.method != "OPTIONS"
-        and auth.get_current_user(request) is None
+        and auth.get_opds_user(request) is None
     ):
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
     return await call_next(request)
@@ -149,7 +150,7 @@ templates = Jinja2Templates(directory="templates")
 # the JSON endpoints, just as image bytes instead of text.
 @app.get("/covers/{library_id}/{manga_name}/{filename}")
 def get_cover_image(request: Request, library_id: int, manga_name: str, filename: str):
-    username = auth.get_current_user(request)
+    username = auth.get_opds_user(request)
     if username is None:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
     if not auth.can_access_library(username, library_id):
@@ -4037,7 +4038,7 @@ def get_volume_pages(request: Request, library_id: int, manga_id: str, volume_id
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{page_index:int}")
 def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, page_index: int, scale: float = 1.5):
-    username = auth.get_current_user(request)
+    username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
@@ -4193,7 +4194,7 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}")
 def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str):
     from fastapi.responses import FileResponse
-    username = auth.get_current_user(request)
+    username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
     data = load_app_data()
@@ -4235,6 +4236,25 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
             io.BytesIO(img_bytes), media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
+    elif filename_or_index.isdigit():
+        # Numeric index into the sorted file list — same convention as
+        # get_volume_page's loose branch. Real filenames always carry an
+        # image extension (see IMAGE_EXTENSIONS below), so a bare digit
+        # string can never collide with one; this only exists so callers
+        # that want a plain incrementing page number (OPDS-PSE) don't have
+        # to know the actual filenames on disk.
+        try:
+            files = sorted(
+                [f for f in os.listdir(chapter["path"])
+                 if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
+                key=natural_sort_key
+            )
+        except Exception:
+            return JSONResponse({"error": "Cannot list chapter folder"}, status_code=500)
+        page_index = int(filename_or_index)
+        if page_index >= len(files):
+            return JSONResponse({"error": "Page not found"}, status_code=404)
+        return FileResponse(os.path.join(chapter["path"], files[page_index]))
     else:
         file_path = os.path.join(chapter["path"], filename_or_index)
         if not os.path.exists(file_path):
@@ -4553,6 +4573,191 @@ def reading_stats_all_users(request: Request):
             "by_library":    by_library,
         })
     return JSONResponse({"ok": True, "users": result})
+
+# ── OPDS + OPDS-PSE CATALOG ──────────────────────────────────────────────────
+# A standard OPDS 1.2 catalog, with the Page Streaming Extension for comic
+# clients (Chunky, and Mihon's generic OPDS source) that can page through a
+# chapter/volume live instead of downloading a whole archive first. Not
+# behind the /api/* auth middleware (same reasoning as /covers) since every
+# real OPDS client only speaks HTTP Basic Auth, not the session cookie /
+# X-Auth-Token the rest of the app uses — auth.get_opds_user() accepts either.
+
+def _require_opds_user(request: Request):
+    """Returns (username, None) or (None, 401 response with a WWW-Authenticate
+    header so clients/browsers know to prompt for Basic Auth credentials)."""
+    username = auth.get_opds_user(request)
+    if username is None:
+        return None, Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="KINSHO"'})
+    return username, None
+
+def _opds_cover_url(library_id: int, manga: dict, user_covers: dict) -> Optional[str]:
+    cover = user_covers.get(manga["id"]) or manga.get("cover")
+    if not cover:
+        return None
+    return f"/covers/{library_id}/{quote(manga['name'])}/{os.path.basename(cover)}"
+
+def _opds_chapter_info(library_id: int, manga_id: str, chapter: dict) -> tuple:
+    """Return (page_count, first_page_url) for a case1/case3 chapter."""
+    base_url = f"/api/manga/{library_id}/{manga_id}/chapter/{chapter.get('id', '')}/page"
+    if chapter.get("source") == "archive":
+        all_images = _cached_archive_image_list(chapter["path"])
+        prefix = chapter.get("prefix", "")
+        images = [n for n in all_images if n.startswith(prefix)] if prefix else all_images
+        count = len(images)
+    else:
+        try:
+            count = len([f for f in os.listdir(chapter["path"]) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+        except Exception:
+            count = 0
+    return count, f"{base_url}/0"
+
+def _opds_volume_info(library_id: int, manga_id: str, volume_id: str, volume: dict) -> tuple:
+    """Return (page_count, first_page_url) for a case2/loose volume."""
+    base_url = f"/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page"
+    vol_type = volume.get("source", "archive")
+    if vol_type == "archive":
+        count = len(_cached_archive_image_list(volume["path"]))
+    elif vol_type == "pdf":
+        count = 0
+        if PDF_SUPPORT:
+            try:
+                doc = pymupdf.open(volume["path"])
+                count = len(doc)
+                doc.close()
+            except Exception:
+                count = 0
+    elif vol_type == "epub":
+        count = len(get_epub_image_list(volume["path"]))
+    elif vol_type == "loose":
+        try:
+            count = len([f for f in os.listdir(volume["path"]) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])
+        except Exception:
+            count = 0
+    else:
+        count = 0
+    return count, f"{base_url}/0"
+
+@app.get("/opds/")
+def opds_root(request: Request):
+    username, err = _require_opds_user(request)
+    if err:
+        return err
+    data = load_app_data()
+    libraries = data.get("libraries", [])
+    perms = auth.resolve_permissions(username)
+    if not perms.get("is_admin"):
+        lib_perms = perms.get("libraries", {})
+        libraries = [l for l in libraries if lib_perms.get(str(l["id"]), True) is not False]
+    return opds.build_root_feed(libraries)
+
+@app.get("/opds/search-description.xml")
+def opds_search_description(request: Request):
+    username, err = _require_opds_user(request)
+    if err:
+        return err
+    return opds.build_search_description()
+
+@app.get("/opds/library/{library_id}")
+def opds_library(request: Request, library_id: int, page: int = Query(default=1, ge=1)):
+    username, err = _require_opds_user(request)
+    if err:
+        return err
+    if not auth.can_access_library(username, library_id):
+        return Response(status_code=404)
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id), {})
+    perms = auth.resolve_permissions(username)
+    blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
+    user_data = auth.load_user_data(username)
+    user_covers = user_data.get("covers", {}).get(str(library_id), {})
+
+    visible = []
+    for m in manga_data.get("mangas", []):
+        dims = load_manga_dims(library_id, m["name"])
+        if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
+            continue
+        visible.append({"id": m["id"], "name": m["name"], "cover_url": _opds_cover_url(library_id, m, user_covers)})
+    visible.sort(key=lambda m: natural_sort_key(m["name"]))
+
+    per_page = 50
+    total_pages = max(1, (len(visible) + per_page - 1) // per_page)
+    page = min(page, total_pages)
+    page_items = visible[(page - 1) * per_page: page * per_page]
+    library_name = next((l["name"] for l in data.get("libraries", []) if l["id"] == library_id), str(library_id))
+    return opds.build_library_feed(library_id, library_name, page_items, page, total_pages)
+
+@app.get("/opds/search")
+def opds_search(request: Request, q: str = Query(default="")):
+    username, err = _require_opds_user(request)
+    if err:
+        return err
+    query = q.strip()
+    data = load_app_data()
+    perms = auth.resolve_permissions(username)
+    blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
+    results = []
+    for lib in data.get("libraries", []):
+        library_id = lib["id"]
+        if not auth.can_access_library(username, library_id):
+            continue
+        manga_data = data.get("manga_data", {}).get(str(library_id), {})
+        user_data = auth.load_user_data(username)
+        user_covers = user_data.get("covers", {}).get(str(library_id), {})
+        for m in manga_data.get("mangas", []):
+            if query and query.lower() not in m["name"].lower():
+                continue
+            dims = load_manga_dims(library_id, m["name"])
+            if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
+                continue
+            results.append({
+                "library_id": library_id, "id": m["id"], "name": m["name"],
+                "cover_url": _opds_cover_url(library_id, m, user_covers),
+            })
+    return opds.build_search_feed(query, results)
+
+@app.get("/opds/manga/{library_id}/{manga_id}")
+def opds_manga(request: Request, library_id: int, manga_id: str):
+    username, err = _require_opds_user(request)
+    if err:
+        return err
+    if not auth.can_access_library(username, library_id):
+        return Response(status_code=404)
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return Response(status_code=404)
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return Response(status_code=404)
+    dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return Response(status_code=404)
+
+    user_data = auth.load_user_data(username)
+    user_covers = user_data.get("covers", {}).get(str(library_id), {})
+    cover_url = _opds_cover_url(library_id, manga, user_covers)
+    item_history = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id, {}).get("chapters", {})
+
+    items = []
+    if dims.get("volumes"):
+        for vid, v in dims["volumes"].items():
+            count, first_url = _opds_volume_info(library_id, manga_id, vid, v)
+            items.append({
+                "id": vid, "name": v["name"], "cover_url": cover_url,
+                "page_count": count, "first_page_url": first_url,
+                "last_read_page": item_history.get(vid, {}).get("last_page", 0),
+            })
+    else:
+        for cid, c in dims.get("chapters", {}).items():
+            count, first_url = _opds_chapter_info(library_id, manga_id, {**c, "id": cid})
+            items.append({
+                "id": cid, "name": c["name"], "cover_url": cover_url,
+                "page_count": count, "first_page_url": first_url,
+                "last_read_page": item_history.get(cid, {}).get("last_page", 0),
+            })
+    items.sort(key=lambda i: natural_sort_key(i["name"]))
+
+    return opds.build_manga_feed(library_id, manga_id, manga["name"], dims.get("description", ""), items)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -235,6 +235,56 @@ description/tags/genres and member order.
   home page (`show_collections_row`), and hide the admin's shared collections
   entirely (`hide_admin_collections`) — both per-user.
 
+### 7. OPDS + OPDS-PSE catalog — done
+
+A standard OPDS 1.2 catalog under `/opds/*`, with the Page Streaming
+Extension so comic-focused OPDS clients (Chunky, Mihon's generic OPDS
+source) can page through a chapter/volume live instead of downloading a
+whole archive first. Not compatible with Komga-specific clients (Komelia,
+Tachiyomi/Mihon's dedicated Komga extension) — those speak Komga's own
+proprietary API, not OPDS.
+
+- **`opds.py`** — pure feed-building module (`xml.etree.ElementTree`, not
+  hand-written string templates, so titles/tags containing `&`/`<` escape
+  correctly). Takes only plain already-resolved data from `main.py`; does no
+  auth, no data access, no permission filtering itself.
+- **Auth**: every real OPDS client (Chunky, Panels, KOReader, Mihon) only
+  speaks HTTP Basic Auth, not the session cookie / `X-Auth-Token` the rest of
+  the app uses. `auth.get_user_from_basic_auth()` verifies Basic credentials
+  against the existing `users.json` hashes; `auth.get_opds_user()` tries the
+  normal session first (so previewing a feed in a logged-in browser tab still
+  works) and falls back to Basic Auth. The blanket `/api/*` auth middleware
+  and the cover-image/page-streaming routes all use `get_opds_user()` now
+  instead of `get_current_user()` — a strict superset, so this changes
+  nothing for the web/native app (which never sends a Basic Auth header) and
+  only adds access for OPDS requests. 401s from the `/opds/*` routes
+  specifically include a `WWW-Authenticate: Basic` header so clients know to
+  prompt for credentials.
+- **Routes**: `/opds/` (nav feed, one entry per accessible library),
+  `/opds/library/{id}` (nav feed of manga, paginated 50/page),
+  `/opds/manga/{lib}/{id}` (acquisition feed — one entry per chapter/volume,
+  each carrying the PSE stream link + `pse:count` + `pse:lastRead` pulled
+  from the user's existing reading history), `/opds/search-description.xml` +
+  `/opds/search?q=...` (OpenSearch). All filtering reuses
+  `can_access_library`/`is_manga_blocked` exactly like every other route —
+  same total-lockout behavior (404, not a visibly-empty entry) for denied
+  libraries/blocked-tag manga.
+- **Loose-chapter numeric page index**: `get_chapter_page` previously only
+  addressed loose (non-archive) chapter pages by literal filename
+  (`/page/0007.jpg`), which doesn't fit OPDS-PSE's "client increments the
+  trailing number in the URL" convention unless filenames happen to be
+  clean sequential numbers. Added a numeric-index branch (`/page/{n}`,
+  resolved against the sorted file list) mirroring what `get_volume_page`'s
+  loose branch already did — backward compatible, the old filename-based
+  URLs the web reader already uses still work unchanged.
+- **No bulk CBZ-on-demand yet** — entries only carry the PSE stream link,
+  not a plain `rel="acquisition"` download link. Fine for PSE-aware clients
+  (Chunky); a client that only understands plain OPDS acquisition (no PSE)
+  will see the entry but have nothing to open. Add this — zip a
+  chapter/volume's pages into a CBZ on request, from whatever the source
+  actually is (archive/loose/PDF pages/EPUB pages) — only if a client that
+  needs it comes up in practice.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
