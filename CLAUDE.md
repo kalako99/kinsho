@@ -284,6 +284,58 @@ proprietary API, not OPDS.
   chapter/volume's pages into a CBZ on request, from whatever the source
   actually is (archive/loose/PDF pages/EPUB pages) — only if a client that
   needs it comes up in practice.
+- **Not usable from Tachiyomi/Mihon** — that app has no generic "any OPDS
+  server" source; each self-hosted server (Komga, Kavita, Suwayomi) ships its
+  own bespoke extension talking to that server's own API, and Kinsho doesn't
+  have one. Would require a separate Kotlin/Gradle/Android Studio project,
+  not something planned for now — the native app + OPDS (Chunky/KOReader)
+  cover external access instead.
+
+### 8. ComicInfo.xml reading — done
+
+Reads the Komga/Kavita/ComicRack-standard `ComicInfo.xml` sidecar — embedded
+at a CBZ/CBR's root, or sitting next to the images in a loose (unarchived)
+chapter/volume folder — and uses it to fill in a manga's `description`/
+`genres`/`tags`.
+
+- **`comicinfo.py`** — pure parsing module (`xml.etree.ElementTree`, same
+  reasoning as `opds.py`): `parse_comicinfo_xml()` reads `<Summary>`/`<Genre>`/
+  `<Tags>` from raw bytes; `locate_and_read()` finds `ComicInfo.xml`
+  case-insensitively inside an open archive or a loose folder;
+  `aggregate_for_manga()` combines it across a whole manga's chapters/volumes
+  — **first chapter's `<Summary>` wins** for description (a chapter-level
+  field being used as a series-level one), **intersection** of
+  `<Genre>`/`<Tags>` across every chapter that has them wins for genres/tags
+  (a value repeated on every chapter is treated as a real series-level
+  attribute, not a per-chapter one — a lone chapter's one-off tag doesn't
+  leak into the series). `main.py`'s `comicinfo_items_for_manga()` builds the
+  ordered chapter/volume list from `dims.json` (skips PDF/EPUB volumes —
+  this is a CBZ/CBR + loose-folder convention only).
+- **Automatic, at scan/rescan time** — `scan_library`'s existing
+  post-processing pass (the one that sets the COMPLETE flag) also runs this
+  aggregation per manga and **only fills currently-empty**
+  `description`/`genres`/`tags` fields — it never overwrites a value that's
+  already there, whether from a manual edit, a prior AniList/MangaDex fetch,
+  or a prior run of this same pass. When it does introduce new tags/genres,
+  `scan_library` returns a `comicinfo_changed` flag alongside the manga list
+  so `run_scan` can rebuild `all_tags`/`all_genres` once the new `manga_data`
+  is actually saved (rebuilding earlier reads stale on-disk data — this bit
+  the first pass at the feature and had to be fixed).
+- **Manual, via the existing Fetch Metadata popup** — `GET
+  /api/manga/{lib}/{id}/local-metadata` returns the same aggregation shaped
+  as a selectable candidate (`{description, genres, tags}`, matching what
+  `metadata_fetch.resolve_field_value()` already knows how to read — plain
+  string tags/genres, same as a MangaDex candidate), fetched once when the
+  popup opens and shown as one more card ("Local file", badged distinctly
+  from the AniList match-score badges) alongside the AniList search results
+  in `manga_detail.html`. Picking it and choosing fields to import goes
+  through the exact same `/apply-metadata` endpoint as any other candidate —
+  no backend changes needed there. This is how "should the XML or the web
+  win" gets decided: by which candidate card the user clicks, not a separate
+  prompt. (`volume_detail.html` never had the Fetch Metadata popup at all —
+  a pre-existing gap, not touched here — but the automatic scan-time fill
+  still applies to volume-type manga regardless, since that logic doesn't
+  depend on the popup.)
 
 ---
 

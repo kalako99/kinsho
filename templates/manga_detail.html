@@ -1352,10 +1352,10 @@
           {{ metaSearching ? 'Searching…' : 'Search' }}
         </button>
       </div>
-      <div class="meta-candidates" v-if="metaCandidates.length > 0">
+      <div class="meta-candidates" v-if="displayMetaCandidates.length > 0">
         <div
-          v-for="(c, i) in metaCandidates"
-          :key="c.anilist_id"
+          v-for="(c, i) in displayMetaCandidates"
+          :key="c.anilist_id || 'local'"
           class="meta-candidate"
           :class="{ selected: i === metaSelectedIdx }"
           @click="metaSelectedIdx = i"
@@ -1366,11 +1366,16 @@
             <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
             <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
             <div class="meta-badges">
-              <span class="meta-badge-sm" v-if="c.format">{{ c.format }}</span>
-              <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
-              <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
-                {{ Math.round(c.match_score * 100) }}% match
-              </span>
+              <template v-if="c.source === 'local'">
+                <span class="meta-badge-sm">LOCAL FILE</span>
+              </template>
+              <template v-else>
+                <span class="meta-badge-sm" v-if="c.format">{{ c.format }}</span>
+                <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
+                <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
+                  {{ Math.round(c.match_score * 100) }}% match
+                </span>
+              </template>
             </div>
             <div class="meta-genres-preview" v-if="(c.genres || []).length">
               {{ (c.genres || []).slice(0, 5).join(' · ') }}
@@ -1379,7 +1384,7 @@
         </div>
       </div>
       <div class="meta-empty" v-else>{{ metaStatus.msg || 'Search for a title above.' }}</div>
-      <div class="meta-fields-row" v-if="metaCandidates.length > 0">
+      <div class="meta-fields-row" v-if="displayMetaCandidates.length > 0">
         <span style="font-size:0.72rem;color:#777;">Import:</span>
         <label><input type="checkbox" v-model="metaFields.description"> Description</label>
         <label><input type="checkbox" v-model="metaFields.genres"> Genres</label>
@@ -1394,7 +1399,7 @@
           @click="applyMetadata"
         >{{ metaApplying ? 'Applying…' : 'Apply' }}</button>
       </div>
-      <div v-if="metaStatus.msg && metaCandidates.length > 0" class="meta-status" :class="metaStatus.type">
+      <div v-if="metaStatus.msg && displayMetaCandidates.length > 0" class="meta-status" :class="metaStatus.type">
         {{ metaStatus.msg }}
       </div>
     </div>
@@ -1477,6 +1482,7 @@ createApp({
       metaSearch:           '',
       metaSearching:        false,
       metaCandidates:       [],
+      localMetaCandidate:   null,
       metaSelectedIdx:      null,
       metaFields:           { description: true, genres: true, tags: true, cover: true },
       metaApplying:         false,
@@ -1511,6 +1517,10 @@ createApp({
 
     inAnyCollection() {
       return this.allCollections.some(c => c.has_manga);
+    },
+
+    displayMetaCandidates() {
+      return this.localMetaCandidate ? [this.localMetaCandidate, ...this.metaCandidates] : this.metaCandidates;
     },
 
     sortedChapters() {
@@ -1986,12 +1996,21 @@ createApp({
       }
     },
 
-    openMetadataSearch() {
+    async openMetadataSearch() {
       this.metaSearch     = this.manga ? this.manga.name : '';
       this.metaCandidates = [];
+      this.localMetaCandidate = null;
       this.metaSelectedIdx = null;
       this.metaStatus     = { msg: '', type: '' };
       this.showMetadataPopup = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/local-metadata`));
+        const data = await res.json();
+        this.localMetaCandidate = data.candidate || null;
+        if (this.localMetaCandidate) this.metaSelectedIdx = 0;
+      } catch (e) {
+        this.localMetaCandidate = null;
+      }
     },
 
     async searchMetadata() {
@@ -2004,7 +2023,7 @@ createApp({
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}`));
         const data = await res.json();
         this.metaCandidates = data.candidates || [];
-        if (this.metaCandidates.length > 0) this.metaSelectedIdx = 0;
+        if (this.metaCandidates.length > 0) this.metaSelectedIdx = this.localMetaCandidate ? 1 : 0;
         else this.metaStatus = { msg: 'No results found.', type: '' };
       } catch (e) {
         this.metaStatus = { msg: 'Search failed.', type: 'err' };
@@ -2022,7 +2041,7 @@ createApp({
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/apply-metadata`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ candidate: this.metaCandidates[this.metaSelectedIdx], fields }),
+          body: JSON.stringify({ candidate: this.displayMetaCandidates[this.metaSelectedIdx], fields }),
         });
         const data = await res.json();
         if (data.ok) {

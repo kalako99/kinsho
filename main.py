@@ -24,6 +24,7 @@ import auth
 import httpx
 import metadata_fetch
 import opds
+import comicinfo
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -310,6 +311,29 @@ def read_archive_entry_bytes(arc, entry_name: str) -> bytes | None:
     except Exception as e:
         print(f"[Archive] Failed to read entry {entry_name}: {e}")
         return None
+
+def comicinfo_items_for_manga(dims: dict) -> list:
+    """
+    Build the ordered {"source_path", "source_type"} list comicinfo.aggregate_for_manga
+    expects, from a manga's dims.json — volumes take priority over chapters
+    (a manga has one or the other, never both), sorted the same way the rest
+    of the app orders them. Skips pdf/epub volumes (ComicInfo.xml is a
+    CBZ/CBR + loose-folder convention only).
+    """
+    volumes = dims.get("volumes", {})
+    chapters = dims.get("chapters", {})
+    items = []
+    if volumes:
+        for v in sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", ""))):
+            vol_type = v.get("source", "archive")
+            if vol_type in ("archive", "loose") and v.get("path"):
+                items.append({"source_path": v["path"], "source_type": vol_type})
+    elif chapters:
+        for c in sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", ""))):
+            if c.get("path"):
+                source_type = "archive" if c.get("source") == "archive" else "loose"
+                items.append({"source_path": c["path"], "source_type": source_type})
+    return items
 
 # ── LRU PAGE CACHE ──
 # Keyed by (archive_path, entry_name) or (pdf_path, page_index)
@@ -1285,7 +1309,10 @@ def relocate_dims_paths(library_id: int, manga_name: str, old_manga_path: str, n
 
         save_manga_dims(library_id, manga_name, dims)
 
-def scan_library(library: dict) -> list:
+def scan_library(library: dict) -> tuple:
+    """Returns (mangas, comicinfo_changed) — comicinfo_changed is True if any
+    manga's genres/tags were filled in from ComicInfo.xml during this scan,
+    telling the caller to rebuild all_tags/all_genres once manga_data is saved."""
     raw_paths = library.get("paths") or ([library["path"]] if library.get("path") else [])
     lib_paths = [p for p in raw_paths if p and os.path.exists(p)]
     library_id = library["id"]
@@ -1880,6 +1907,7 @@ def scan_library(library: dict) -> list:
                         print(f"[ScanLib] Failed to delete covers folder: {e}")
 
     # ── COMPLETE flag: check if last chapter/volume name ends with word "END" ──
+    comicinfo_changed = False
     for manga in mangas.values():
         manga_name = manga.get("name", "")
         dims = load_manga_dims(library_id, manga_name)
@@ -1897,10 +1925,33 @@ def scan_library(library: dict) -> list:
         else:
             manga["is_complete"] = False
 
+        # ── ComicInfo.xml: fill in description/genres/tags left empty by
+        # everything else (manual edit, a prior fetch, or a prior run of
+        # this same pass) — never overwrites a value that's already set.
+        if not dims.get("description") or not dims.get("genres") or not dims.get("tags"):
+            ordered_items = comicinfo_items_for_manga(dims)
+            if ordered_items:
+                found = comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes)
+                if found:
+                    dims_changed = False
+                    if not dims.get("description") and found["description"]:
+                        dims["description"] = found["description"]
+                        dims_changed = True
+                    if not dims.get("genres") and found["genres"]:
+                        dims["genres"] = found["genres"]
+                        dims_changed = True
+                        comicinfo_changed = True
+                    if not dims.get("tags") and found["tags"]:
+                        dims["tags"] = found["tags"]
+                        dims_changed = True
+                        comicinfo_changed = True
+                    if dims_changed:
+                        save_manga_dims(library_id, manga_name, dims)
+
     result = list(mangas.values())
     result.sort(key=lambda m: natural_sort_key(m["name"]))
     print(f"[ScanLib] Total mangas found: {len(result)}")
-    return result
+    return result, comicinfo_changed
 
 async def periodic_library_rescan():
     INTERVAL_SECONDS = 12 * 60 * 60
@@ -1938,7 +1989,7 @@ def run_scan(library_id: int):
     print(f"[Scan] covers_dir: {get_covers_dir()}")
 
     auto_organize_library_root(lib)
-    mangas = scan_library(lib)
+    mangas, comicinfo_changed = scan_library(lib)
     print(f"[Scan] Found {len(mangas)} mangas.")
 
     data = load_app_data()
@@ -1948,6 +1999,9 @@ def run_scan(library_id: int):
         "mangas": mangas,
         "last_scanned": datetime.now().isoformat(),
     }
+    if comicinfo_changed:
+        data["all_tags"] = rebuild_all_tags(data)
+        data["all_genres"] = rebuild_all_genres(data)
     save_app_data(data)
     _scan_running.discard(library_id)
     print(f"[Scan] Done. Saved to data.json.")
@@ -3192,6 +3246,42 @@ def _metadata_field_done(dims: dict, field: str) -> bool:
         return True
     return False
 
+
+@app.get("/api/manga/{library_id}/{manga_id}/local-metadata")
+def get_local_metadata(request: Request, library_id: int, manga_id: str):
+    """
+    Aggregated ComicInfo.xml data for this manga, shaped as a selectable
+    candidate for the Fetch Metadata popup — same candidate shape
+    resolve_field_value() already knows how to read (plain-string genres/tags),
+    so it plugs into the existing apply-metadata endpoint with no changes there.
+    """
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+
+    ordered_items = comicinfo_items_for_manga(dims)
+    found = comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes) if ordered_items else None
+    if not found:
+        return JSONResponse({"candidate": None})
+
+    return JSONResponse({"candidate": {
+        "source": "local",
+        "title_romaji": "Local file (ComicInfo.xml)",
+        "description": found["description"],
+        "genres": found["genres"],
+        "tags": found["tags"],
+        "cover_url_medium": None,
+    }})
 
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
 async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
