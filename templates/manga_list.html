@@ -526,11 +526,11 @@
   <div class="section" v-if="showCollectionsRow && collectionsRow.length > 0">
     <div class="section-header">
       <span class="section-title">Collections</span>
-      <div class="row-more-btn visible">
+      <div class="row-more-btn" :class="{ visible: atEnd.collections }">
         <a href="#" @click.prevent="goToCollections">View more →</a>
       </div>
     </div>
-    <div class="manga-row" v-drag-scroll>
+    <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'collections')">
         <manga-thumb
           v-for="c in collectionsRow"
           :key="c.id"

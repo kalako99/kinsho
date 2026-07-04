@@ -77,7 +77,7 @@ const app = createApp({
       })(),
 
       // ── TRACKS WHETHER EACH ROW IS SCROLLED TO THE END ──
-      atEnd: { lastRead: false, random: false, favourites: false },
+      atEnd: { lastRead: false, random: false, favourites: false, collections: false },
 
       // ── ROW DATA ──
       lastRead:    [],
