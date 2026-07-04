@@ -714,6 +714,16 @@
       transition: border-color 0.2s;
     }
     .desc-textarea:focus { border-color: var(--color-primary, #e94560); }
+    .library-select {
+      appearance: none;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      padding: 8px 34px 8px 10px;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23f0f0f0' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      background-size: 12px;
+    }
     .desc-edit-actions {
       display: flex;
       gap: 8px;
@@ -1222,7 +1232,7 @@
   <div class="popup-overlay" v-if="showAddMemberPopup" @click.self="showAddMemberPopup = false">
     <div class="popup add-member-popup">
       <div class="popup-title">Add Series</div>
-      <select v-model="addMemberLibraryId" class="desc-textarea" style="min-height:auto; padding:8px 10px; margin-bottom:10px; cursor:pointer;" @change="searchAddMember">
+      <select v-model="addMemberLibraryId" class="desc-textarea library-select" style="min-height:auto; margin-bottom:10px; cursor:pointer;" @change="searchAddMember">
         <option v-for="lib in libraries" :key="lib.id" :value="lib.id">{{ lib.name }}</option>
       </select>
       <input type="text" v-model="addMemberSearch" placeholder="Search this library…" @input="searchAddMember"/>
