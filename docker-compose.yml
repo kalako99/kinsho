@@ -9,3 +9,4 @@ services:
     volumes:
       - ${KINSHO_DATA_PATH}:/data
       - ${KINSHO_MANGA_PATH}:/manga
+      - ${KINSHO_DATA_PATH}/bootstrap.json:/app/bootstrap.json
