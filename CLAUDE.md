@@ -512,24 +512,201 @@ reasoning still explains why the current code is shaped the way it is.
 - If the native app ever changes its WebView scheme/config, `NATIVE_APP_ORIGINS` in
   `main.py` is the one place to update.
 
-## Deployment goal
+## Deployment — done (2026-07-05)
 
-The final target is to run Kinsho as a Docker container on an Ubuntu server and serve a personal manga/book library from it.
+Running in Docker on a home Ubuntu server (a NAS also running Jellyfin/Sonarr/
+Radarr/etc. via Portainer), two independent instances sharing one manga
+library. The `Dockerfile` builds the app image; `docker-compose.yml` +
+`.env` drive the actual deployment. This section is the real, tested
+procedure — not just the goal — including the two gotchas that only show
+up once you actually run it as a non-root user on a real server.
 
-The `Dockerfile` already exists. Steps to reach this:
+### Why `docker-compose.yml` looks the way it does
+
+It's fully generic — `container_name`, `ports`, `volumes`, and `user` are all
+`${VAR}` placeholders, not real values — because it's committed to the repo,
+and the repo may go public later. Real values live in a local `.env` file
+(gitignored, see `.env.example` for the template), so:
+- editing your own paths/ports never conflicts with `git pull`, and never
+  needs a commit,
+- the shared file has zero personal info in it, safe for anyone to clone,
+- a stranger cloning the repo gets a working single-instance example without
+  needing to untangle someone else's two-instance setup.
+
+Only one service is defined on purpose — a second instance is deliberately
+*not* a second service in this shared file (see "Second instance" below),
+to keep the public-facing default simple for someone who just wants one.
+
+### One-time server setup
 
 ```bash
-# On the Ubuntu server
-docker pull <image>          # or build from source
-docker run -d \
-  --name kinsho \
-  -p 8000:8000 \
-  -v /path/to/manga:/manga \
-  -v /path/to/kinsho-data:/data \
-  kinsho
+sudo apt update && sudo apt install -y docker.io git
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER   # log out/in after this
 ```
 
-Key considerations:
-- `unrar-free` is already installed in the Dockerfile for CBR support.
-- The library path (`/manga`) and data path (`/data`) should be separate bind mounts so data survives container recreation.
-- After first run, set the data path to `/data` and the library path(s) to wherever manga volumes are mounted, via the Settings page.
+**Private repo access** — the server needs its own SSH key added to GitHub
+as a read-only deploy key (Settings → Deploy keys on the repo), since it's
+a private repo:
+```bash
+ssh-keygen -t ed25519 -C "kinsho-server" -f ~/.ssh/kinsho_deploy -N ""
+cat ~/.ssh/kinsho_deploy.pub   # paste this into GitHub's deploy key field
+chmod 600 ~/.ssh/kinsho_deploy
+cat >> ~/.ssh/config <<'EOF'
+Host github.com
+  IdentityFile ~/.ssh/kinsho_deploy
+EOF
+ssh -T git@github.com   # confirms auth works before cloning
+```
+
+### Instance 1
+
+```bash
+git clone git@github.com:kalako99/kinsho.git ~/kinsho
+cd ~/kinsho
+cp .env.example .env
+nano .env   # KINSHO_UID/GID, KINSHO_PORT, KINSHO_DATA_PATH, KINSHO_MANGA_PATH
+
+mkdir -p /srv/appdata/kinsho
+cat > /srv/appdata/kinsho/bootstrap.json <<'EOF'
+{"data_path": "/data"}
+EOF
+sudo chown -R 1000:1000 /srv/appdata/kinsho
+
+docker compose up -d --build
+```
+
+Then open `http://<server-ip>:<port>` → log in `admin`/`admin` (forced
+password change immediately) → Settings → set data path to `/data` and add
+`/manga` as a library path (container-side paths, matching the right side of
+the volume mounts — not the real host paths).
+
+**Two gotchas hit during the real install, both permission-related, both
+worth understanding rather than just copy-pasting past:**
+
+1. **`user: "${KINSHO_UID}:${KINSHO_GID}"` in the compose file** makes the
+   container run as a normal user instead of root, so files it creates on
+   the NAS aren't root-owned (which would otherwise require `sudo` for every
+   later file operation outside Docker). But that means the *host* folder
+   also has to already be owned by that same UID/GID — `mkdir` as root (or
+   via `sudo`) leaves it root-owned, and the container then can't write to
+   it at all. Symptom: `PermissionError: [Errno 13] Permission denied` in
+   `docker logs`. Fix is the `chown -R` above — do it *before* first start.
+
+2. **`bootstrap.json` needs to exist before the container's first boot, and
+   in a very specific place.** `auth._get_data_path()` looks for it via a
+   bare relative path (`"bootstrap.json"`, not an absolute one), which
+   resolves against the process's working directory — `/app` inside the
+   container. On a truly fresh install nothing has ever pointed `data_path`
+   anywhere yet, so `auth._save_users()` falls back to writing `users.json`
+   as a relative path too — into `/app`, which is baked into the image
+   (root-owned, and *not* a volume — anything written there vanishes on the
+   next rebuild). Result: same permission error as above, PLUS, even if it
+   were writable, silently losing every account on the next update. Fix:
+   pre-create `bootstrap.json` on the host pointing at `/data` (the volume
+   that *does* persist), and bind-mount that one file directly to
+   `/app/bootstrap.json` — already wired into `docker-compose.yml`'s
+   volumes list, just needs the host file to exist first.
+
+### Second instance
+
+Deliberately *not* a second service in the shared `docker-compose.yml` (see
+above) — set up as a plain second container reusing the image Compose
+already built, so there's no separate build step:
+
+```bash
+mkdir -p /srv/appdata/kinsho2
+cat > /srv/appdata/kinsho2/bootstrap.json <<'EOF'
+{"data_path": "/data"}
+EOF
+sudo chown -R 1000:1000 /srv/appdata/kinsho2
+
+docker run -d \
+  --name kinsho2 \
+  --restart unless-stopped \
+  --user 1000:1000 \
+  -p 8099:8000 \
+  -v /srv/appdata/kinsho2:/data \
+  -v /mnt/wdred/Media/KINSHO:/manga \
+  -v /srv/appdata/kinsho2/bootstrap.json:/app/bootstrap.json \
+  kinsho-kinsho
+```
+
+(`kinsho-kinsho` is Compose's auto-generated image tag —
+`<project-folder-name>-<service-name>`.) Same two gotchas apply here too,
+same fixes.
+
+Since this one isn't Compose-managed, updating it later means recreating
+it manually (`docker stop kinsho2 && docker rm kinsho2`, then the `docker
+run` above again against the freshly rebuilt image) rather than a single
+`docker compose up -d --build` — a deliberate tradeoff for keeping the
+public repo's compose file simple. Portainer (already used for the other
+containers on this server) can manage instance 1 as a Git-backed stack for
+one-click/auto updates; doing the same for instance 2 was deferred until
+after the repo goes public, since the setup would need to change at that
+point anyway (Portainer needs its own separate Git credential, entered
+directly in its UI, independent of the SSH deploy key above).
+
+### Updating either instance later
+
+```bash
+cd ~/kinsho
+git pull origin main
+docker build -t kinsho-kinsho .   # rebuild the shared image once
+docker compose up -d              # recreates instance 1 from the fresh image
+docker stop kinsho2 && docker rm kinsho2
+docker run -d --name kinsho2 --restart unless-stopped --user 1000:1000 \
+  -p 8099:8000 -v /srv/appdata/kinsho2:/data -v /mnt/wdred/Media/KINSHO:/manga \
+  -v /srv/appdata/kinsho2/bootstrap.json:/app/bootstrap.json kinsho-kinsho
+```
+The port/paths never affect whether an update lands — rebuilding the image
+is what pulls in new code; recreating each container is what makes a
+*running* one actually use that new image. Nothing under `/data` or
+`/manga` is ever touched by any of this, since both live outside the image
+entirely.
+
+## Next steps — BLE hardware scroller for the Android app's chapter reader
+
+Goal: physical scroll input (a small BLE peripheral) for high-definition
+scrolling inside `templates/chapter_reader.html` on the Android app
+specifically — turning a page/chapter's continuous image strip with a
+dedicated dial or slider instead of a touchscreen swipe.
+
+- **`arduino/`** at the repo root holds the hardware sketches for this —
+  gitignored (see `.gitignore`), since it's hardware-in-progress, not app
+  source, and not part of what ships. Each device is its own sketch folder
+  (Arduino IDE requires the folder name to match the `.ino` filename).
+- **Existing device (done, lives outside this repo at `C:\pyhtml\scrollerm2.ino`,
+  not copied in)**: a rotary encoder version, "Scroller-M2." XIAO nRF52840 +
+  AS5600 magnetic rotary encoder over I2C (SDA=D4/P0.04, SCL=D5/P0.05),
+  one button on D2/P0.28 (quick press = reverse direction, hold 1s = toggle
+  a "NO_CURSOR_MODE" that nudges the OS cursor off-screen after each
+  scroll burst, triple-press = clear BLE bonds and re-enter pairing mode).
+  Built with Adafruit's `bluefruit.h` library, presenting as a standard BLE
+  HID mouse — the OS itself translates its reports into scroll-wheel
+  events, no custom pairing protocol. Implements continuous acceleration
+  (scroll multiplier ramps smoothly with angular velocity, no discrete
+  speed steps) and the HID "Resolution Multiplier" feature for sub-notch
+  scroll precision, which Windows honors well.
+- **New device (in progress)**: same board, a **linear potentiometer**
+  instead of the rotary encoder — a slider rather than a dial. First step
+  (done): `arduino/scroller_potentiometer_test/` just reads the raw ADC
+  value and computed voltage as the slider moves, to find the actual
+  usable range before writing any scrolling logic (cheap potentiometers
+  often don't hit clean 0V/3.3V at their physical end stops). Wiring:
+  potentiometer VCC → XIAO `3V3` (not 5V — keeps the wiper voltage inside
+  the nRF52840 ADC's safe input range), GND → XIAO `GND`, SIG → XIAO `A0`
+  (`D0`). Not yet built: the actual slider-position-to-scroll-amount logic
+  and BLE HID reporting, mirroring `scrollerm2.ino`'s structure once the
+  voltage range is known.
+- **Open question, not yet answered**: whether "HD scrolling on Android"
+  needs any Android/Capacitor-side work at all beyond pairing the device
+  as a normal Bluetooth mouse. The existing device's HID Resolution
+  Multiplier feature (its actual "high definition" mechanism) is
+  well-supported on Windows but Android's Bluetooth HID host stack may not
+  honor it the same way — if so, smooth sub-notch scrolling might only
+  work correctly when paired with a PC, not the Android app, and reading
+  the device's BLE reports directly (bypassing the OS mouse abstraction
+  entirely, from within the Capacitor/native layer) could be needed
+  instead. Not investigated yet — figure this out once a working
+  potentiometer device exists to test against.

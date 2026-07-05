@@ -6,3 +6,6 @@ venv/
 # App data (user-specific, not part of source)
 bootstrap.json
 kinsho-data/
+
+# BLE scroller hardware sketches (hardware-in-progress, not app source)
+arduino/
