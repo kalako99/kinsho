@@ -552,10 +552,12 @@ async def route_change_password(request: Request):
     user["must_change_password"] = False
     _save_users(data)
 
-    # A password change is usually a reaction to a suspected leak — a stolen
-    # session/token shouldn't survive it. Keep only the session making this
-    # request alive so the user isn't logged out of their own change.
-    _delete_sessions_for_user(username, except_token=_get_request_token(request))
+    # A password change is usually a reaction to a suspected leak — no
+    # session/token should survive it, including the one making this
+    # request. The frontend redirects to /login right after, forcing a
+    # real re-authentication with the new password rather than silently
+    # continuing on a pre-change session.
+    _delete_sessions_for_user(username)
 
     return JSONResponse({"ok": True})
 

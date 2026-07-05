@@ -261,10 +261,12 @@ createApp({
         });
         const data = await res.json();
         if (data.ok) {
-          this.passwordStatus     = { msg: '✓ Password changed.', type: 'ok' };
-          this.currentPassword    = '';
-          this.newPassword        = '';
-          this.mustChangePassword = false;
+          // The password change just invalidated this session server-side
+          // (every session, including this one) — send the user to a real
+          // login with the new password instead of continuing on a session
+          // that's already dead, same as logout()/logoutEverywhere().
+          window.location.href = '/login';
+          return;
         } else {
           this.passwordStatus = { msg: data.error || 'Something went wrong.', type: 'err' };
         }
