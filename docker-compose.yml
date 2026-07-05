@@ -1,0 +1,11 @@
+services:
+  kinsho:
+    build: .
+    container_name: kinsho
+    restart: unless-stopped
+    user: "${KINSHO_UID}:${KINSHO_GID}"
+    ports:
+      - "${KINSHO_PORT}:8000"
+    volumes:
+      - ${KINSHO_DATA_PATH}:/data
+      - ${KINSHO_MANGA_PATH}:/manga
