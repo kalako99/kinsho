@@ -665,48 +665,46 @@ is what pulls in new code; recreating each container is what makes a
 `/manga` is ever touched by any of this, since both live outside the image
 entirely.
 
-## Next steps — BLE hardware scroller for the Android app's chapter reader
+## BLE hardware scroller — device done (2026-07-05), Android integration planned
 
 Goal: physical scroll input (a small BLE peripheral) for high-definition
 scrolling inside `templates/chapter_reader.html` on the Android app
 specifically — turning a page/chapter's continuous image strip with a
-dedicated dial or slider instead of a touchscreen swipe.
+dedicated slider instead of a touchscreen swipe.
 
-- **`arduino/`** at the repo root holds the hardware sketches for this —
-  gitignored (see `.gitignore`), since it's hardware-in-progress, not app
-  source, and not part of what ships. Each device is its own sketch folder
-  (Arduino IDE requires the folder name to match the `.ino` filename).
-- **Existing device (done, lives outside this repo at `C:\pyhtml\scrollerm2.ino`,
-  not copied in)**: a rotary encoder version, "Scroller-M2." XIAO nRF52840 +
-  AS5600 magnetic rotary encoder over I2C (SDA=D4/P0.04, SCL=D5/P0.05),
-  one button on D2/P0.28 (quick press = reverse direction, hold 1s = toggle
-  a "NO_CURSOR_MODE" that nudges the OS cursor off-screen after each
-  scroll burst, triple-press = clear BLE bonds and re-enter pairing mode).
-  Built with Adafruit's `bluefruit.h` library, presenting as a standard BLE
-  HID mouse — the OS itself translates its reports into scroll-wheel
-  events, no custom pairing protocol. Implements continuous acceleration
-  (scroll multiplier ramps smoothly with angular velocity, no discrete
-  speed steps) and the HID "Resolution Multiplier" feature for sub-notch
-  scroll precision, which Windows honors well.
-- **New device (in progress)**: same board, a **linear potentiometer**
-  instead of the rotary encoder — a slider rather than a dial. First step
-  (done): `arduino/scroller_potentiometer_test/` just reads the raw ADC
-  value and computed voltage as the slider moves, to find the actual
-  usable range before writing any scrolling logic (cheap potentiometers
-  often don't hit clean 0V/3.3V at their physical end stops). Wiring:
-  potentiometer VCC → XIAO `3V3` (not 5V — keeps the wiper voltage inside
-  the nRF52840 ADC's safe input range), GND → XIAO `GND`, SIG → XIAO `A0`
-  (`D0`). Not yet built: the actual slider-position-to-scroll-amount logic
-  and BLE HID reporting, mirroring `scrollerm2.ino`'s structure once the
-  voltage range is known.
-- **Open question, not yet answered**: whether "HD scrolling on Android"
-  needs any Android/Capacitor-side work at all beyond pairing the device
-  as a normal Bluetooth mouse. The existing device's HID Resolution
-  Multiplier feature (its actual "high definition" mechanism) is
-  well-supported on Windows but Android's Bluetooth HID host stack may not
-  honor it the same way — if so, smooth sub-notch scrolling might only
-  work correctly when paired with a PC, not the Android app, and reading
-  the device's BLE reports directly (bypassing the OS mouse abstraction
-  entirely, from within the Capacitor/native layer) could be needed
-  instead. Not investigated yet — figure this out once a working
-  potentiometer device exists to test against.
+- **`arduino/`** at the repo root holds the hardware sketches — gitignored
+  (see `.gitignore`), since it's hardware source, not app source. Each
+  device is its own sketch folder (Arduino IDE requires the folder name to
+  match the `.ino` filename).
+- **Scroller-HD (done, working)**: `arduino/scroller_hd/scroller_hd.ino` —
+  XIAO nRF52840 + linear slide potentiometer (VCC→3V3, GND, SIG→A0), button
+  on D2 (quick press = reverse direction, hold 1s = NO_CURSOR_MODE, triple
+  press = clear bonds + pairing mode), BLE HID mouse with true
+  high-definition scrolling on Windows. Position-based "throttle" model
+  (dead zone 1.3–1.7V, cruise curve across most of the travel, steep boost
+  zone in the last 0.5V at each end), EMA + position-hold-deadband
+  filtering so a resting slider commands an exactly constant rate.
+  `arduino/scroller_hd_usbtest/` is the same pipeline over USB (TinyUSB),
+  kept as the known-good A/B reference for transport comparisons.
+- **Hard-won HID facts baked into that sketch** (each cost a debugging
+  round): Windows only negotiates the Resolution Multiplier if the
+  descriptor matches Microsoft's Wheel.docx sample shape — a **2-bit**
+  feature field (not 1-bit) wrapped in a Collection (Logical) together
+  with the wheel Input; report IDs must be declared in the report map
+  because the Adafruit/Seeed library's BLE Report Reference descriptors
+  claim ID 1 unconditionally; Windows writes the feature **once at pairing
+  install, not on reconnect**, so the negotiated state is persisted to
+  flash and cleared only on bond-clear; Windows caches a bonded device's
+  HID descriptor, so every descriptor change requires remove-device +
+  re-pair before anything works.
+- **Android answer (the previously open question): the HID route is a dead
+  end on Android** — its Bluetooth HID host never negotiates the
+  Resolution Multiplier, and a system-paired mouse adds a pointer overlay.
+  The plan instead: a custom GATT rate-stream characteristic in the
+  firmware, read directly by the app (no system pairing), driving a
+  velocity-based rAF scroll loop in `chapter_reader.html`. **The full plan
+  lives in the Android repo's CLAUDE.md** —
+  https://github.com/kalako99/kinsho-android (private) — since the app
+  owns the BLE plumbing; the reader-side scroll loop and connect UI will
+  land in this repo's `templates/chapter_reader.html` per that plan
+  (milestone M3).
