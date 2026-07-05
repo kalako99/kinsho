@@ -25,6 +25,7 @@ import httpx
 import metadata_fetch
 import opds
 import comicinfo
+import integrity
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -68,8 +69,10 @@ async def lifespan(app):
     ip = get_local_ip()
     print(f"\n  Kinsho running at: http://{ip}:8000\n")
     task = asyncio.create_task(periodic_library_rescan())
+    integrity_task = asyncio.create_task(run_integrity_check_loop())
     yield
     task.cancel()
+    integrity_task.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -105,17 +108,28 @@ app.add_middleware(
 # rather than a plain mount.
 PUBLIC_API_PREFIXES = ("/api/auth/",)
 
+last_activity_ts: float = time.time()
+
 @app.middleware("http")
 async def require_auth_for_api(request: Request, call_next):
     path = request.url.path
-    if (
-        path.startswith("/api/")
-        and not path.startswith(PUBLIC_API_PREFIXES)
-        and request.method != "OPTIONS"
-        and auth.get_opds_user(request) is None
-    ):
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    if path.startswith("/api/") and not path.startswith(PUBLIC_API_PREFIXES) and request.method != "OPTIONS":
+        # Session/token traffic (the web/native app) counts as "someone is
+        # using this" for the integrity-check idle gate; Basic Auth (OPDS
+        # clients polling in the background) doesn't — an automated reader
+        # checking for new chapters shouldn't block the idle-only scan from
+        # ever running.
+        session_user = auth.get_current_user(request)
+        if session_user is not None:
+            global last_activity_ts
+            last_activity_ts = time.time()
+        elif auth.get_user_from_basic_auth(request) is None:
+            return JSONResponse({"error": "Not authenticated"}, status_code=401)
     return await call_next(request)
+
+def is_idle(threshold_seconds: int = 1200) -> bool:
+    """No session/token-authenticated request in the last `threshold_seconds` (default 20 min)."""
+    return (time.time() - last_activity_ts) >= threshold_seconds
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -312,27 +326,35 @@ def read_archive_entry_bytes(arc, entry_name: str) -> bytes | None:
         print(f"[Archive] Failed to read entry {entry_name}: {e}")
         return None
 
-def comicinfo_items_for_manga(dims: dict) -> list:
+def checkable_items_for_manga(dims: dict) -> list:
     """
-    Build the ordered {"source_path", "source_type"} list comicinfo.aggregate_for_manga
-    expects, from a manga's dims.json — volumes take priority over chapters
-    (a manga has one or the other, never both), sorted the same way the rest
-    of the app orders them. Skips pdf/epub volumes (ComicInfo.xml is a
-    CBZ/CBR + loose-folder convention only).
+    Build the ordered list of {"item_type", "item_id", "item_name",
+    "source_path", "source_type"} for a manga's chapters/volumes — volumes
+    take priority over chapters (a manga has one or the other, never both),
+    sorted the same way the rest of the app orders them. Skips pdf/epub
+    (both ComicInfo.xml reading and the integrity checker are a CBZ/CBR +
+    loose-folder convention only — used by both find_comicinfo_for_manga()
+    and the integrity-check background loop).
     """
     volumes = dims.get("volumes", {})
     chapters = dims.get("chapters", {})
     items = []
     if volumes:
-        for v in sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", ""))):
+        for vid, v in sorted(volumes.items(), key=lambda kv: natural_sort_key(kv[1].get("name", ""))):
             vol_type = v.get("source", "archive")
             if vol_type in ("archive", "loose") and v.get("path"):
-                items.append({"source_path": v["path"], "source_type": vol_type})
+                items.append({
+                    "item_type": "volume", "item_id": vid, "item_name": v.get("name", vid),
+                    "source_path": v["path"], "source_type": vol_type,
+                })
     elif chapters:
-        for c in sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", ""))):
+        for cid, c in sorted(chapters.items(), key=lambda kv: natural_sort_key(kv[1].get("name", ""))):
             if c.get("path"):
                 source_type = "archive" if c.get("source") == "archive" else "loose"
-                items.append({"source_path": c["path"], "source_type": source_type})
+                items.append({
+                    "item_type": "chapter", "item_id": cid, "item_name": c.get("name", cid),
+                    "source_path": c["path"], "source_type": source_type,
+                })
     return items
 
 def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
@@ -353,10 +375,90 @@ def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
         root_level = comicinfo.locate_and_read(manga_path, "loose", open_archive, read_archive_entry_bytes)
         if root_level:
             return root_level
-    ordered_items = comicinfo_items_for_manga(dims)
+    ordered_items = checkable_items_for_manga(dims)
     if not ordered_items:
         return None
     return comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes)
+
+# ── INTEGRITY CHECK (corrupt archives / duplicate pages) ────────────────────
+# A background-only, idle-gated pass — see is_idle() near the top of this
+# file and run_integrity_check_loop() further down. integrity_issues.json is
+# global (admin-facing), not per-user, same storage pattern as collections.json.
+
+INTEGRITY_RECHECK_SECONDS = 90 * 24 * 60 * 60  # ~3 months
+
+def _integrity_issues_file() -> Optional[str]:
+    data_path = get_data_path()
+    if not data_path:
+        return None
+    return os.path.join(data_path, "integrity_issues.json")
+
+def load_integrity_issues() -> dict:
+    path = _integrity_issues_file()
+    if not path or not os.path.exists(path):
+        return {"issues": []}
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"issues": []}
+
+def save_integrity_issues(data: dict):
+    path = _integrity_issues_file()
+    if not path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def _clear_issues_for_item(issues_data: dict, library_id: int, manga_id: str, item_type: str, item_id: str):
+    issues_data["issues"] = [
+        i for i in issues_data["issues"]
+        if not (i["library_id"] == library_id and i["manga_id"] == manga_id
+                and i["item_type"] == item_type and i["item_id"] == item_id)
+    ]
+
+def record_integrity_result(
+    library_id: int, manga_id: str, manga_name: str, item: dict, result: dict
+) -> None:
+    """
+    Replaces any existing findings for this exact chapter/volume with whatever
+    this check just found (empty result = the item is now clean, which is
+    exactly how a Recheck clears a fixed issue). One issue per duplicate-page
+    group, so each row in the admin list is one concrete problem.
+    """
+    issues_data = load_integrity_issues()
+    _clear_issues_for_item(issues_data, library_id, manga_id, item["item_type"], item["item_id"])
+    now = datetime.now().isoformat()
+
+    if result["corrupt"]:
+        issues_data["issues"].append({
+            "id": uuid.uuid4().hex,
+            "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
+            "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
+            "type": "corrupt", "detail": result["corrupt"], "filenames": [],
+            "detected_at": now,
+        })
+    for group in result.get("duplicate_groups", []):
+        issues_data["issues"].append({
+            "id": uuid.uuid4().hex,
+            "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
+            "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
+            "type": "duplicate_pages",
+            "detail": f"{len(group)} identical pages: {', '.join(group)}",
+            "filenames": group, "detected_at": now,
+        })
+    save_integrity_issues(issues_data)
+
+def run_integrity_check_for_item(library_id: int, manga_id: str, manga_name: str, dims: dict, item: dict) -> None:
+    """Runs the check, records the result, and stamps this item's dims.json entry — used by
+    both the background loop (routine sweeps) and the admin Recheck action (on-demand, targeted)."""
+    result = integrity.check_item(item, open_archive, read_archive_entry_bytes)
+    record_integrity_result(library_id, manga_id, manga_name, item, result)
+    bucket = dims.get("volumes") if item["item_type"] == "volume" else dims.get("chapters")
+    if bucket is not None and item["item_id"] in bucket:
+        bucket[item["item_id"]]["integrity_checked_at"] = datetime.now().isoformat()
+        save_manga_dims(library_id, manga_name, dims)
 
 # ── LRU PAGE CACHE ──
 # Keyed by (archive_path, entry_name) or (pdf_path, page_index)
@@ -1990,6 +2092,137 @@ async def periodic_library_rescan():
                     await asyncio.to_thread(run_scan, lib_id)
         except Exception as e:
             print(f"[AutoScan] Error during periodic rescan: {e}")
+
+def _integrity_due_items() -> list:
+    """
+    Every chapter/volume across every library that's due for a check (never
+    checked, or checked longer than INTEGRITY_RECHECK_SECONDS ago), oldest
+    first. Each entry: (library_id, manga_id, manga_name, item).
+    """
+    data = load_app_data()
+    due = []
+    for lib in data.get("libraries", []):
+        library_id = lib.get("id")
+        if library_id is None:
+            continue
+        manga_data = data.get("manga_data", {}).get(str(library_id), {})
+        for manga in manga_data.get("mangas", []):
+            manga_name = manga.get("name", "")
+            dims = load_manga_dims(library_id, manga_name)
+            for item in checkable_items_for_manga(dims):
+                bucket = dims.get("volumes") if item["item_type"] == "volume" else dims.get("chapters")
+                checked_at_str = (bucket or {}).get(item["item_id"], {}).get("integrity_checked_at")
+                sort_key = ""  # never checked — sorts first (empty string < any ISO timestamp)
+                if checked_at_str:
+                    try:
+                        age = (datetime.now() - datetime.fromisoformat(checked_at_str)).total_seconds()
+                        if age < INTEGRITY_RECHECK_SECONDS:
+                            continue
+                    except Exception:
+                        pass
+                    sort_key = checked_at_str
+                due.append((sort_key, library_id, manga.get("id"), manga_name, item))
+    due.sort(key=lambda t: t[0])
+    return [(lib_id, manga_id, manga_name, item) for (_, lib_id, manga_id, manga_name, item) in due]
+
+async def run_integrity_check_loop():
+    """
+    Idle-gated background pass — only ever runs when is_idle() (no session/
+    token-authenticated request recently), and bails out of the current batch
+    the moment activity resumes, resuming at the same point (oldest-checked-
+    first) on the next idle window rather than needing any separate pause/
+    resume bookkeeping.
+    """
+    WAKE_INTERVAL_SECONDS = 10 * 60
+    MAX_PER_WAKE = 500
+    while True:
+        await asyncio.sleep(WAKE_INTERVAL_SECONDS)
+        try:
+            if not is_idle():
+                continue
+            due = await asyncio.to_thread(_integrity_due_items)
+            if not due:
+                continue
+            print(f"[Integrity] {len(due)} item(s) due for a check, starting idle pass...")
+            checked = 0
+            for library_id, manga_id, manga_name, item in due:
+                if not is_idle():
+                    print("[Integrity] Activity resumed, pausing until next idle window.")
+                    break
+                dims = await asyncio.to_thread(load_manga_dims, library_id, manga_name)
+                await asyncio.to_thread(run_integrity_check_for_item, library_id, manga_id, manga_name, dims, item)
+                checked += 1
+                if checked >= MAX_PER_WAKE:
+                    break
+            print(f"[Integrity] Checked {checked} item(s) this pass.")
+        except Exception as e:
+            print(f"[Integrity] Error during integrity check loop: {e}")
+
+@app.get("/api/admin/integrity/issues")
+def get_integrity_issues_endpoint(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    issues = load_integrity_issues()["issues"]
+    return JSONResponse({"issues": issues, "count": len(issues)})
+
+@app.post("/api/admin/integrity/recheck")
+async def recheck_integrity_issues_endpoint(request: Request):
+    """Re-runs the check for whichever chapters/volumes the given issue_ids point
+    at (or every currently-open issue if omitted), against their CURRENT path —
+    not the old filename — so a replaced chapter/volume is checked fresh."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    issue_ids = set(body.get("issue_ids") or [])
+    issues_data = load_integrity_issues()
+    targets = issues_data["issues"] if not issue_ids else [i for i in issues_data["issues"] if i["id"] in issue_ids]
+
+    data = load_app_data()
+    seen = set()
+    checked = 0
+    for issue in targets:
+        key = (issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        manga_data = data.get("manga_data", {}).get(str(issue["library_id"]), {})
+        manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == issue["manga_id"]), None)
+        if not manga:
+            _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
+            save_integrity_issues(issues_data)
+            continue
+        dims = load_manga_dims(issue["library_id"], manga["name"])
+        current_item = next(
+            (it for it in checkable_items_for_manga(dims)
+             if it["item_type"] == issue["item_type"] and it["item_id"] == issue["item_id"]),
+            None,
+        )
+        if not current_item:
+            # Chapter/volume no longer exists — nothing left to check, clear the finding.
+            _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
+            save_integrity_issues(issues_data)
+            continue
+        await asyncio.to_thread(
+            run_integrity_check_for_item, issue["library_id"], issue["manga_id"], manga["name"], dims, current_item
+        )
+        checked += 1
+
+    updated = load_integrity_issues()["issues"]
+    return JSONResponse({"ok": True, "checked": checked, "issues": updated, "count": len(updated)})
+
+@app.post("/api/admin/integrity/dismiss")
+async def dismiss_integrity_issue_endpoint(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    issue_id = body.get("issue_id")
+    issues_data = load_integrity_issues()
+    issues_data["issues"] = [i for i in issues_data["issues"] if i["id"] != issue_id]
+    save_integrity_issues(issues_data)
+    return JSONResponse({"ok": True, "count": len(issues_data["issues"])})
 
 def run_scan(library_id: int):
     _scan_running.add(library_id)

@@ -99,6 +99,12 @@ createApp({
       isAdmin:       false,
       myPermissions: {},
 
+      // ── ADMIN: INTEGRITY ISSUES ──
+      integrityIssues:      [],
+      integrityIssueCount:  0,
+      integrityRechecking:  false,
+      integrityStatus:      { msg: '', type: '' },
+
       // ── ADMIN: USER PERMISSIONS ──
       allUsers:           [],
       userPermissions:    {},
@@ -237,6 +243,7 @@ createApp({
       if (this.isLoggedIn && this.isAdmin) {
         await this.loadUserPermissions();
         await this.loadAdminStats();
+        await this.loadIntegrityIssues();
       }
       await this.loadAnalytics();
     },
@@ -981,6 +988,75 @@ createApp({
 
     toggleAdminStatsUser(username) {
       this.adminStatsExpanded = this.adminStatsExpanded === username ? null : username;
+    },
+
+    // ── ADMIN: INTEGRITY ISSUES ──
+    libraryName(libraryId) {
+      const lib = this.libraries.find(l => l.id === libraryId);
+      return lib ? lib.name : `Library ${libraryId}`;
+    },
+
+    async loadIntegrityIssues() {
+      try {
+        const res  = await fetch(apiUrl('/api/admin/integrity/issues'));
+        const data = await res.json();
+        this.integrityIssues     = data.issues || [];
+        this.integrityIssueCount = data.count || 0;
+      } catch (e) {
+        console.error('Failed to load integrity issues:', e);
+      }
+    },
+
+    async recheckIssue(issueId) {
+      this.integrityRechecking = true;
+      this.integrityStatus     = { msg: '', type: '' };
+      try {
+        const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ issue_ids: [issueId] }),
+        });
+        const data = await res.json();
+        this.integrityIssues     = data.issues || [];
+        this.integrityIssueCount = data.count || 0;
+        this.integrityStatus     = { msg: '✓ Rechecked.', type: 'ok' };
+      } catch (e) {
+        this.integrityStatus = { msg: 'Recheck failed.', type: 'err' };
+      }
+      this.integrityRechecking = false;
+      setTimeout(() => { this.integrityStatus = { msg: '', type: '' }; }, 3000);
+    },
+
+    async recheckAllIssues() {
+      this.integrityRechecking = true;
+      this.integrityStatus     = { msg: 'Rechecking every flagged item…', type: 'scanning' };
+      try {
+        const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        const data = await res.json();
+        this.integrityIssues     = data.issues || [];
+        this.integrityIssueCount = data.count || 0;
+        this.integrityStatus     = { msg: `✓ Rechecked ${data.checked} item(s).`, type: 'ok' };
+      } catch (e) {
+        this.integrityStatus = { msg: 'Recheck failed.', type: 'err' };
+      }
+      this.integrityRechecking = false;
+      setTimeout(() => { this.integrityStatus = { msg: '', type: '' }; }, 4000);
+    },
+
+    async dismissIssue(issueId) {
+      try {
+        const res  = await fetch(apiUrl('/api/admin/integrity/dismiss'), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ issue_id: issueId }),
+        });
+        const data = await res.json();
+        this.integrityIssues     = this.integrityIssues.filter(i => i.id !== issueId);
+        this.integrityIssueCount = data.count || 0;
+      } catch (e) {
+        console.error('Failed to dismiss issue:', e);
+      }
     },
 
     // ── CREATE USER (admin only) ──

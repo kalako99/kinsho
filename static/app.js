@@ -79,6 +79,10 @@ const app = createApp({
       // ── TRACKS WHETHER EACH ROW IS SCROLLED TO THE END ──
       atEnd: { lastRead: false, random: false, favourites: false, collections: false },
 
+      // ── ADMIN: INTEGRITY ISSUE BADGE ──
+      isAdmin:             false,
+      integrityIssueCount: 0,
+
       // ── ROW DATA ──
       lastRead:    [],
       random:      [],
@@ -110,6 +114,7 @@ const app = createApp({
       await this.loadMangas(this.activeTab);
     }
     await this.loadCollectionsRow();
+    await this.loadIntegrityBadge();
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && this.activeTab !== null) {
         this.loadMangas(this.activeTab);
@@ -118,6 +123,20 @@ const app = createApp({
   },
 
   methods: {
+    async loadIntegrityBadge() {
+      try {
+        const meRes  = await fetch(apiUrl('/api/auth/me'));
+        const meData = await meRes.json();
+        this.isAdmin = meData.ok && meData.role === 'admin';
+        if (!this.isAdmin) return;
+        const res  = await fetch(apiUrl('/api/admin/integrity/issues'));
+        const data = await res.json();
+        this.integrityIssueCount = data.count || 0;
+      } catch (e) {
+        this.isAdmin = false;
+      }
+    },
+
     // ── LOAD COLLECTIONS ROW ──
     async loadCollectionsRow() {
       try {

@@ -343,6 +343,66 @@ chapter/volume folder — and uses it to fill in a manga's `description`/
   still applies to volume-type manga regardless, since that logic doesn't
   depend on the popup.)
 
+### 9. Integrity checking (corrupt archives / duplicate pages) — done
+
+An idle-gated background pass that flags corrupt CBZ/CBR archives and exact
+duplicate pages within a chapter/volume, surfaced to the admin in a new
+Settings section — scoped to archive + loose only (same as ComicInfo.xml;
+PDF/EPUB aren't checked).
+
+- **`integrity.py`** — pure checking module. `check_archive()` reads every
+  image entry once, which does double duty: zipfile/rarfile validate each
+  entry's CRC as part of decompression, so a failed read *is* the corruption
+  check (no separate `zipfile.testzip()` pass needed), and the same read
+  gives the bytes to hash (sha1) for duplicate detection. `check_loose()`
+  does the same for unarchived folders, except there's no CRC layer to lean
+  on — the only way to know a raw image file is intact is to actually decode
+  it (`PIL.Image.open().load()`). Duplicates are scoped to *within* one
+  chapter/volume, not across a whole series — a title/copyright page reused
+  every chapter would otherwise flag as a false positive.
+- **Idle detection**: `last_activity_ts` (main.py) is updated on every
+  session/token-authenticated request in the existing auth middleware —
+  deliberately *not* updated by Basic Auth (OPDS client) traffic, so an
+  automated reader polling in the background can't keep the check from ever
+  running. `is_idle()` checks whether it's been quiet for 20+ minutes.
+- **Cadence**: not tied to file changes (a silently degrading drive doesn't
+  touch a file's mtime) — each chapter/volume gets a rolling `dims.json`
+  timestamp (`integrity_checked_at`) and is re-checked every ~3 months
+  regardless, oldest-checked-first, so bit rot gets caught even when nothing
+  was ever edited.
+- **`run_integrity_check_loop()`** wakes every 10 minutes, and only starts a
+  batch when idle; between each item it re-checks idleness and bails
+  cleanly the moment activity resumes, picking back up at the same point
+  (oldest-first) on the next idle window — no separate pause/resume
+  bookkeeping needed.
+- **Storage**: `{data_path}/integrity_issues.json`, global and admin-facing
+  (not per-user) — same pattern as `collections.json`. One entry per
+  concrete problem (a corrupt chapter is one entry; two separate duplicate
+  groups in the same chapter are two entries), each carrying the full trace
+  (library → manga → chapter/volume → filenames) needed to display and act
+  on it directly.
+- **Admin API** (`/api/admin/integrity/*`): `GET issues` (list + count),
+  `POST recheck` (specific issue ids, or all when omitted — re-runs the
+  check against the item's *current* path, not the old filename, so a fully
+  replaced chapter is checked fresh rather than trying to re-verify
+  something that may no longer exist), `POST dismiss` (plain delete, no
+  separate dismissed-flag state to manage).
+- **Settings UI**: a new admin-only "Issues" section — its sidebar nav item
+  turns bright red with a count badge when anything's unresolved, plus a
+  matching small badge on the topbar Settings gear icon (`app.js`'s
+  `loadIntegrityBadge()`) so it's visible from the main library page too,
+  before Settings is even opened. **Note for future edits to this file**:
+  `settings.html` is *not* wrapped in `{% raw %}` (unlike
+  `collection_detail.html`/`collections_list.html`), so any `{{ }}`
+  Jinja/Vue mustache expression beyond a bare variable — attribute access
+  (`issue.name`), a function call (`libraryName(x)`), a ternary (`a ? b :
+  c`) — crashes the page at render time (Jinja tries to parse it as its own
+  syntax and either fails outright or raises on the undefined variable).
+  This bit the first pass at this feature. The established convention in
+  this specific file is `v-text="..."` (or `:class`, `:style`, etc.) for
+  anything beyond a plain variable name, since Jinja never parses the
+  *inside* of a quoted attribute value.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
