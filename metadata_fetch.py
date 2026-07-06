@@ -53,6 +53,7 @@ query ($search: String, $perPage: Int, $format: [MediaFormat]) {
         name
         rank
       }
+      synonyms
       status
       coverImage {
         extraLarge
@@ -142,6 +143,7 @@ async def search_anilist_manga(
             "description":      m.get("description"),
             "genres":           m.get("genres") or [],
             "tags":             m.get("tags") or [],
+            "synonyms":         m.get("synonyms") or [],
             "status":           m.get("status"),
             "cover_url_extra_large": cover_obj.get("extraLarge"),
             "cover_url_large":  cover_obj.get("large"),
@@ -238,9 +240,16 @@ async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
                     cover_url = f"{MANGADEX_UPLOADS_URL}/covers/{m['id']}/{fn}"
                 break
 
+        # MangaDex stores external-site links per manga; "al" is the AniList
+        # ID. When present it's an exact cross-provider join — the strongest
+        # possible signal that this MangaDex entry IS the AniList series the
+        # user picked, with zero fuzzy-matching risk.
+        links = attrs.get("links") or {}
+
         results.append({
             "provider":      "mangadex",
             "mangadex_id":   m.get("id"),
+            "anilist_id_link": links.get("al"),
             "title_english": main_title,
             "title_romaji":  romaji,
             "title_native":  native,
@@ -377,6 +386,91 @@ def best_match(query: str, candidates: list[dict], min_score: float = 0.6) -> di
     scored = score_all_candidates(query, candidates)
     top = scored[0]
     return top if top.get("match_score", 0.0) >= min_score else None
+
+
+def _anilist_query_names(anilist_candidate: dict) -> list[str]:
+    """
+    Every name AniList knows this series by: english/romaji/native titles
+    plus the synonyms list, deduplicated (post-normalization) in that order.
+    """
+    names = []
+    for key in ("title_english", "title_romaji", "title_native"):
+        v = anilist_candidate.get(key)
+        if v:
+            names.append(v)
+    for s in anilist_candidate.get("synonyms") or []:
+        if s:
+            names.append(s)
+    seen, out = set(), []
+    for n in names:
+        k = _normalize_title(n)
+        if k and k not in seen:
+            seen.add(k)
+            out.append(n)
+    return out
+
+
+def pick_mangadex_match(anilist_candidate: dict, md_results: list[dict], min_score: float = 0.6) -> dict | None:
+    """
+    Pick the MangaDex entry that corresponds to a chosen AniList candidate.
+
+    Two tiers, strongest first:
+      1. Exact ID join — a MangaDex entry whose links.al equals the AniList
+         id IS the same series by definition; no similarity guessing.
+      2. Multi-name fuzzy match — best similarity of each MangaDex entry
+         against EVERY name AniList knows (titles + synonyms), gated by
+         min_score. A series whose MangaDex title only matches an AniList
+         synonym still scores high; an unrelated series that happens to
+         top the search results doesn't.
+
+    Returns the chosen candidate (copy, with match_score and matched_by
+    keys) or None — and None is the correct answer when nothing is
+    confident: a missing cover beats a wrong one.
+    """
+    if not md_results:
+        return None
+
+    al_id = anilist_candidate.get("anilist_id")
+    if al_id is not None:
+        for md in md_results:
+            if md.get("anilist_id_link") and str(md["anilist_id_link"]) == str(al_id):
+                chosen = dict(md)
+                chosen["match_score"] = 1.0
+                chosen["matched_by"] = "anilist_id"
+                return chosen
+
+    names = _anilist_query_names(anilist_candidate)
+    if not names:
+        return None
+    best, best_score = None, 0.0
+    for md in md_results:
+        score = max((score_title_match(n, md) for n in names), default=0.0)
+        if score > best_score:
+            best, best_score = md, score
+    if best is not None and best_score >= min_score:
+        chosen = dict(best)
+        chosen["match_score"] = best_score
+        chosen["matched_by"] = "title"
+        return chosen
+    return None
+
+
+async def find_mangadex_for_anilist(anilist_candidate: dict, min_score: float = 0.6) -> dict | None:
+    """
+    Search MangaDex and return the entry corresponding to `anilist_candidate`
+    (see pick_mangadex_match for the matching tiers). Tries a search per
+    AniList-known name until one produces a confident match — usually the
+    first (english/romaji) search resolves via the ID join immediately.
+    """
+    for query in _anilist_query_names(anilist_candidate)[:3]:
+        try:
+            md_results = await search_mangadex_manga(query)
+        except Exception:
+            continue
+        match = pick_mangadex_match(anilist_candidate, md_results, min_score)
+        if match:
+            return match
+    return None
 
 
 # ── SUBSTEP 3: data write ─────────────────────────────────────────────
