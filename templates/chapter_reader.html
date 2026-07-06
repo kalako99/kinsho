@@ -840,18 +840,15 @@
     }
     .last-page-popup.show { opacity: 1; }
 
-    /* ── CURSOR-HIDE SIDEBARS ── */
-    .sidebar-zone {
-      position: fixed;
-      top: 0;
-      height: 100%;
-      width: 10%;
-      z-index: 50;
-      pointer-events: none; /* enabled only when UI is hidden, set via JS */
-    }
-    .sidebar-zone.left  { left: 0; }
-    .sidebar-zone.right { right: 0; }
-    .sidebar-zone.active { pointer-events: all; cursor: none; }
+    /* ── READING-MODE CURSOR HIDING ──
+       While the UI chrome is hidden, the whole screen hides the mouse
+       cursor — pure CSS on the body, no overlay elements. (The previous
+       .sidebar-zone overlays needed pointer-events:all for cursor:none to
+       apply, which also made them swallow wheel events — scrolling was
+       dead inside them.) Left-clicking anywhere shows the UI again via
+       the existing document click handler, which drops this class and
+       restores the cursor. */
+    body.cursor-hidden, body.cursor-hidden * { cursor: none !important; }
 
     /* ── PRELOAD RADIUS SLIDER ── */
     .settings-preload {
@@ -1098,7 +1095,7 @@
 
   </style>
 </head>
-<body>
+<body class="cursor-hidden"><!-- UI starts hidden, so the cursor does too -->
 
 <div class="topbar" id="topbar">
   <button class="back-btn" id="backBtn">
@@ -1111,8 +1108,6 @@
 </div>
 
 <div id="reader"></div>
-<div class="sidebar-zone left"  id="sidebarLeft"></div>
-<div class="sidebar-zone right" id="sidebarRight"></div>
 
 <div class="frag-progress left" id="fragProgress"></div>
 
@@ -1329,20 +1324,6 @@
   let barTimer = null;
   function showBar() { showAll(); } // kept for compat
 
-  const sidebarLeft  = document.getElementById('sidebarLeft');
-  const sidebarRight = document.getElementById('sidebarRight');
-
-  function setSidebarsActive(active) {
-    sidebarLeft.classList.toggle('active', active);
-    sidebarRight.classList.toggle('active', active);
-    if (!active) document.body.style.cursor = '';
-  }
-
-  sidebarLeft.addEventListener('mouseenter',  () => { document.body.style.cursor = 'none'; });
-  sidebarLeft.addEventListener('mouseleave',  () => { document.body.style.cursor = ''; });
-  sidebarRight.addEventListener('mouseenter', () => { document.body.style.cursor = 'none'; });
-  sidebarRight.addEventListener('mouseleave', () => { document.body.style.cursor = ''; });
-
   function hideAll() {
     topbar.classList.remove('visible');
     fragProgress.classList.remove('visible');
@@ -1357,7 +1338,7 @@
       if (btn) btn.classList.remove('active');
     }
     if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
-    setSidebarsActive(true);
+    document.body.classList.add('cursor-hidden');
   }
 
   function showAll() {
@@ -1365,7 +1346,7 @@
     fragProgress.classList.add('visible');
     document.getElementById('bottombar').classList.add('visible');
     barVisible = true;
-    setSidebarsActive(false);
+    document.body.classList.remove('cursor-hidden');
     if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
     clearTimeout(barTimer);
     barTimer = setTimeout(() => {
