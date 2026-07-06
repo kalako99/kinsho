@@ -259,7 +259,23 @@
         body:        JSON.stringify({ username, password }),
       });
       const data = await res.json();
-      if (data.ok) { window.location.href = data.must_change_password ? '/settings' : '/'; }
+      if (data.ok) {
+        // Android app (Capacitor WebView): page navigations to allowed
+        // remote origins are proxied by Capacitor to inject its bridge, and
+        // that proxy loses Set-Cookie headers received during navigations —
+        // but it DOES attach cookies from the WebView's cookie store to
+        // every proxied request. Writing the session cookie from JS puts it
+        // in that store directly, so server-rendered pages stay logged in.
+        // Same per-port name the server uses (two instances on one host
+        // must not share a cookie). Skipped in real browsers, where the
+        // server's own httponly Set-Cookie already did the job.
+        if (window.Capacitor && data.token) {
+          const name = 'kinsho_session' + (location.port ? '_' + location.port : '');
+          document.cookie = name + '=' + data.token +
+            '; path=/; max-age=' + (30 * 86400) + '; SameSite=Lax';
+        }
+        window.location.href = data.must_change_password ? '/settings' : '/';
+      }
       else         { showStatus(data.error || 'Login failed.', true); }
     } catch {
       showStatus('Could not reach server.', true);
