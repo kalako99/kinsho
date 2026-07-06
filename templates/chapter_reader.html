@@ -50,6 +50,7 @@
     .back-btn:hover { background: rgba(255,255,255,0.1); }
 
     .topbar-title {
+      flex: 1;
       font-family: 'Segoe UI', sans-serif;
       font-size: 1rem;
       font-weight: 600;
@@ -58,6 +59,70 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+
+    /* ── KINSHO BLE SCROLLER (Android app only) ── */
+    .topbar-iconbtn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      position: relative;
+      transition: background 0.2s;
+    }
+    .topbar-iconbtn:hover { background: rgba(255,255,255,0.1); }
+
+    .scroller-dot {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #666;
+      border: 1.5px solid rgba(0,0,0,0.4);
+    }
+    .scroller-dot.scanning  { background: #e0a030; }
+    .scroller-dot.connected { background: #4caf50; }
+    .scroller-dot.error     { background: #e94560; }
+
+    .scroller-panel {
+      position: fixed;
+      top: 64px;
+      right: 20px;
+      z-index: 200;
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 12px;
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 200px;
+    }
+    .scroller-panel.open { display: flex; }
+    .scroller-panel-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: #f0f0f0;
+      letter-spacing: 0.03em;
+      padding: 0 4px;
+    }
+    .scroller-status {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.78rem;
+      color: #999;
+      padding: 0 4px;
+    }
+    .scroller-status.scanning  { color: #e0a030; }
+    .scroller-status.connected { color: #4caf50; }
+    .scroller-status.error     { color: #e94560; }
 
     /*
      * ── READER (CONVEYOR BELT) ──
@@ -1105,6 +1170,22 @@
     </svg>
   </button>
   <span class="topbar-title" id="topbarTitle">Loading…</span>
+  <!-- Android app only; hidden by default, shown via JS feature-detection
+       on window.KinshoBLE (see kinsho-android/CLAUDE.md) -->
+  <button type="button" class="topbar-iconbtn" id="scrollerBtn" style="display:none" aria-label="Scroller device" title="Scroller device">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="6.5 6.5 17.5 17.5 12 23 12 1 17.5 6.5 6.5 17.5"/>
+    </svg>
+    <span class="scroller-dot" id="scrollerDot"></span>
+  </button>
+</div>
+
+<!-- Scroller connect popup -->
+<div class="scroller-panel" id="scrollerPanel">
+  <div class="scroller-panel-title">Scroller Device</div>
+  <div class="scroller-status" id="scrollerStatusText">Not connected</div>
+  <button class="bm-panel-btn" id="scrollerConnectBtn">Connect</button>
+  <button class="bm-panel-btn" id="scrollerDisconnectBtn" style="display:none">Disconnect</button>
 </div>
 
 <div id="reader"></div>
@@ -3341,6 +3422,135 @@
     // Wait for the opening chapter URL batch before showing the first page,
     // so spGotoIdx always finds entry.url populated and never hits the thumb fallback.
     ensureChapterUrls(chapterId).then(() => activateSinglePageMode());
+  }
+
+  // ── KINSHO BLE SCROLLER ──
+  // window.KinshoBLE only exists inside the Android app (native bridge from
+  // kinsho-android's MainActivity.java/KinshoBleBridge.java) — absent on
+  // desktop/browser, so this entire block is a no-op there. See
+  // kinsho-android/CLAUDE.md for the full plan (M0-M2 already verified
+  // working end to end; this is M3).
+  //
+  // There is deliberately only a Connect/Disconnect pair here, not a list of
+  // discovered devices: the native side already scans filtered to exactly
+  // the Scroller-HD's custom GATT service UUID and connects to the first
+  // match, so there is nothing else for a picker to distinguish between.
+  {
+    const scrollerBtn           = document.getElementById('scrollerBtn');
+    const scrollerDot           = document.getElementById('scrollerDot');
+    const scrollerPanel         = document.getElementById('scrollerPanel');
+    const scrollerStatusText    = document.getElementById('scrollerStatusText');
+    const scrollerConnectBtn    = document.getElementById('scrollerConnectBtn');
+    const scrollerDisconnectBtn = document.getElementById('scrollerDisconnectBtn');
+
+    // ~100px/notch matches the desktop browser's feel; revisit only if this
+    // fixed value proves wrong in practice (per the plan — not a settings
+    // control yet).
+    const KINSHO_PX_PER_NOTCH = 100;
+    // Matches RESOLUTION_MULTIPLIER in scroller_hd.ino — the firmware sends
+    // rate in 1/120-notch units/sec.
+    const KINSHO_UNITS_PER_NOTCH = 120;
+
+    const KINSHO_ERROR_MESSAGES = {
+      bluetooth_off:            'Bluetooth is off',
+      ble_unsupported:          'BLE not supported on this device',
+      permission_denied:        'Bluetooth permission denied',
+      service_not_found:        'Scroller service not found',
+      service_discovery_failed: 'Could not read device services',
+    };
+
+    let kinshoRate         = 0;  // signed, 1/120-notch units/sec — latest value from the device
+    let kinshoLastRateTime = 0;  // performance.now() of the last notification received
+    let kinshoScrollAccum  = 0;  // fractional-pixel carry, same trick as the firmware's fractionalScroll
+
+    function scrollerSetStatus(cssClass, text) {
+      scrollerStatusText.className = 'scroller-status' + (cssClass ? ' ' + cssClass : '');
+      scrollerStatusText.textContent = text;
+      scrollerDot.className = 'scroller-dot' + (cssClass ? ' ' + cssClass : '');
+    }
+
+    if (window.KinshoBLE) {
+      scrollerBtn.style.display = '';
+
+      window.__kinshoBleOnState = (state) => {
+        if (state === 'scanning') {
+          scrollerSetStatus('scanning', 'Scanning…');
+          scrollerConnectBtn.style.display = 'none';
+          scrollerDisconnectBtn.style.display = '';
+        } else if (state === 'connected') {
+          scrollerSetStatus('connected', 'Connected');
+          scrollerConnectBtn.style.display = 'none';
+          scrollerDisconnectBtn.style.display = '';
+        } else if (state === 'disconnected') {
+          scrollerSetStatus('', 'Not connected');
+          scrollerConnectBtn.style.display = '';
+          scrollerDisconnectBtn.style.display = 'none';
+          kinshoRate = 0;
+        } else if (state.startsWith('error:')) {
+          const reason = state.slice(6);
+          scrollerSetStatus('error', KINSHO_ERROR_MESSAGES[reason] || ('Error: ' + reason));
+          scrollerConnectBtn.style.display = '';
+          scrollerDisconnectBtn.style.display = 'none';
+          kinshoRate = 0;
+        }
+      };
+
+      window.__kinshoBleOnRate = (rate) => {
+        kinshoRate = rate;
+        kinshoLastRateTime = performance.now();
+      };
+
+      scrollerBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        scrollerPanel.classList.toggle('open');
+      });
+      scrollerPanel.addEventListener('click', (e) => e.stopPropagation());
+      document.addEventListener('click', (e) => {
+        if (!scrollerPanel.contains(e.target) && e.target !== scrollerBtn) {
+          scrollerPanel.classList.remove('open');
+        }
+      });
+      scrollerConnectBtn.addEventListener('click', () => window.KinshoBLE.connect());
+      scrollerDisconnectBtn.addEventListener('click', () => window.KinshoBLE.disconnect());
+
+      // Velocity-driven scroll loop: converts the latest rate into a
+      // per-frame pixel delta and nudges reader.scrollTop directly, which
+      // fires the SAME native 'scroll' event the existing conveyor-belt
+      // system already listens for (syncScrollPosition/recenterConveyor) —
+      // no separate integration path needed; this reads to the rest of the
+      // reader exactly like a user physically scrolling.
+      let kinshoLastFrameTime = performance.now();
+      function kinshoScrollLoop(now) {
+        const dt = Math.min((now - kinshoLastFrameTime) / 1000, 0.1); // clamp for tab-switch/stalls
+        kinshoLastFrameTime = now;
+
+        // Silence watchdog: a dropped BLE link must not leave the page
+        // drifting forever on the last rate it heard.
+        if (kinshoRate !== 0 && now - kinshoLastRateTime > 1000) {
+          kinshoRate = 0;
+        }
+
+        if (kinshoRate !== 0 && readerSettings.mode === 'long-strip') {
+          const pxPerSec = (kinshoRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
+          kinshoScrollAccum += pxPerSec * dt;
+          // Truncate toward zero (not floor) to match the firmware's own
+          // int8_t cast semantics, and to keep the sign correct symmetrically
+          // in both scroll directions.
+          const wholePixels = Math.trunc(kinshoScrollAccum);
+          if (wholePixels !== 0) {
+            reader.scrollTop += wholePixels;
+            kinshoScrollAccum -= wholePixels;
+          }
+        } else {
+          // Not scrolling (dead zone) or not in long-strip mode — no
+          // partial carry-over, same as the firmware resets on dead zone.
+          kinshoScrollAccum = 0;
+        }
+
+        requestAnimationFrame(kinshoScrollLoop);
+      }
+      requestAnimationFrame(kinshoScrollLoop);
+    }
   }
 
   // ── READING PROGRESS TRACKING ──
