@@ -371,6 +371,11 @@ def checkable_items_for_manga(dims: dict) -> list:
                 items.append({
                     "item_type": "chapter", "item_id": cid, "item_name": c.get("name", cid),
                     "source_path": c["path"], "source_type": source_type,
+                    # case1: this chapter's subfolder inside the shared
+                    # archive — scopes the integrity check to the chapter,
+                    # same as thumbnails/page-serving use it. Empty for
+                    # case3 (one archive per chapter) and loose.
+                    "prefix": c.get("prefix", ""),
                 })
     return items
 

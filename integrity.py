@@ -29,12 +29,20 @@ def _find_duplicate_groups(hashes: dict) -> list:
     return [sorted(names) for names in by_hash.values() if len(names) > 1]
 
 
-def check_archive(source_path: str, open_archive_fn, read_entry_fn) -> dict:
+def check_archive(source_path: str, open_archive_fn, read_entry_fn, prefix: str = "") -> dict:
     """
     Reads every image entry once, which does double duty: zipfile/rarfile
     validate each entry's CRC as part of decompression, so a failed read IS
     the corruption check — no separate zipfile.testzip() pass needed. The
     same read gives us the bytes to hash for duplicate detection.
+
+    prefix: for case1 manga (one archive containing chapter subfolders) the
+    same archive is checked once PER CHAPTER, and the check must be scoped
+    to that chapter's entries — otherwise every chapter re-hashes the whole
+    series, a credits page repeated in each chapter flags as a "duplicate"
+    (the exact cross-chapter false positive duplicate detection is scoped to
+    avoid), and the identical whole-archive finding is reported once per
+    chapter. Empty prefix = whole archive (case2 volumes / case3 chapters).
 
     Returns {"corrupt": str|None, "duplicate_groups": [[...], ...]}.
     """
@@ -44,6 +52,8 @@ def check_archive(source_path: str, open_archive_fn, read_entry_fn) -> dict:
     try:
         try:
             names = [n for n in arc.namelist() if os.path.splitext(n)[1].lower() in IMAGE_EXTENSIONS]
+            if prefix:
+                names = [n for n in names if n.startswith(prefix)]
         except Exception as e:
             return {"corrupt": f"Failed to list archive contents: {e}", "duplicate_groups": []}
         hashes = {}
@@ -90,5 +100,6 @@ def check_loose(source_path: str) -> dict:
 def check_item(item: dict, open_archive_fn, read_entry_fn) -> dict:
     """item: one entry from main.py's checkable_items_for_manga()."""
     if item["source_type"] == "archive":
-        return check_archive(item["source_path"], open_archive_fn, read_entry_fn)
+        return check_archive(item["source_path"], open_archive_fn, read_entry_fn,
+                             prefix=item.get("prefix", ""))
     return check_loose(item["source_path"])
