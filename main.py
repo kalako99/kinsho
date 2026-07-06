@@ -127,6 +127,23 @@ async def require_auth_for_api(request: Request, call_next):
             return JSONResponse({"error": "Not authenticated"}, status_code=401)
     return await call_next(request)
 
+@app.middleware("http")
+async def default_no_store(request: Request, call_next):
+    """
+    Mark every response that doesn't declare its own caching policy as
+    no-store. Page routes and redirects reflect LOGIN STATE — a cache layer
+    replaying them stale is catastrophic: the Android app's WebView once
+    cached the logged-out "/" redirect + login page and served them forever,
+    making login impossible no matter what the server did. Routes that WANT
+    caching (page images, dims, thumbnails) already send explicit
+    Cache-Control headers, which this leaves untouched; /static is skipped
+    so its ETag/Last-Modified revalidation keeps working for JS/CSS.
+    """
+    response = await call_next(request)
+    if "cache-control" not in response.headers and not request.url.path.startswith("/static"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 def is_idle(threshold_seconds: int = 1200) -> bool:
     """No session/token-authenticated request in the last `threshold_seconds` (default 20 min)."""
     return (time.time() - last_activity_ts) >= threshold_seconds
