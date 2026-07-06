@@ -208,8 +208,31 @@ def _delete_sessions_for_user(username: str, except_token: Optional[str] = None)
     _save_sessions(data)
 
 
+def _cookie_name_for_request(request: Request) -> str:
+    """
+    Session cookie name, suffixed with the port the client addressed us on.
+
+    Browsers scope cookies to the hostname only — ports are ignored — so two
+    Kinsho instances on the same host (e.g. :8098 and :8099 on one home
+    server) would otherwise fight over a single `kinsho_session` cookie:
+    logging into one instance clobbers the other's cookie with a token it
+    doesn't recognize, which surfaces as "it randomly logs me out".
+    Suffixing the name with the port gives each instance its own cookie.
+    """
+    host = request.headers.get("host", "")
+    if ":" in host:
+        port = host.rsplit(":", 1)[1]
+        if port.isdigit():
+            return f"{COOKIE_NAME}_{port}"
+    return COOKIE_NAME
+
+
 def _get_request_token(request: Request) -> Optional[str]:
-    return request.headers.get('X-Auth-Token') or request.cookies.get(COOKIE_NAME)
+    # Bare COOKIE_NAME fallback keeps sessions from before the per-port
+    # naming alive until they naturally expire or re-login.
+    return (request.headers.get('X-Auth-Token')
+            or request.cookies.get(_cookie_name_for_request(request))
+            or request.cookies.get(COOKIE_NAME))
 
 
 # ── REQUEST HELPERS ──────────────────────────────────────────────────────────
@@ -439,7 +462,7 @@ async def route_login(request: Request):
         "must_change_password": bool(user.get("must_change_password")),
     })
     response.set_cookie(
-        key=COOKIE_NAME, value=token,
+        key=_cookie_name_for_request(request), value=token,
         httponly=True, samesite="lax",
         max_age=SESSION_DURATION_DAYS * 86400,
     )
@@ -496,7 +519,8 @@ async def route_logout(request: Request):
     if token:
         _delete_session(token)
     response = JSONResponse({"ok": True})
-    response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie(_cookie_name_for_request(request))
+    response.delete_cookie(COOKIE_NAME)   # pre-per-port-naming leftover
     return response
 
 
@@ -507,7 +531,8 @@ async def route_logout_everywhere(request: Request):
         return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
     _delete_sessions_for_user(username)
     response = JSONResponse({"ok": True})
-    response.delete_cookie(COOKIE_NAME)
+    response.delete_cookie(_cookie_name_for_request(request))
+    response.delete_cookie(COOKIE_NAME)   # pre-per-port-naming leftover
     return response
 
 
