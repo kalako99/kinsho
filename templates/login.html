@@ -260,21 +260,30 @@
       });
       const data = await res.json();
       if (data.ok) {
-        // Android app (Capacitor WebView): page navigations to allowed
-        // remote origins are proxied by Capacitor to inject its bridge, and
-        // that proxy loses Set-Cookie headers received during navigations —
-        // but it DOES attach cookies from the WebView's cookie store to
-        // every proxied request. Writing the session cookie from JS puts it
-        // in that store directly, so server-rendered pages stay logged in.
-        // Same per-port name the server uses (two instances on one host
-        // must not share a cookie). Skipped in real browsers, where the
-        // server's own httponly Set-Cookie already did the job.
-        if (window.Capacitor && data.token) {
+        const dest = data.must_change_password ? '/settings' : '/';
+        // Belt: also write the session cookie from JS (same per-port name
+        // the server uses). Browsers silently ignore a document.cookie
+        // write that would replace an httponly cookie, so where the
+        // server's own Set-Cookie from the fetch above already landed
+        // (desktop browsers) this is a no-op — it only takes effect in
+        // WebViews that dropped that Set-Cookie. NOTE: cannot be gated on
+        // window.Capacitor — Capacitor does NOT inject its bridge into
+        // server-served pages, only into the app-bundle origin.
+        if (data.token) {
           const name = 'kinsho_session' + (location.port ? '_' + location.port : '');
           document.cookie = name + '=' + data.token +
             '; path=/; max-age=' + (30 * 86400) + '; SameSite=Lax';
         }
-        window.location.href = data.must_change_password ? '/settings' : '/';
+        // Suspenders: in the Android WebView (its UA carries a "wv" token),
+        // don't trust either fetch-set cookie path — claim the session via
+        // a top-level navigation whose RESPONSE sets the cookie, the one
+        // mechanism every cookie store honors (classic form-login style).
+        if (data.token && /\bwv\b/.test(navigator.userAgent)) {
+          window.location.href = '/auth/claim?token=' + encodeURIComponent(data.token) +
+            '&next=' + encodeURIComponent(dest);
+        } else {
+          window.location.href = dest;
+        }
       }
       else         { showStatus(data.error || 'Login failed.', true); }
     } catch {

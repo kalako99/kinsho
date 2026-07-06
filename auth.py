@@ -514,6 +514,33 @@ async def route_admin_create_user(request: Request):
     return JSONResponse({"ok": True, "username": username, "role": role})
 
 
+async def route_claim_session(request: Request):
+    """
+    GET /auth/claim?token=...&next=/ — turn an already-issued session token
+    into the session cookie via a top-level NAVIGATION response.
+
+    Exists for the Android app's WebView: it proved unreliable at carrying a
+    cookie set on a fetch() response into subsequent page navigations (the
+    path desktop browsers use), while a cookie set by a navigation response
+    itself — classic form-login style — is the most conservative, universally
+    honored mechanism there is. The token is one the client already holds
+    from the login response; an invalid or expired one just lands on /login.
+    """
+    token = request.query_params.get("token", "")
+    nxt   = request.query_params.get("next", "/")
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/"
+    if not token or _resolve_session(token) is None:
+        return RedirectResponse("/login", status_code=302)
+    response = RedirectResponse(nxt, status_code=302)
+    response.set_cookie(
+        key=_cookie_name_for_request(request), value=token,
+        httponly=True, samesite="lax",
+        max_age=SESSION_DURATION_DAYS * 86400,
+    )
+    return response
+
+
 async def route_logout(request: Request):
     token = _get_request_token(request)
     if token:

@@ -4815,6 +4815,10 @@ def login_page(request: Request):
 async def api_login(request: Request):
     return await auth.route_login(request)
 
+@app.get("/auth/claim")
+async def auth_claim(request: Request):
+    return await auth.route_claim_session(request)
+
 @app.post("/api/auth/logout")
 async def api_logout(request: Request):
     return await auth.route_logout(request)
