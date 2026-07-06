@@ -1541,6 +1541,10 @@ createApp({
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
     }).catch(() => {});
+    // Start the dims prefetch immediately: loadReadChapters() triggers the
+    // reader-page image preload, which awaits this._dimsPromise — the
+    // promise must exist by then.
+    this.prefetchDims();
     await this.loadManga();
     await Promise.all([
       this.loadAdminStatus(),
@@ -1555,7 +1559,6 @@ createApp({
         this.loadReadChapters();
       }
     });
-    this.prefetchDims();
   },
 
   methods: {
@@ -1588,6 +1591,7 @@ createApp({
         this.readChapterIds  = new Set(data.completed_chapter_ids || []);
         this.lastChapterId   = data.last_chapter_id || null;
         this.lastPage        = data.last_page || 0;
+        this.preloadReaderPages();   // continue-point now known
       } catch (e) {
         console.error('Failed to load read chapters:', e);
       }
@@ -1706,12 +1710,47 @@ createApp({
       }
       const controller = new AbortController();
       window.__dimsPrefetchController__ = controller;
-      fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
+      this._dimsPromise = fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
         signal:   controller.signal,
         priority: 'low',
       })
         .then(r => r.json())
-        .catch(() => {});
+        .catch(() => null);
+    },
+
+    // Warm the browser HTTP cache with the exact page images the reader will
+    // show first — the page endpoints send long-lived immutable
+    // Cache-Control, so these downloads are reused as-is when the reader
+    // opens and the first pages paint immediately instead of starting their
+    // download only after navigation. The window matches where
+    // startReading() opens: around the continue-reading position, or the
+    // first pages when never read.
+    async preloadReaderPages() {
+      try {
+        const dims = await this._dimsPromise;
+        const cid  = this.lastChapterId || this.manga?.chapters?.[0]?.id;
+        const ch   = dims?.chapters?.[cid];
+        if (!ch) return;
+        const base = `/api/manga/${this.libraryId}/${this.mangaId}/chapter/${cid}/page`;
+        let urls = null;
+        if (ch.source === 'archive' || ch.source === 'epub') {
+          const count = ch.page_count ?? ch.pages?.length ?? 0;
+          urls = Array.from({ length: count }, (_, i) => `${base}/${i}`);
+        } else if (ch.source === 'loose' && Array.isArray(ch.filenames)) {
+          urls = ch.filenames.map(f => `${base}/${f}`);
+        }
+        // pdf deliberately skipped: its page URLs carry a render-scale query
+        // that depends on per-library reader settings, so a guess here could
+        // simply miss the cache (and PDF pages are pre-rendered server-side
+        // anyway).
+        if (!urls || !urls.length) return;
+        const start = Math.max(0, Math.min(this.lastPage || 0, urls.length - 1) - 1);
+        for (const u of urls.slice(start, start + 5)) {
+          const img = new Image();
+          img.fetchPriority = 'low';
+          img.src = apiUrl(u);
+        }
+      } catch (e) { /* cache warming is best-effort */ }
     },
 
     async loadAdminStatus() {

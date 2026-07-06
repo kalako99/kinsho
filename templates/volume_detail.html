@@ -1363,21 +1363,28 @@ createApp({
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
     }).catch(() => {});
+    // Start the dims prefetch immediately: loadReadingProgress() triggers
+    // the reader-page image preload, which awaits this._dimsPromise — the
+    // promise must exist by then.
+    this.prefetchDims();
     await this.loadManga();
     await Promise.all([
       this.loadAdminStatus(),
       this.loadAllTags(),
       this.loadAllGenres(),
-      this.loadReadChapters(),
+      // was `this.loadReadChapters()` — a method this page never had (it's
+      // manga_detail's name; here it's loadReadingProgress). The TypeError
+      // aborted mounted() here, so reading progress, collections, reading
+      // time and the dims prefetch silently never ran on volume pages.
+      this.loadReadingProgress(),
       this.loadCollections(),
       this.loadReadingTime(),
     ]);
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') {
-        this.loadReadChapters();
+        this.loadReadingProgress();
       }
     });
-    this.prefetchDims();
   },
 
   methods: {
@@ -1411,6 +1418,7 @@ createApp({
         this.lastPage      = data.last_page || 0;
         this.readVolumeIds = new Set(data.completed_volume_ids || []);
         this.volumePages   = data.volume_pages || {};
+        this.preloadReaderPages();   // continue-point now known
       } catch (e) {
         console.error('Failed to load reading progress:', e);
       }
@@ -1543,12 +1551,47 @@ createApp({
       }
       const controller = new AbortController();
       window.__dimsPrefetchController__ = controller;
-      fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
+      this._dimsPromise = fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
         signal:   controller.signal,
         priority: 'low',
       })
         .then(r => r.json())
-        .catch(() => {});
+        .catch(() => null);
+    },
+
+    // Warm the browser HTTP cache with the exact page images the reader will
+    // show first — the page endpoints send long-lived immutable
+    // Cache-Control, so these downloads are reused as-is when the reader
+    // opens and the first pages paint immediately instead of starting their
+    // download only after navigation. The window matches where
+    // startReading() opens: around the continue-reading position, or the
+    // first pages when never read.
+    async preloadReaderPages() {
+      try {
+        const dims = await this._dimsPromise;
+        const vid  = this.lastVolumeId || this.manga?.volumes?.[0]?.id;
+        const vol  = dims?.volumes?.[vid];
+        if (!vol) return;
+        const base = `/api/manga/${this.libraryId}/${this.mangaId}/volume/${vid}/page`;
+        let urls = null;
+        if (vol.source === 'archive' || vol.source === 'epub') {
+          const count = vol.page_count ?? vol.pages?.length ?? 0;
+          urls = Array.from({ length: count }, (_, i) => `${base}/${i}`);
+        } else if (vol.source === 'loose' && Array.isArray(vol.filenames)) {
+          urls = vol.filenames.map(f => `${base}/${f}`);
+        }
+        // pdf deliberately skipped: its page URLs carry a render-scale query
+        // that depends on per-library reader settings, so a guess here could
+        // simply miss the cache (and PDF pages are pre-rendered server-side
+        // anyway).
+        if (!urls || !urls.length) return;
+        const start = Math.max(0, Math.min(this.lastPage || 0, urls.length - 1) - 1);
+        for (const u of urls.slice(start, start + 5)) {
+          const img = new Image();
+          img.fetchPriority = 'low';
+          img.src = apiUrl(u);
+        }
+      } catch (e) { /* cache warming is best-effort */ }
     },
 
     async loadAdminStatus() {
