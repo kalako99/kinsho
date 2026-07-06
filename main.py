@@ -3326,6 +3326,72 @@ async def set_manga_cover(request: Request, library_id: int, manga_id: str):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
+
+@app.post("/api/manga/{library_id}/{manga_id}/covers/delete")
+async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
+    """
+    Delete one cover file (small + large '+' variant) from a manga's covers
+    directory — for pruning wrong covers pulled in by the metadata fetch.
+    Admin-only: the files are shared by every user. Cleans up every
+    reference: the manga's default cover falls back to another remaining
+    cover, and any per-user override pointing at the deleted file is
+    removed so those users fall back to the default.
+    """
+    username = auth.get_current_user(request)
+    if not auth.resolve_permissions(username).get("is_admin"):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    body = await request.json()
+    filename = os.path.basename(body.get("filename", "").strip())
+    if not filename:
+        return JSONResponse({"ok": False, "error": "No filename provided"}, status_code=400)
+
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+
+    manga_covers_dir = os.path.join(get_covers_dir(), str(library_id), manga["name"])
+    name, ext = os.path.splitext(filename)
+    small_path = os.path.join(manga_covers_dir, filename)
+    large_path = os.path.join(manga_covers_dir, f"{name}+{ext}")
+    if not os.path.exists(small_path) and not os.path.exists(large_path):
+        return JSONResponse({"ok": False, "error": "Cover not found"}, status_code=404)
+    for p in (small_path, large_path):
+        try:
+            os.remove(p)
+        except FileNotFoundError:
+            pass
+
+    # Default cover pointed here → fall back to the first remaining cover.
+    if manga.get("cover") == filename:
+        extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+        remaining_large = sorted(
+            (f for f in os.listdir(manga_covers_dir)
+             if os.path.splitext(f)[0].endswith('+')
+             and os.path.splitext(f)[1].lower() in extensions),
+            key=natural_sort_key,
+        )
+        if remaining_large:
+            rname, rext = os.path.splitext(remaining_large[0])
+            manga["cover"] = rname[:-1] + rext
+        else:
+            manga["cover"] = None
+        save_app_data(data)
+
+    # Per-user overrides pointing at the deleted file → remove, falling back
+    # to the manga default.
+    for u in auth._load_users().get("users", []):
+        ud = auth.load_user_data(u["username"])
+        sel = ud.get("covers", {}).get(str(library_id), {})
+        if sel.get(manga_id) == filename:
+            del sel[manga_id]
+            auth.save_user_data(u["username"], ud)
+
+    return JSONResponse({"ok": True, "new_default": manga.get("cover")})
+
 def rebuild_all_tags(data: dict) -> list:
     tags = set()
     covers_dir = get_covers_dir()
@@ -3596,18 +3662,27 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     try:
         # The chosen candidate (from the AniList search) is the primary source.
-        # Look up the same title on MangaDex to fill any field AniList is
+        # Look up the SAME SERIES on MangaDex to fill any field AniList is
         # missing and to provide a higher-res cover fallback.
-        title = (
-            candidate.get("title_english")
-            or candidate.get("title_romaji")
-            or candidate.get("title_native")
-            or manga["name"]
-        )
         mangadex_best = None
         try:
-            md_results = await metadata_fetch.search_mangadex_manga(title)
-            mangadex_best = metadata_fetch.best_match(title, md_results)
+            if candidate.get("anilist_id") is not None:
+                # AniList candidate: exact ID join via MangaDex's links.al,
+                # multi-name fuzzy fallback. Deliberately NO weaker fallback
+                # beyond that — None means "no confident MangaDex counterpart",
+                # and a missing cover beats a wrong-series cover.
+                mangadex_best = await metadata_fetch.find_mangadex_for_anilist(candidate)
+            else:
+                # Non-AniList candidate (e.g. the "Local file" card): single
+                # best-title match, as before.
+                title = (
+                    candidate.get("title_english")
+                    or candidate.get("title_romaji")
+                    or candidate.get("title_native")
+                    or manga["name"]
+                )
+                md_results = await metadata_fetch.search_mangadex_manga(title)
+                mangadex_best = metadata_fetch.best_match(title, md_results)
         except Exception:
             mangadex_best = None
 
@@ -3669,15 +3744,20 @@ async def scan_library_metadata(request: Request, library_id: int):
                         anilist_enabled = False
                 await asyncio.sleep(0.7)
 
-            # ── MangaDex: best confident match, plus the "single entry" rule ──
-            # A raw title search returns several loosely-related rows, so the
-            # spec's "MangaDex has just one entry" is read as "exactly one
-            # strongly-matching entry" — an unambiguous single identification.
-            md_results = await metadata_fetch.search_mangadex_manga(name)
-            scored_md = metadata_fetch.score_all_candidates(name, md_results)
-            mangadex_best = scored_md[0] if scored_md and scored_md[0]["match_score"] >= 0.6 else None
-            strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
-            mangadex_single = strong_md[0] if len(strong_md) == 1 else None
+            # ── MangaDex ──
+            # With an AniList match in hand: find the SAME SERIES on MangaDex
+            # (exact links.al ID join, multi-name fuzzy fallback) — matching by
+            # the folder name alone paired wrong-series covers with correct
+            # AniList descriptions. Without one: fall back to the "single
+            # confident entry" rule against the folder name, as before.
+            mangadex_best = mangadex_single = None
+            if anilist_primary:
+                mangadex_best = await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
+            else:
+                md_results = await metadata_fetch.search_mangadex_manga(name)
+                scored_md = metadata_fetch.score_all_candidates(name, md_results)
+                strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
+                mangadex_single = strong_md[0] if len(strong_md) == 1 else None
 
             # ── Decide source(s) ──
             # AniList single match → primary, MangaDex fills gaps + cover.

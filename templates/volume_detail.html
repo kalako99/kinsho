@@ -731,6 +731,27 @@
       border-radius: 4px;
       letter-spacing: 0.5px;
     }
+    .cover-option-delete {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(0,0,0,0.65);
+      color: #e94560;
+      font-size: 0.8rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .cover-option:hover .cover-option-delete { opacity: 1; }
+    .cover-option-delete:hover { background: rgba(233,69,96,0.9); color: #fff; }
     .poster-clickable {
       cursor: pointer;
       position: relative;
@@ -1272,6 +1293,12 @@
           @click="selectCover(cover)"
         >
           <img :src="cover.url_large" :alt="cover.filename">
+          <button
+            class="cover-option-delete"
+            v-if="isAdmin"
+            @click.stop="deleteCover(cover)"
+            title="Delete this cover file (removes it for every user)"
+          >✕</button>
           <span class="cover-option-badge" v-if="cover.is_selected">Active</span>
         </div>
       </div>
@@ -1873,6 +1900,29 @@ createApp({
         }
       } catch (e) {
         console.error('Failed to set cover:', e);
+      }
+    },
+
+    // Admin only: delete a cover FILE (e.g. a wrong metadata-fetched one) —
+    // global, unlike selectCover's per-user preference.
+    async deleteCover(cover) {
+      if (!confirm('Delete this cover file? This removes it for every user.')) return;
+      try {
+        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/covers/delete`), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ filename: cover.filename }),
+        });
+        const data = await res.json();
+        if (!data.ok) return;
+        await this.openCoverPicker();   // reload the list; server recomputed the selection
+        const sel = this.availableCovers.find(c => c.is_selected);
+        if (sel) {
+          this.manga.cover_url_large = sel.url_large;
+          this.manga.cover_url       = sel.url_small;
+        }
+      } catch (e) {
+        console.error('Failed to delete cover:', e);
       }
     },
   },
