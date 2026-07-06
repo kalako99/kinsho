@@ -1780,12 +1780,29 @@
       frag.appendChild(el);
       slotPool.push({ el, img });
       assignedSlot[i] = i - windowLo;
-      loadEntry(manifest[i]);
     }
     reader.appendChild(frag);
 
     reader.scrollTop = targetGlobalY - manifest[windowLo].globalY;
-    prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
+
+    // Load the slot images CENTER-OUT from the page actually at the
+    // viewport top — not in windowLo→windowHi DOM order. All ~SLOT_COUNT
+    // images share the browser's handful of connections per origin, so
+    // request order effectively IS priority order: DOM-order loading
+    // queued the visible page behind up to half the window of off-screen
+    // full-res pages, which is exactly the blank-first-page-until-you-
+    // scroll symptom on a cold server. fetchPriority nudges supporting
+    // browsers the same way (harmless no-op elsewhere).
+    const centerIdx = Math.max(windowLo, Math.min(windowHi, firstIndexAfter(targetGlobalY)));
+    for (let d = 0; d <= windowHi - windowLo; d++) {
+      for (const i of (d === 0 ? [centerIdx] : [centerIdx + d, centerIdx - d])) {
+        if (i < windowLo || i > windowHi) continue;
+        const si = assignedSlot[i];
+        if (si !== -1) slotPool[si].img.fetchPriority = (Math.abs(i - centerIdx) <= 2) ? 'high' : 'low';
+        loadEntry(manifest[i]);
+      }
+    }
+    prefetchAroundIndex(centerIdx);
   }
 
   // ── INCREMENTAL SHIFT: moves the window by `delta` entries by dropping
