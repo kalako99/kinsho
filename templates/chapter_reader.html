@@ -3470,7 +3470,7 @@
 
     let kinshoRate         = 0;  // signed, 1/120-notch units/sec — latest value from the device
     let kinshoLastRateTime = 0;  // performance.now() of the last notification received
-    let kinshoScrollAccum  = 0;  // fractional-pixel carry, same trick as the firmware's fractionalScroll
+    let kinshoScrollPos    = null;  // fractional mirror of reader.scrollTop while kinsho is actively driving it; null when idle
 
     function scrollerSetStatus(cssClass, text) {
       scrollerStatusText.className = 'scroller-status' + (cssClass ? ' ' + cssClass : '');
@@ -3478,10 +3478,25 @@
       scrollerDot.className = 'scroller-dot' + (cssClass ? ' ' + cssClass : '');
     }
 
-    if (window.KinshoBLE) {
+    // Default true: the feature is hidden unless the user has explicitly
+    // turned this off in Settings — most viewers of a shared server don't
+    // own the Scroller-HD hardware.
+    const kinshoHideBleScroller = adminData.hide_ble_scroller !== false;
+    // TEMP DIAGNOSTIC (2026-07-08): the M4 auto-reconnect isn't firing for
+    // the user in practice (neither at cold app start nor when switching
+    // manga without closing the app), and static review hasn't found the
+    // bug. These traces are meant to be read via chrome://inspect on the
+    // physical device to see exactly which branch runs and with what
+    // values, rather than guessing again. Safe to remove once the actual
+    // cause is found.
+    console.log('[KinshoBLE debug] window.KinshoBLE present:', !!window.KinshoBLE,
+                ', hide_ble_scroller:', adminData.hide_ble_scroller, ', kinshoHideBleScroller:', kinshoHideBleScroller);
+
+    if (window.KinshoBLE && !kinshoHideBleScroller) {
       scrollerBtn.style.display = '';
 
       window.__kinshoBleOnState = (state) => {
+        console.log('[KinshoBLE debug] state ->', state, '@', performance.now());
         if (state === 'scanning') {
           scrollerSetStatus('scanning', 'Scanning…');
           scrollerConnectBtn.style.display = 'none';
@@ -3538,12 +3553,19 @@
       // connected before and hasn't explicitly disconnected since; the
       // popup stays closed throughout, so this only ever moves the small
       // status dot, never pops anything open uninvited.
-      if (window.KinshoBLE.isConnected()) {
+      const kinshoAlreadyConnected = window.KinshoBLE.isConnected();
+      const kinshoAutoConnectFlag  = localStorage.getItem(KINSHO_AUTOCONNECT_KEY);
+      console.log('[KinshoBLE debug] on load: isConnected() =', kinshoAlreadyConnected,
+                  ', autoConnect flag =', kinshoAutoConnectFlag);
+      if (kinshoAlreadyConnected) {
         scrollerSetStatus('connected', 'Connected');
         scrollerConnectBtn.style.display = 'none';
         scrollerDisconnectBtn.style.display = '';
-      } else if (localStorage.getItem(KINSHO_AUTOCONNECT_KEY) === '1') {
+      } else if (kinshoAutoConnectFlag === '1') {
+        console.log('[KinshoBLE debug] calling window.KinshoBLE.connect() for auto-reconnect');
         window.KinshoBLE.connect();
+      } else {
+        console.log('[KinshoBLE debug] no auto-reconnect: not connected and no stored flag');
       }
 
       // Velocity-driven scroll loop: converts the latest rate into a
@@ -3564,20 +3586,24 @@
         }
 
         if (kinshoRate !== 0 && readerSettings.mode === 'long-strip') {
+          // Re-sync from the DOM's actual position whenever resuming after
+          // an idle spell (dead zone, mode switch, or the very first frame)
+          // so this never drifts from wherever the page actually is —
+          // touch scrolling or the conveyor-belt recenter logic can move
+          // reader.scrollTop while kinsho isn't driving it.
+          if (kinshoScrollPos === null) kinshoScrollPos = reader.scrollTop;
           const pxPerSec = (kinshoRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
-          kinshoScrollAccum += pxPerSec * dt;
-          // Truncate toward zero (not floor) to match the firmware's own
-          // int8_t cast semantics, and to keep the sign correct symmetrically
-          // in both scroll directions.
-          const wholePixels = Math.trunc(kinshoScrollAccum);
-          if (wholePixels !== 0) {
-            reader.scrollTop += wholePixels;
-            kinshoScrollAccum -= wholePixels;
-          }
+          kinshoScrollPos += pxPerSec * dt;
+          // A fractional assignment here (not whole-pixel accumulation) is
+          // what makes slow scrolling glide instead of stutter — at low
+          // rates the old whole-pixel-only approach could take ~2 seconds
+          // to accumulate a single displayable pixel, reading as a stop of
+          // motion.
+          reader.scrollTop = kinshoScrollPos;
         } else {
-          // Not scrolling (dead zone) or not in long-strip mode — no
-          // partial carry-over, same as the firmware resets on dead zone.
-          kinshoScrollAccum = 0;
+          // Not scrolling (dead zone) or not in long-strip mode — drop the
+          // tracked position so the next active frame re-syncs fresh.
+          kinshoScrollPos = null;
         }
 
         requestAnimationFrame(kinshoScrollLoop);
