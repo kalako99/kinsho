@@ -665,7 +665,7 @@ is what pulls in new code; recreating each container is what makes a
 `/manga` is ever touched by any of this, since both live outside the image
 entirely.
 
-## BLE hardware scroller — device done (2026-07-05), Android integration planned
+## BLE hardware scroller — done (2026-07-07)
 
 Goal: physical scroll input (a small BLE peripheral) for high-definition
 scrolling inside `templates/chapter_reader.html` on the Android app
@@ -703,8 +703,23 @@ dedicated slider instead of a touchscreen swipe.
   The plan instead: a custom GATT rate-stream characteristic in the
   firmware, read directly by the app (no system pairing), driving a
   velocity-based rAF scroll loop in `chapter_reader.html`. **The full plan
-  lives in the Android repo's CLAUDE.md** —
+  and milestone history live in the Android repo's CLAUDE.md** —
   https://github.com/kalako99/kinsho-android (private) — since the app
-  owns the BLE plumbing; the reader-side scroll loop and connect UI will
-  land in this repo's `templates/chapter_reader.html` per that plan
-  (milestone M3).
+  owns the BLE plumbing.
+- **Reader-side implementation (M3, this repo)**: the connect UI (topbar
+  bluetooth icon, feature-detected on `window.KinshoBLE`) and the
+  velocity-driven rAF scroll loop live in `templates/chapter_reader.html`,
+  gated to long-strip mode with a 1s silence watchdog against a dropped
+  link leaving the page drifting.
+- **Auto-reconnect (M4, this repo)**: on every reader page load,
+  `chapter_reader.html` checks `window.KinshoBLE.isConnected()` first — the
+  native connection is owned by the Android app's `MainActivity`, not the
+  page's JS context, so it already survives the full-page reload each
+  chapter navigation does, and a true result just repaints the status dot
+  with no rescan. Otherwise it silently reconnects if a `localStorage` flag
+  (`kinshoAutoConnectScroller`) is set — set on any successful connection,
+  cleared only by an explicit Disconnect tap (not by an unexpected drop),
+  same mental model as a Bluetooth headphone reconnecting once paired. The
+  matching Java-side scan timeout (10s, was previously unbounded) that
+  makes a silent background auto-connect attempt safe lives in the Android
+  repo's `KinshoBleBridge.java`.

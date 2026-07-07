@@ -3457,7 +3457,16 @@
       permission_denied:        'Bluetooth permission denied',
       service_not_found:        'Scroller service not found',
       service_discovery_failed: 'Could not read device services',
+      not_found:                'Scroller not found',
     };
+
+    // M4: remembers that a connection has been made before, so the reader
+    // can silently reconnect on each new chapter open instead of making the
+    // user tap Connect every time — same mental model as a Bluetooth
+    // headphone reconnecting automatically once paired. Set on any
+    // successful connection (auto or manual); cleared only by an explicit
+    // Disconnect tap, which is treated as "stop trying for now".
+    const KINSHO_AUTOCONNECT_KEY = 'kinshoAutoConnectScroller';
 
     let kinshoRate         = 0;  // signed, 1/120-notch units/sec — latest value from the device
     let kinshoLastRateTime = 0;  // performance.now() of the last notification received
@@ -3481,6 +3490,7 @@
           scrollerSetStatus('connected', 'Connected');
           scrollerConnectBtn.style.display = 'none';
           scrollerDisconnectBtn.style.display = '';
+          localStorage.setItem(KINSHO_AUTOCONNECT_KEY, '1');
         } else if (state === 'disconnected') {
           scrollerSetStatus('', 'Not connected');
           scrollerConnectBtn.style.display = '';
@@ -3511,7 +3521,30 @@
         }
       });
       scrollerConnectBtn.addEventListener('click', () => window.KinshoBLE.connect());
-      scrollerDisconnectBtn.addEventListener('click', () => window.KinshoBLE.disconnect());
+      scrollerDisconnectBtn.addEventListener('click', () => {
+        // An explicit Disconnect tap means "stop trying for now" — unlike a
+        // dropped link (also reported as 'disconnected' above), which must
+        // NOT clear the preference or the scroller would never auto-rejoin
+        // after briefly going out of range.
+        localStorage.removeItem(KINSHO_AUTOCONNECT_KEY);
+        window.KinshoBLE.disconnect();
+      });
+
+      // M4: the native BLE connection is owned by MainActivity, not the
+      // WebView's JS context, so it survives the full-page reload each
+      // chapter navigation does (goToChapter() uses location.replace) —
+      // check the already-connected state first rather than reconnecting
+      // from scratch. Otherwise, silently reconnect if the user has
+      // connected before and hasn't explicitly disconnected since; the
+      // popup stays closed throughout, so this only ever moves the small
+      // status dot, never pops anything open uninvited.
+      if (window.KinshoBLE.isConnected()) {
+        scrollerSetStatus('connected', 'Connected');
+        scrollerConnectBtn.style.display = 'none';
+        scrollerDisconnectBtn.style.display = '';
+      } else if (localStorage.getItem(KINSHO_AUTOCONNECT_KEY) === '1') {
+        window.KinshoBLE.connect();
+      }
 
       // Velocity-driven scroll loop: converts the latest rate into a
       // per-frame pixel delta and nudges reader.scrollTop directly, which
