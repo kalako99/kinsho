@@ -499,6 +499,19 @@ compounding each other:
   archive/volume (case1, case2, case3) — closes the stale handle and evicts
   any cached image list/page bytes for that exact path before it's reopened
   fresh.
+- **The same folder-mtime bug also existed for loose (unarchived) manga
+  (2026-07-08 follow-up)** — `_register_loose_manga` gated re-scanning a
+  whole manga on whether its own top-level folder's mtime had changed, then
+  only checked individual chapter/volume *subfolder* mtimes after that gate
+  passed. Deleting a page from inside an existing chapter subfolder bumps
+  that **subfolder's** own mtime (removing a directory entry always does)
+  but never the parent manga folder's — so the correct per-subfolder check
+  further down never got reached. Verified live with a throwaway loose
+  manga folder: deleting a page left the manga-folder mtime unchanged while
+  the chapter subfolder's mtime did update, exactly as expected, and a
+  Reload scan silently no-opped until this was fixed. Same fix shape as the
+  archive case: also compare each subfolder's own mtime against what's
+  stored per-chapter/volume before trusting the folder-level skip.
 
 ---
 

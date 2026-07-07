@@ -1541,7 +1541,32 @@ def scan_library(library: dict) -> tuple:
                 return True  # nothing stored yet, not a stale-path problem
             return all(os.path.exists(s.get("path", "")) for s in sources.values())
 
-        if stored_mtime is not None and current_mtime == stored_mtime:
+        folder_unchanged = stored_mtime is not None and current_mtime == stored_mtime
+        # The manga's own top folder only changes mtime when a DIRECT entry
+        # is added/removed/renamed (a whole chapter/volume subfolder
+        # appearing or disappearing) - deleting a page from INSIDE an
+        # existing chapter/volume subfolder only bumps THAT subfolder's own
+        # mtime, never the parent manga folder's. The per-subfolder check
+        # further down is already correct, but relying on this folder-level
+        # check alone meant it never got reached for that kind of edit.
+        any_subfolder_changed = False
+        if folder_unchanged:
+            existing_dims_peek = load_manga_dims(library_id, manga_name)
+            bucket = existing_dims_peek.get("chapters" if manga_type == "case1" else "volumes", {})
+            id_infix = ":" if manga_type == "case1" else ":vol:"
+            for dirname in classification["content_subfolders"]:
+                sub_id = make_id(manga_name + id_infix + dirname)
+                stored_sub_mtime = bucket.get(sub_id, {}).get("mtime")
+                try:
+                    current_sub_mtime = os.path.getmtime(os.path.join(manga_path, dirname))
+                except OSError:
+                    any_subfolder_changed = True
+                    break
+                if stored_sub_mtime != current_sub_mtime:
+                    any_subfolder_changed = True
+                    break
+
+        if folder_unchanged and not any_subfolder_changed:
             print(f"[ScanLib] Skipping unchanged loose: {manga_name}")
             if existing.get("path") and existing["path"] != manga_path:
                 relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
@@ -1562,8 +1587,8 @@ def scan_library(library: dict) -> tuple:
                 "manga_type":   "loose",
             }
 
-        # Only rescan content subfolders if the folder mtime changed
-        if mangas[manga_path].get("folder_mtime") == existing.get("folder_mtime"):
+        # Only rescan content subfolders if something actually changed.
+        if folder_unchanged and not any_subfolder_changed:
             return
 
         dims = load_manga_dims(library_id, manga_name)
