@@ -885,6 +885,35 @@ dedicated slider instead of a touchscreen swipe.
   scrolling resumes after an idle spell (dead zone, mode switch) so it never
   drifts from wherever touch-scrolling or the conveyor-belt recenter logic
   left the page.
+- **"Jump back" fix + constant-acceleration ramp (2026-07-08 follow-up)**:
+  reported after the stutter fix above — still choppy at constant speed and
+  during deceleration, worse while continuously re-adjusting the slider, and
+  periodically jumping backward. Two compounding causes:
+  - The stutter fix's idle-spell resync (`if (kinshoScrollPos === null)
+    kinshoScrollPos = reader.scrollTop`) only ever re-read the DOM's actual
+    position when transitioning from idle back to active — never while
+    *continuously* scrolling. But `recenterConveyor()` (see
+    `templates/chapter_reader.html`'s conveyor-belt virtualization) can
+    reposition the materialized window and adjust `reader.scrollTop`
+    directly at any time, including mid-continuous-kinsho-scroll (its
+    settled-check can spuriously trigger off two consecutive frames
+    rounding to the same integer pixel, which happens easily at low
+    speed). Kinsho's own tracked position had no way to know that had
+    happened, so the very next frame it wrote its own stale value straight
+    back over the recenter's adjustment — a real, visible jump backward
+    (or forward). Fixed by checking every frame (not just on idle→active)
+    whether `reader.scrollTop` has drifted from the tracked position by
+    more than a few pixels (ordinary float→integer rounding from kinsho's
+    own last write is at most ~1px) and, if so, adopting the DOM's actual
+    position as the new baseline instead of fighting it.
+  - Separately, replaced the exponential smoothing between received rate
+    values with a constant-acceleration ramp (`KINSHO_MAX_ACCEL`) — the
+    exponential's percentage-of-remaining-gap approach means a big jump in
+    the raw rate (e.g. continuously re-targeting a new speed while already
+    moving) produces a correspondingly large *instant* change in
+    acceleration each time, a series of kinks rather than one smooth curve.
+    A fixed rate of change per second regardless of jump size gives one
+    predictable ramp through repeated re-targeting.
 
 ### Tuning the scroller's feel
 
@@ -914,7 +943,7 @@ effect, no rebuild:**
 |---|---|---|
 | `KINSHO_PX_PER_NOTCH` | 100 | Overall scroll sensitivity — pixels of on-screen movement per firmware "notch". Raise for faster scrolling at the same slider position, lower for slower. |
 | `KINSHO_UNITS_PER_NOTCH` | 120 | Must match `RESOLUTION_MULTIPLIER` in the firmware — only change this if that constant changes too. |
-| `KINSHO_SMOOTHING_TIME_CONSTANT` | 0.12 (seconds) | How quickly the rendered scroll speed catches up to each newly received rate — added 2026-07-08 because BLE notifications don't always arrive on a perfectly even ~50ms beat (Android's main thread can be busy laying out scrolled-in images right when one needs delivering), and jumping straight to each new value on arrival read as choppy, especially while decelerating. Raise if scrolling still feels stuttery/jittery; lower (feels snappier, but more exposed to any remaining delivery irregularity) if slider movement feels laggy to respond to. |
+| `KINSHO_MAX_ACCEL` | 60 (notches/sec²) | How fast the rendered scroll speed can ramp up/down toward each newly received rate — added 2026-07-08 because BLE notifications don't always arrive on a perfectly even ~50ms beat (Android's main thread can be busy laying out scrolled-in images right when one needs delivering), and jumping straight to each new value read as choppy. A **constant** acceleration cap (not a percentage-of-gap/exponential chase) so continuously re-targeting a new speed — e.g. the user still actively adjusting the slider — still produces one smooth curve rather than a series of kinks. Raise if scrolling still feels stuttery/jittery or sluggish to reach the target speed; lower (smoother, but slower to reach a newly commanded speed) if it still feels jerky on big speed changes. |
 
 **Android (`kinsho-android` repo, `KinshoBleBridge.java`) — rebuild + reinstall
 to take effect:**

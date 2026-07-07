@@ -3557,17 +3557,21 @@
       // system already listens for (syncScrollPosition/recenterConveyor) —
       // no separate integration path needed; this reads to the rest of the
       // reader exactly like a user physically scrolling.
-      // Smoothed velocity actually used for scrolling — BLE notifications
+      //
+      // Displayed velocity actually used for scrolling — BLE notifications
       // arrive in discrete ~50ms steps, sometimes irregularly (Android's
       // main thread can be busy decoding/laying out scrolled-in images
       // right when a notification needs marshaling onto it), so jumping
-      // straight to each newly received rate reads as choppy, especially
-      // noticeable while decelerating. Exponentially converging toward it
-      // instead absorbs that irregularity into a continuous frame-to-frame
-      // change. See CLAUDE.md's scroller tuning table for what to adjust
-      // if this still isn't smooth enough, or feels laggy.
+      // straight to each newly received rate reads as choppy. Ramps toward
+      // the latest rate at a bounded, CONSTANT acceleration instead of
+      // snapping to it or exponentially chasing it — a fixed rate of
+      // change per second regardless of how big the jump is, so continuous
+      // slider movement (repeatedly re-targeting a new speed) still
+      // produces one smooth, predictable curve rather than a series of
+      // kinks. See CLAUDE.md's scroller tuning table for what to adjust if
+      // this still isn't smooth enough, or feels laggy to respond.
       let kinshoDisplayRate = 0;
-      const KINSHO_SMOOTHING_TIME_CONSTANT = 0.12; // seconds
+      const KINSHO_MAX_ACCEL = 60; // notches/sec² — how fast the displayed speed can ramp up/down
 
       let kinshoLastFrameTime = performance.now();
       function kinshoScrollLoop(now) {
@@ -3580,22 +3584,30 @@
           kinshoRate = 0;
         }
 
-        // Frame-rate-independent exponential smoothing (uses dt directly,
-        // not a fixed per-frame factor) so this behaves the same regardless
-        // of the device's actual refresh rate. Also gives a real BLE
-        // disconnect (kinshoRate forced to 0 above) a smooth decel to a
-        // stop instead of an abrupt freeze.
-        const smoothing = 1 - Math.exp(-dt / KINSHO_SMOOTHING_TIME_CONSTANT);
-        kinshoDisplayRate += (kinshoRate - kinshoDisplayRate) * smoothing;
-        if (Math.abs(kinshoDisplayRate) < 0.05) kinshoDisplayRate = 0; // fully settle instead of decaying forever
+        // Constant-acceleration ramp toward the target rate (not a
+        // percentage-of-gap exponential chase) — also gives a real BLE
+        // disconnect (kinshoRate forced to 0 above) a smooth, bounded-time
+        // decel to a stop instead of an abrupt freeze.
+        const rateDiff  = kinshoRate - kinshoDisplayRate;
+        const maxChange = KINSHO_MAX_ACCEL * dt;
+        if (Math.abs(rateDiff) <= maxChange) {
+          kinshoDisplayRate = kinshoRate;
+        } else {
+          kinshoDisplayRate += Math.sign(rateDiff) * maxChange;
+        }
 
         if (kinshoDisplayRate !== 0 && readerSettings.mode === 'long-strip') {
           // Re-sync from the DOM's actual position whenever resuming after
-          // an idle spell (dead zone, mode switch, or the very first frame)
-          // so this never drifts from wherever the page actually is —
-          // touch scrolling or the conveyor-belt recenter logic can move
-          // reader.scrollTop while kinsho isn't driving it.
-          if (kinshoScrollPos === null) kinshoScrollPos = reader.scrollTop;
+          // an idle spell, AND whenever something else has moved
+          // reader.scrollTop out from under us since our last write here
+          // (the conveyor-belt recenter logic can reposition the window
+          // and adjust scrollTop mid-continuous-scroll — a plain rounding
+          // difference from our own last write is at most ~1px, so
+          // anything bigger than that is an external change to adopt, not
+          // fight by jumping back to our own stale tracked value next frame).
+          if (kinshoScrollPos === null || Math.abs(reader.scrollTop - kinshoScrollPos) > 3) {
+            kinshoScrollPos = reader.scrollTop;
+          }
           const pxPerSec = (kinshoDisplayRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
           kinshoScrollPos += pxPerSec * dt;
           // A fractional assignment here (not whole-pixel accumulation) is
