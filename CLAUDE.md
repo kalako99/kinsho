@@ -403,6 +403,103 @@ PDF/EPUB aren't checked).
   anything beyond a plain variable name, since Jinja never parses the
   *inside* of a quoted attribute value.
 
+### 10. Small settings/admin batch (2026-07-07) — done
+
+Five independent, unrelated changes done together in one pass:
+
+- **Hide-BLE-scroller toggle** — per-user, defaults to **on** (hidden), in
+  the Appearance tab's "Display" card next to the backdrop toggles
+  (`hide_ble_scroller` in `{data_path}/{username}.json`, `POST
+  /api/settings/ble-scroller`). Since most viewers of a shared server don't
+  own the Scroller-HD hardware, the feature stays out of their way unless
+  they explicitly opt in. `chapter_reader.html`'s entire BLE block (topbar
+  icon, connect popup, auto-reconnect, the rAF velocity scroll loop) is
+  gated behind `!kinshoHideBleScroller` — when hidden, nothing in that block
+  runs at all, so this also fully suppresses the M4 auto-connect scan on
+  reader open, not just the icon.
+- **Per-library "show on my home page" switch** — self-service, any user
+  (including admins), one checkbox per library in the Libraries settings
+  section (both the admin's full library-editor cards and the read-only
+  non-admin card view). Stored as `hidden_libraries` (list of library id
+  strings) in the viewer's own `{username}.json`, applied as a filter in
+  `manga_list()` on top of (not instead of) the existing admin-controlled
+  `permissions.json` access filter. Deliberately a **display preference,
+  not an access control** — hiding a tab this way doesn't revoke reachability
+  via search/collections/a direct link, unlike the admin permission toggle
+  in the Accounts section, which actually 404s. `POST
+  /api/settings/library-visibility` — `{library_id, hidden}`.
+- **SSIM-confirmed near-duplicate detection** — `integrity.py`'s duplicate-page
+  check was exact-SHA1-only, which by construction can never have a false
+  positive (identical bytes decode to identical pixels), so a plain SSIM
+  check bolted on top of it would have been a no-op. Instead added a second,
+  independent detection path: a cheap 8×8 average-hash (`_phash`) shortlists
+  pages that aren't byte-identical but look roughly alike (a page re-saved at
+  different quality/size by a different release, or two genuinely different
+  pages that happen to share overall tone/brightness), then a real windowed
+  SSIM score (`_ssim_score` — box-filter implementation via a numpy
+  summed-area table, standing in for the usual Gaussian window so no scipy
+  dependency was needed) confirms or rejects each candidate pair at an
+  **80%** threshold. Only candidates that clear SSIM get grouped; the
+  perceptual-hash pre-filter only decides what's worth the more expensive
+  SSIM check, not what gets flagged. Exact SHA1 matches still short-circuit
+  straight to a duplicate group (their SSIM is trivially 1.0, no point
+  spending the compute). `duplicate_groups` entries changed shape from a
+  plain filename list to `{"filenames": [...], "similarity": float}`;
+  `record_integrity_result` in `main.py` uses `similarity` to phrase the
+  issue detail differently for exact ("N identical pages") vs. near
+  ("N near-duplicate pages (NN% similar)") matches. Added `numpy` as a new
+  hard dependency (`requirements.txt`) — the only non-Pillow image-processing
+  dependency in the project, needed for the box-filter math to be fast
+  enough to run per-chapter in the existing idle-gated background pass.
+- **"Permissions" section renamed to "Accounts"** — label-only rename in
+  `settings.html`'s sidebar nav; the internal `activeSection` key is still
+  the string `'permissions'` (no reason to touch every conditional over a
+  cosmetic rename).
+- **Admin can delete a user or change their role** — `DELETE
+  /api/admin/users/{username}` (removes the account from `users.json`, all
+  of their sessions, their `permissions.json` entry, and their per-user
+  `{username}.json` data file — reading history/favourites/private
+  collections all live there, so deleting the file is what actually removes
+  those) and `POST /api/admin/users/{username}/role` (`{role: "user"|"admin"}`)
+  in `auth.py`, both admin-gated. Guardrails on both: an admin can't act on
+  their **own** account through either endpoint (delete or role-change —
+  avoids self-lockout mid-request), and the last remaining admin account
+  can't be deleted or demoted (avoids a server with zero admins and no way
+  back in). UI lives in the renamed Accounts section: a role `<select>` and
+  a delete button added directly to each user row's header, next to the
+  existing expand-to-edit-permissions chevron.
+
+### 11. Fix deleted/edited pages still showing broken after a Reload scan (2026-07-08)
+
+Reported bug: deleting an image from inside a manga's archive on disk, then
+running a full library Reload scan, still left a black/broken placeholder at
+that page's position. Two independent bugs in `scan_library`/serving,
+compounding each other:
+
+- **case2/case3 rescan was gated on the wrong mtime.** Both branches skipped
+  re-scanning a manga entirely if the *containing folder's* own mtime hadn't
+  changed — but editing an existing archive's contents in place (e.g.
+  deleting one page from inside a `.cbz`) only changes that **archive
+  file's** own mtime, not its parent folder's (a folder's mtime only moves
+  when entries are added/removed/renamed). So that whole class of edit was
+  silently never picked up by any later scan, for as long as the archive's
+  filename stayed the same. Fixed by also checking each archive/volume
+  file's own mtime against what's stored per-chapter/volume before trusting
+  the folder-level "unchanged" skip. case1 (a single archive *is* the whole
+  manga) was already checking the archive's own mtime directly and didn't
+  have this bug.
+- **Stale in-memory caches were never invalidated on rescan.** `_archive_page_cache`,
+  `_archive_image_list_cache`, `_open_archive_handles` (and the PDF/EPUB
+  equivalents) are keyed only by file path with no mtime component, and are
+  process-scoped — nothing ever cleared an entry just because `scan_library`
+  noticed the underlying file changed and rebuilt `dims.json`. A long-lived
+  open archive handle in particular could keep returning pre-edit content
+  indefinitely. Added `_invalidate_stale_source_caches(path)`, called at
+  every point `scan_library` detects and is about to rescan a changed
+  archive/volume (case1, case2, case3) — closes the stale handle and evicts
+  any cached image list/page bytes for that exact path before it's reopened
+  fresh.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
@@ -711,15 +808,80 @@ dedicated slider instead of a touchscreen swipe.
   velocity-driven rAF scroll loop live in `templates/chapter_reader.html`,
   gated to long-strip mode with a 1s silence watchdog against a dropped
   link leaving the page drifting.
-- **Auto-reconnect (M4, this repo)**: on every reader page load,
-  `chapter_reader.html` checks `window.KinshoBLE.isConnected()` first — the
-  native connection is owned by the Android app's `MainActivity`, not the
-  page's JS context, so it already survives the full-page reload each
-  chapter navigation does, and a true result just repaints the status dot
-  with no rescan. Otherwise it silently reconnects if a `localStorage` flag
-  (`kinshoAutoConnectScroller`) is set — set on any successful connection,
-  cleared only by an explicit Disconnect tap (not by an unexpected drop),
-  same mental model as a Bluetooth headphone reconnecting once paired. The
-  matching Java-side scan timeout (10s, was previously unbounded) that
-  makes a silent background auto-connect attempt safe lives in the Android
-  repo's `KinshoBleBridge.java`.
+- **Auto-reconnect (M4, this repo) — implemented, NOT YET CONFIRMED WORKING
+  (2026-07-08)**: on every reader page load, `chapter_reader.html` checks
+  `window.KinshoBLE.isConnected()` first — the native connection is owned by
+  the Android app's `MainActivity`, not the page's JS context, so it already
+  survives the full-page reload each chapter navigation does, and a true
+  result just repaints the status dot with no rescan. Otherwise it silently
+  reconnects if a `localStorage` flag (`kinshoAutoConnectScroller`) is set —
+  set on any successful connection, cleared only by an explicit Disconnect
+  tap (not by an unexpected drop), same mental model as a Bluetooth
+  headphone reconnecting once paired. The matching Java-side scan timeout
+  (10s, was previously unbounded) that makes a silent background
+  auto-connect attempt safe lives in the Android repo's `KinshoBleBridge.java`.
+  **Confirmed broken in real testing after a full redeploy of both sides** —
+  neither at a cold app start nor switching manga without closing the app.
+  The logic reads correctly on paper; `console.log('[KinshoBLE debug] ...')`
+  traces (marked `TEMP DIAGNOSTIC`, readable via `chrome://inspect`) were
+  added around the `isConnected()`/`localStorage` decision point and every
+  state transition to find the actual point of failure instead of guessing
+  again. Matching `Log.d` traces live on the Android side — see the
+  Android repo's `CLAUDE.md`.
+- **Connection priority fix (2026-07-08, kinsho-android repo)**: Android
+  defaults a fresh GATT connection to `CONNECTION_PRIORITY_BALANCED`, which
+  negotiates its own connection interval regardless of what the peripheral
+  requests — this is almost certainly why the KINSHO rate stream was
+  observed arriving at ~100ms instead of the firmware's intended 50ms (20Hz)
+  during M1 testing. `KinshoBleBridge.java`'s `onConnectionStateChange` now
+  calls `gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)`
+  right when the link comes up, before service discovery. Needs an app
+  rebuild + reinstall to take effect; there's no equivalent knob on the
+  firmware side (the peripheral already requests the fastest interval it
+  can via `setConnInterval`, but the *central* — the phone — has final say).
+- **Low-speed stutter fix (2026-07-08, this repo)**: `chapter_reader.html`'s
+  scroll loop used to accumulate fractional pixels and only write whole-pixel
+  jumps to `reader.scrollTop` — at low `kinshoRate` values this could take
+  ~2 seconds to accumulate a single displayable pixel, reading as the page
+  repeatedly stopping and lurching forward instead of gliding. It now tracks
+  a continuous float (`kinshoScrollPos`) and assigns it to `scrollTop`
+  directly every frame, re-syncing from the DOM's actual position whenever
+  scrolling resumes after an idle spell (dead zone, mode switch) so it never
+  drifts from wherever touch-scrolling or the conveyor-belt recenter logic
+  left the page.
+
+### Tuning the scroller's feel
+
+Three separate places to adjust, depending on what feels wrong. None of
+these require touching the GATT plumbing above — they only shape the signal
+that flows through it.
+
+**Firmware (`arduino/scroller_hd/scroller_hd.ino`) — reflash the device to
+take effect:**
+
+| Constant | Default | Controls | Raise it if... | Lower it if... |
+|---|---|---|---|---|
+| `DEADZONE_LOW_V` / `DEADZONE_HIGH_V` | 1.3 / 1.7 | Voltage band around center where the slider commands zero scroll | the resting slider still drifts | the dead zone feels too wide/insensitive near center |
+| `VOLTAGE_SMOOTHING` | 0.6 | EMA factor on the raw ADC reading (0 disables) | speed still flutters when the slider is held still | movement feels laggy/delayed (this is ~25ms of lag at 0.6, 100Hz sampling) |
+| `VOLTAGE_HOLD_DEADBAND_V` | 0.05 | Band the *held* voltage ignores before updating — keeps a steady slider at an exactly constant rate | speed still wobbles with residual ADC noise while held | deliberate slow slider movement feels sticky/steppy |
+| `CRUISE_MAX_UNITS_PER_SEC` | 5.0 | Top scroll speed in the gentle "cruise" zone (dead-zone edge to boost zone) | normal reading-pace scrolling feels too slow even near full displacement | cruise-zone scrolling feels too fast for casual reading |
+| `BOOST_MAX_UNITS_PER_SEC` | 25.0 | Top scroll speed in the "boost" zone at the physical ends (fast repositioning) | boost doesn't feel fast enough for jumping across a chapter | boost overshoots / flies past where you meant to stop |
+| `BOOST_ZONE_V` | 0.5 | How many volts before each physical end count as "boost" rather than "cruise" | you want boost to kick in earlier (a bigger chunk of travel) | boost kicks in too early, cruise zone feels too short |
+| `DISPLACEMENT_CURVE` | 3.0 | Cruise-zone response curve (`>1.0` = gentle near dead zone, ramps up toward the boost zone) | fine control near the dead zone feels twitchy | the cruise zone feels unresponsive/flat until pushed far |
+| `BOOST_CURVE` | 2.0 | Boost-zone response curve, same idea as above but for the boost segment | boost ramps up too abruptly right at the zone's start | boost doesn't ramp up quickly enough near the physical end |
+| `KINSHO_RATE_NOTIFY_INTERVAL_MS` | 50 (20Hz) | How often the Android GATT stream sends a rate update (independent of the HID path's adaptive interval) | — (this is already the ceiling; the Android connection-priority fix above is what actually determines whether updates arrive this often) | notifications feel like they're arriving faster than needed (unlikely to matter — bandwidth here is trivial) |
+
+**Reader JS (`templates/chapter_reader.html`) — just reload the page to take
+effect, no rebuild:**
+
+| Constant | Default | Controls |
+|---|---|---|
+| `KINSHO_PX_PER_NOTCH` | 100 | Overall scroll sensitivity — pixels of on-screen movement per firmware "notch". Raise for faster scrolling at the same slider position, lower for slower. |
+| `KINSHO_UNITS_PER_NOTCH` | 120 | Must match `RESOLUTION_MULTIPLIER` in the firmware — only change this if that constant changes too. |
+
+**Android (`kinsho-android` repo, `KinshoBleBridge.java`) — rebuild + reinstall
+to take effect:**
+
+The connection-priority fix above is the one Android-side knob that affects
+feel; there's no adjustable constant there, just the fixed
+`CONNECTION_PRIORITY_HIGH` request.
