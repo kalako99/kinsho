@@ -687,6 +687,40 @@ def _cached_epub_page(epub_path: str, entry_name: str) -> bytes | None:
         print(f"[EPUB] Failed to read {entry_name} from {epub_path}: {e}")
         return None
 
+def _invalidate_stale_source_caches(path: str):
+    """
+    Drop any cached open handle / image list / page bytes for this exact
+    source path (archive, PDF, or EPUB). Needed whenever scan_library detects
+    the underlying file's content actually changed (a page deleted/replaced
+    on disk) — without this, a long-lived open handle and the per-path
+    in-memory caches above keep serving whatever was read before the edit
+    indefinitely (they're process-scoped, only cleared by a server restart),
+    even after dims.json is correctly rebuilt with the new page count. This
+    is what caused deleted pages to keep showing as broken/black even after
+    a full Reload scan picked up the change on disk.
+    """
+    handle = _open_archive_handles.pop(path, None)
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+    _archive_image_list_cache.pop(path, None)
+    for key in [k for k in _archive_page_cache if k[0] == path]:
+        _archive_page_cache.pop(key, None)
+
+    pdf_handle = _open_pdf_handles.pop(path, None)
+    if pdf_handle is not None:
+        try:
+            pdf_handle.close()
+        except Exception:
+            pass
+    for key in [k for k in _pdf_page_cache if k[0] == path]:
+        _pdf_page_cache.pop(key, None)
+
+    for key in [k for k in _epub_page_cache if k[0] == path]:
+        _epub_page_cache.pop(key, None)
+
 THUMB_WIDTH = 100
 
 def _make_thumb_bytes(img_bytes: bytes) -> Optional[bytes]:
@@ -1685,6 +1719,7 @@ def scan_library(library: dict) -> tuple:
                     continue
 
                 print(f"[ScanLib] Scanning case1: {manga_name}")
+                _invalidate_stale_source_caches(arc_path)
                 stored_cover_mtimes = existing.get("cover_mtimes", {})
                 new_cover_mtimes    = dict(stored_cover_mtimes)
                 default_cover       = None
@@ -1833,7 +1868,26 @@ def scan_library(library: dict) -> tuple:
                     current_folder_mtime = os.path.getmtime(manga_path)
                     stored_cover_mtimes = existing.get("cover_mtimes", {})
 
-                    if stored_folder_mtime is not None and current_folder_mtime == stored_folder_mtime:
+                    folder_unchanged = stored_folder_mtime is not None and current_folder_mtime == stored_folder_mtime
+                    # A folder's own mtime only moves when entries are added,
+                    # removed, or renamed — editing an existing archive's
+                    # contents in place (e.g. deleting one page from inside a
+                    # .cbz) leaves the containing folder's mtime untouched,
+                    # only the archive file's own mtime changes. Relying on
+                    # the folder check alone meant that kind of edit was
+                    # never picked up by ANY later scan. Also check each
+                    # archive's own mtime against what's stored per-chapter.
+                    any_archive_changed = False
+                    if folder_unchanged:
+                        existing_dims_peek = load_manga_dims(library_id, manga_name)
+                        any_archive_changed = any(
+                            existing_dims_peek.get("chapters", {}).get(
+                                make_id(manga_name + ":" + os.path.splitext(af)[0]), {}
+                            ).get("mtime") != os.path.getmtime(ap)
+                            for af, ap, _ in case3_files
+                        )
+
+                    if folder_unchanged and not any_archive_changed:
                         print(f"[ScanLib] Skipping unchanged case3: {manga_name}")
                         if existing.get("path") and existing["path"] != manga_path:
                             relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
@@ -1867,6 +1921,7 @@ def scan_library(library: dict) -> tuple:
                                 continue
 
                             print(f"[ScanLib] Scanning case3 chapter: {chapter_name}")
+                            _invalidate_stale_source_caches(arc_path)
                             arc = open_archive(arc_path)
                             if arc is None:
                                 continue
@@ -1897,7 +1952,24 @@ def scan_library(library: dict) -> tuple:
                     current_folder_mtime = os.path.getmtime(manga_path)
                     stored_cover_mtimes  = existing.get("cover_mtimes", {})
 
-                    if stored_folder_mtime is not None and current_folder_mtime == stored_folder_mtime:
+                    folder_unchanged = stored_folder_mtime is not None and current_folder_mtime == stored_folder_mtime
+                    # See the matching comment in the case3 branch above: a
+                    # folder's own mtime doesn't move when an existing
+                    # volume's contents are edited in place, only that
+                    # file's own mtime does — so also check each volume file
+                    # against what's stored, or that edit would never be
+                    # noticed.
+                    any_volume_changed = False
+                    if folder_unchanged:
+                        existing_dims_peek = load_manga_dims(library_id, manga_name)
+                        any_volume_changed = any(
+                            existing_dims_peek.get("volumes", {}).get(
+                                make_id(manga_name + ":vol:" + os.path.splitext(vf)[0]), {}
+                            ).get("mtime") != os.path.getmtime(vp)
+                            for vf, vp, _ in case2_files
+                        )
+
+                    if folder_unchanged and not any_volume_changed:
                         print(f"[ScanLib] Skipping unchanged case2: {manga_name}")
                         if existing.get("path") and existing["path"] != manga_path:
                             relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
@@ -1934,6 +2006,7 @@ def scan_library(library: dict) -> tuple:
                                 continue
 
                             print(f"[ScanLib] Scanning case2 volume: {vol_name}")
+                            _invalidate_stale_source_caches(vol_path)
 
                             # Initialise so we always have valid values reaching the dims write
                             pages       = []
