@@ -15,18 +15,143 @@ import hashlib
 import os
 from collections import defaultdict
 
+import numpy as np
 from PIL import Image
 import io
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
 
+# A perceptual-hash Hamming distance this loose lets two pages that AREN'T
+# byte-identical through to the (expensive) SSIM pass as candidates — this
+# threshold only decides what's worth double-checking, not what gets flagged.
+PHASH_CANDIDATE_DISTANCE = 10   # out of 64 bits
+# The real filter: two candidate pages are only flagged as duplicates once
+# their SSIM score clears this. Exact byte/hash matches skip straight past
+# this (their SSIM is trivially 1.0 — no point spending the compute).
+SSIM_DUPLICATE_THRESHOLD = 0.80
+SSIM_COMPARE_SIZE = 256   # both images resized to this before scoring — bounds
+                          # compute cost regardless of source resolution and
+                          # lets differently-sized re-releases of the same
+                          # page still compare cleanly.
+SSIM_WINDOW = 7           # matches the common default for 8-bit images.
 
-def _find_duplicate_groups(hashes: dict) -> list:
-    """hashes: {filename: hex_digest}. Returns [[filename, filename, ...], ...] for each hash shared by 2+ files."""
+
+def _phash(data: bytes) -> int:
+    """8x8 average hash — cheap way to shortlist near-duplicate candidates."""
+    img = Image.open(io.BytesIO(data)).convert('L').resize((8, 8), Image.LANCZOS)
+    pixels = list(img.getdata())
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for p in pixels:
+        bits = (bits << 1) | (1 if p >= avg else 0)
+    return bits
+
+
+def _hamming(a: int, b: int) -> int:
+    return bin(a ^ b).count('1')
+
+
+def _box_filter(arr: np.ndarray, win: int) -> np.ndarray:
+    """Mean over a win x win window, same-size output — a summed-area-table
+    box filter standing in for SSIM's usual Gaussian window (no scipy
+    dependency needed for this)."""
+    pad = win // 2
+    padded = np.pad(arr, pad, mode='edge')
+    sat = np.cumsum(np.cumsum(padded, axis=0), axis=1)
+    sat = np.pad(sat, ((1, 0), (1, 0)), mode='constant')
+    h, w = arr.shape
+    total = (sat[win:win + h, win:win + w] - sat[:h, win:win + w]
+             - sat[win:win + h, :w] + sat[:h, :w])
+    return total / (win * win)
+
+
+def _ssim_score(data_a: bytes, data_b: bytes) -> float:
+    """Windowed SSIM between two images, decoded, grayscaled, and resized to
+    a common size first so source resolution/aspect differences don't block
+    the comparison."""
+    img_a = Image.open(io.BytesIO(data_a)).convert('L').resize(
+        (SSIM_COMPARE_SIZE, SSIM_COMPARE_SIZE), Image.LANCZOS)
+    img_b = Image.open(io.BytesIO(data_b)).convert('L').resize(
+        (SSIM_COMPARE_SIZE, SSIM_COMPARE_SIZE), Image.LANCZOS)
+    x = np.asarray(img_a, dtype=np.float64)
+    y = np.asarray(img_b, dtype=np.float64)
+
+    C1 = (0.01 * 255) ** 2
+    C2 = (0.03 * 255) ** 2
+
+    mu_x = _box_filter(x, SSIM_WINDOW)
+    mu_y = _box_filter(y, SSIM_WINDOW)
+    mu_x2, mu_y2, mu_xy = mu_x * mu_x, mu_y * mu_y, mu_x * mu_y
+
+    sigma_x2 = _box_filter(x * x, SSIM_WINDOW) - mu_x2
+    sigma_y2 = _box_filter(y * y, SSIM_WINDOW) - mu_y2
+    sigma_xy = _box_filter(x * y, SSIM_WINDOW) - mu_xy
+
+    ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / \
+               ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2))
+    return float(ssim_map.mean())
+
+
+def _find_duplicate_groups(hashes: dict, raw_data: dict) -> list:
+    """
+    hashes: {filename: sha1_hex}. raw_data: {filename: bytes}, same keys.
+
+    Two stages:
+    - Exact SHA1 match = automatic duplicate group (identical bytes, so any
+      similarity score on them is guaranteed to be 1.0 — no need to spend
+      the SSIM compute confirming the obvious).
+    - Everything else is only a *candidate*: a cheap perceptual hash first
+      shortlists pages that look roughly alike (catches a page re-saved at
+      different quality/size by a different release), then an actual SSIM
+      score confirms or rejects each candidate pair. This is what stops two
+      genuinely different pages that just happen to share overall tone or
+      layout from getting flagged as duplicates.
+
+    Returns [{"filenames": [...], "similarity": float}, ...] — similarity is
+    always 1.0 for exact groups, the measured SSIM score for near ones.
+    """
     by_hash = defaultdict(list)
     for name, h in hashes.items():
         by_hash[h].append(name)
-    return [sorted(names) for names in by_hash.values() if len(names) > 1]
+    exact_groups = [
+        {"filenames": sorted(names), "similarity": 1.0}
+        for names in by_hash.values() if len(names) > 1
+    ]
+    already_grouped = {name for g in exact_groups for name in g["filenames"]}
+
+    remaining = [n for n in raw_data if n not in already_grouped]
+    phashes = {}
+    for name in remaining:
+        try:
+            phashes[name] = _phash(raw_data[name])
+        except Exception:
+            continue   # not decodable as an image — corruption is caught elsewhere
+
+    near_groups = []
+    seen = set()
+    names_list = sorted(phashes.keys())
+    for i, name_a in enumerate(names_list):
+        if name_a in seen:
+            continue
+        group = [name_a]
+        best_score = None
+        for name_b in names_list[i + 1:]:
+            if name_b in seen:
+                continue
+            if _hamming(phashes[name_a], phashes[name_b]) > PHASH_CANDIDATE_DISTANCE:
+                continue
+            try:
+                score = _ssim_score(raw_data[name_a], raw_data[name_b])
+            except Exception:
+                continue
+            if score >= SSIM_DUPLICATE_THRESHOLD:
+                group.append(name_b)
+                best_score = score if best_score is None else min(best_score, score)
+        if len(group) > 1:
+            near_groups.append({"filenames": sorted(group), "similarity": best_score})
+            seen.update(group)
+
+    return exact_groups + near_groups
 
 
 def check_archive(source_path: str, open_archive_fn, read_entry_fn, prefix: str = "") -> dict:
@@ -44,7 +169,7 @@ def check_archive(source_path: str, open_archive_fn, read_entry_fn, prefix: str 
     avoid), and the identical whole-archive finding is reported once per
     chapter. Empty prefix = whole archive (case2 volumes / case3 chapters).
 
-    Returns {"corrupt": str|None, "duplicate_groups": [[...], ...]}.
+    Returns {"corrupt": str|None, "duplicate_groups": [{"filenames": [...], "similarity": float}, ...]}.
     """
     arc = open_archive_fn(source_path)
     if arc is None:
@@ -57,17 +182,19 @@ def check_archive(source_path: str, open_archive_fn, read_entry_fn, prefix: str 
         except Exception as e:
             return {"corrupt": f"Failed to list archive contents: {e}", "duplicate_groups": []}
         hashes = {}
+        raw_data = {}
         for name in names:
             data = read_entry_fn(arc, name)
             if data is None:
                 return {"corrupt": f"Failed to read page: {os.path.basename(name)}", "duplicate_groups": []}
             hashes[name] = hashlib.sha1(data).hexdigest()
+            raw_data[name] = data
     finally:
         try:
             arc.close()
         except Exception:
             pass
-    return {"corrupt": None, "duplicate_groups": _find_duplicate_groups(hashes)}
+    return {"corrupt": None, "duplicate_groups": _find_duplicate_groups(hashes, raw_data)}
 
 
 def check_loose(source_path: str) -> dict:
@@ -85,6 +212,7 @@ def check_loose(source_path: str) -> dict:
         return {"corrupt": f"Failed to list folder contents: {e}", "duplicate_groups": []}
 
     hashes = {}
+    raw_data = {}
     for name in filenames:
         full_path = os.path.join(source_path, name)
         try:
@@ -94,7 +222,8 @@ def check_loose(source_path: str) -> dict:
         except Exception as e:
             return {"corrupt": f"Failed to read/decode page: {name} ({e})", "duplicate_groups": []}
         hashes[name] = hashlib.sha1(data).hexdigest()
-    return {"corrupt": None, "duplicate_groups": _find_duplicate_groups(hashes)}
+        raw_data[name] = data
+    return {"corrupt": None, "duplicate_groups": _find_duplicate_groups(hashes, raw_data)}
 
 
 def check_item(item: dict, open_archive_fn, read_entry_fn) -> dict:

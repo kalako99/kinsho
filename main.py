@@ -462,13 +462,19 @@ def record_integrity_result(
             "detected_at": now,
         })
     for group in result.get("duplicate_groups", []):
+        filenames = group["filenames"]
+        similarity = group.get("similarity", 1.0)
+        if similarity >= 1.0:
+            detail = f"{len(filenames)} identical pages: {', '.join(filenames)}"
+        else:
+            detail = f"{len(filenames)} near-duplicate pages ({similarity:.0%} similar): {', '.join(filenames)}"
         issues_data["issues"].append({
             "id": uuid.uuid4().hex,
             "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
             "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
             "type": "duplicate_pages",
-            "detail": f"{len(group)} identical pages: {', '.join(group)}",
-            "filenames": group, "detected_at": now,
+            "detail": detail,
+            "filenames": filenames, "detected_at": now,
         })
     save_integrity_issues(issues_data)
 
