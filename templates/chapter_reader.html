@@ -3482,21 +3482,11 @@
     // turned this off in Settings — most viewers of a shared server don't
     // own the Scroller-HD hardware.
     const kinshoHideBleScroller = adminData.hide_ble_scroller !== false;
-    // TEMP DIAGNOSTIC (2026-07-08): the M4 auto-reconnect isn't firing for
-    // the user in practice (neither at cold app start nor when switching
-    // manga without closing the app), and static review hasn't found the
-    // bug. These traces are meant to be read via chrome://inspect on the
-    // physical device to see exactly which branch runs and with what
-    // values, rather than guessing again. Safe to remove once the actual
-    // cause is found.
-    console.log('[KinshoBLE debug] window.KinshoBLE present:', !!window.KinshoBLE,
-                ', hide_ble_scroller:', adminData.hide_ble_scroller, ', kinshoHideBleScroller:', kinshoHideBleScroller);
 
     if (window.KinshoBLE && !kinshoHideBleScroller) {
       scrollerBtn.style.display = '';
 
       window.__kinshoBleOnState = (state) => {
-        console.log('[KinshoBLE debug] state ->', state, '@', performance.now());
         if (state === 'scanning') {
           scrollerSetStatus('scanning', 'Scanning…');
           scrollerConnectBtn.style.display = 'none';
@@ -3553,19 +3543,12 @@
       // connected before and hasn't explicitly disconnected since; the
       // popup stays closed throughout, so this only ever moves the small
       // status dot, never pops anything open uninvited.
-      const kinshoAlreadyConnected = window.KinshoBLE.isConnected();
-      const kinshoAutoConnectFlag  = localStorage.getItem(KINSHO_AUTOCONNECT_KEY);
-      console.log('[KinshoBLE debug] on load: isConnected() =', kinshoAlreadyConnected,
-                  ', autoConnect flag =', kinshoAutoConnectFlag);
-      if (kinshoAlreadyConnected) {
+      if (window.KinshoBLE.isConnected()) {
         scrollerSetStatus('connected', 'Connected');
         scrollerConnectBtn.style.display = 'none';
         scrollerDisconnectBtn.style.display = '';
-      } else if (kinshoAutoConnectFlag === '1') {
-        console.log('[KinshoBLE debug] calling window.KinshoBLE.connect() for auto-reconnect');
+      } else if (localStorage.getItem(KINSHO_AUTOCONNECT_KEY) === '1') {
         window.KinshoBLE.connect();
-      } else {
-        console.log('[KinshoBLE debug] no auto-reconnect: not connected and no stored flag');
       }
 
       // Velocity-driven scroll loop: converts the latest rate into a
@@ -3574,6 +3557,18 @@
       // system already listens for (syncScrollPosition/recenterConveyor) —
       // no separate integration path needed; this reads to the rest of the
       // reader exactly like a user physically scrolling.
+      // Smoothed velocity actually used for scrolling — BLE notifications
+      // arrive in discrete ~50ms steps, sometimes irregularly (Android's
+      // main thread can be busy decoding/laying out scrolled-in images
+      // right when a notification needs marshaling onto it), so jumping
+      // straight to each newly received rate reads as choppy, especially
+      // noticeable while decelerating. Exponentially converging toward it
+      // instead absorbs that irregularity into a continuous frame-to-frame
+      // change. See CLAUDE.md's scroller tuning table for what to adjust
+      // if this still isn't smooth enough, or feels laggy.
+      let kinshoDisplayRate = 0;
+      const KINSHO_SMOOTHING_TIME_CONSTANT = 0.12; // seconds
+
       let kinshoLastFrameTime = performance.now();
       function kinshoScrollLoop(now) {
         const dt = Math.min((now - kinshoLastFrameTime) / 1000, 0.1); // clamp for tab-switch/stalls
@@ -3585,14 +3580,23 @@
           kinshoRate = 0;
         }
 
-        if (kinshoRate !== 0 && readerSettings.mode === 'long-strip') {
+        // Frame-rate-independent exponential smoothing (uses dt directly,
+        // not a fixed per-frame factor) so this behaves the same regardless
+        // of the device's actual refresh rate. Also gives a real BLE
+        // disconnect (kinshoRate forced to 0 above) a smooth decel to a
+        // stop instead of an abrupt freeze.
+        const smoothing = 1 - Math.exp(-dt / KINSHO_SMOOTHING_TIME_CONSTANT);
+        kinshoDisplayRate += (kinshoRate - kinshoDisplayRate) * smoothing;
+        if (Math.abs(kinshoDisplayRate) < 0.05) kinshoDisplayRate = 0; // fully settle instead of decaying forever
+
+        if (kinshoDisplayRate !== 0 && readerSettings.mode === 'long-strip') {
           // Re-sync from the DOM's actual position whenever resuming after
           // an idle spell (dead zone, mode switch, or the very first frame)
           // so this never drifts from wherever the page actually is —
           // touch scrolling or the conveyor-belt recenter logic can move
           // reader.scrollTop while kinsho isn't driving it.
           if (kinshoScrollPos === null) kinshoScrollPos = reader.scrollTop;
-          const pxPerSec = (kinshoRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
+          const pxPerSec = (kinshoDisplayRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
           kinshoScrollPos += pxPerSec * dt;
           // A fractional assignment here (not whole-pixel accumulation) is
           // what makes slow scrolling glide instead of stutter — at low

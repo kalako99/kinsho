@@ -840,8 +840,8 @@ dedicated slider instead of a touchscreen swipe.
   velocity-driven rAF scroll loop live in `templates/chapter_reader.html`,
   gated to long-strip mode with a 1s silence watchdog against a dropped
   link leaving the page drifting.
-- **Auto-reconnect (M4, this repo) — implemented, NOT YET CONFIRMED WORKING
-  (2026-07-08)**: on every reader page load, `chapter_reader.html` checks
+- **Auto-reconnect (M4, this repo) — CONFIRMED WORKING (2026-07-08)**: on
+  every reader page load, `chapter_reader.html` checks
   `window.KinshoBLE.isConnected()` first — the native connection is owned by
   the Android app's `MainActivity`, not the page's JS context, so it already
   survives the full-page reload each chapter navigation does, and a true
@@ -852,14 +852,18 @@ dedicated slider instead of a touchscreen swipe.
   headphone reconnecting once paired. The matching Java-side scan timeout
   (10s, was previously unbounded) that makes a silent background
   auto-connect attempt safe lives in the Android repo's `KinshoBleBridge.java`.
-  **Confirmed broken in real testing after a full redeploy of both sides** —
-  neither at a cold app start nor switching manga without closing the app.
-  The logic reads correctly on paper; `console.log('[KinshoBLE debug] ...')`
-  traces (marked `TEMP DIAGNOSTIC`, readable via `chrome://inspect`) were
-  added around the `isConnected()`/`localStorage` decision point and every
-  state transition to find the actual point of failure instead of guessing
-  again. Matching `Log.d` traces live on the Android side — see the
-  Android repo's `CLAUDE.md`.
+  An earlier real-device test found this completely broken even after a full
+  redeploy of both sides; temporary `console.log`/`Log.d` traces (since
+  removed) confirmed the JS/Java logic itself was correct end to end — flag
+  set correctly on connect, `isConnected()` read correctly on the next page,
+  `connect()` invoked correctly when appropriate. The most likely explanation
+  for that earlier failure was a stale WebView-cached copy of
+  `chapter_reader.html` from before this logic existed (same class of issue
+  as the `/static` caching bug documented above, just for a server-served
+  page instead of a static asset) — a subsequent full APK reinstall is what
+  actually resolved it. Verified live end to end: connects manually, survives
+  navigating to a different manga's reader without disconnecting, and stays
+  connected across the whole session as designed.
 - **Connection priority fix (2026-07-08, kinsho-android repo)**: Android
   defaults a fresh GATT connection to `CONNECTION_PRIORITY_BALANCED`, which
   negotiates its own connection interval regardless of what the peripheral
@@ -910,6 +914,7 @@ effect, no rebuild:**
 |---|---|---|
 | `KINSHO_PX_PER_NOTCH` | 100 | Overall scroll sensitivity — pixels of on-screen movement per firmware "notch". Raise for faster scrolling at the same slider position, lower for slower. |
 | `KINSHO_UNITS_PER_NOTCH` | 120 | Must match `RESOLUTION_MULTIPLIER` in the firmware — only change this if that constant changes too. |
+| `KINSHO_SMOOTHING_TIME_CONSTANT` | 0.12 (seconds) | How quickly the rendered scroll speed catches up to each newly received rate — added 2026-07-08 because BLE notifications don't always arrive on a perfectly even ~50ms beat (Android's main thread can be busy laying out scrolled-in images right when one needs delivering), and jumping straight to each new value on arrival read as choppy, especially while decelerating. Raise if scrolling still feels stuttery/jittery; lower (feels snappier, but more exposed to any remaining delivery irregularity) if slider movement feels laggy to respond to. |
 
 **Android (`kinsho-android` repo, `KinshoBleBridge.java`) — rebuild + reinstall
 to take effect:**
