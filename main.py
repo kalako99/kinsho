@@ -2432,6 +2432,8 @@ def get_settings(request: Request):
         "favourites":               user_data.get("favourites", []),
         "backdrop_list":            user_data.get("backdrop_list",   True),
         "backdrop_detail":          user_data.get("backdrop_detail", True),
+        "hide_ble_scroller":        user_data.get("hide_ble_scroller", True),
+        "hidden_libraries":         user_data.get("hidden_libraries", []),
         "show_collections_row":     user_data.get("show_collections_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
     })
@@ -2602,6 +2604,38 @@ async def save_backdrop(request: Request):
         user_data["backdrop_list"]   = bool(body["backdrop_list"])
     if "backdrop_detail" in body:
         user_data["backdrop_detail"] = bool(body["backdrop_detail"])
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/ble-scroller")
+async def save_ble_scroller_pref(request: Request):
+    username  = auth.get_current_user(request)
+    body      = await request.json()
+    user_data = auth.load_user_data(username)
+    if "hide_ble_scroller" in body:
+        user_data["hide_ble_scroller"] = bool(body["hide_ble_scroller"])
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/library-visibility")
+async def save_library_visibility(request: Request):
+    """Per-user, self-service tab-visibility preference — separate from the
+    admin-only access permission in permissions.json. Hiding a library here
+    only removes its tab from this user's own home page; it doesn't revoke
+    access (they can still reach it via search/collections/a direct link)."""
+    username   = auth.get_current_user(request)
+    body       = await request.json()
+    library_id = str(body.get("library_id", ""))
+    hidden     = bool(body.get("hidden"))
+    if not library_id:
+        return JSONResponse({"ok": False, "error": "Missing library_id"}, status_code=400)
+    user_data = auth.load_user_data(username)
+    hidden_libraries = set(str(x) for x in user_data.get("hidden_libraries", []))
+    if hidden:
+        hidden_libraries.add(library_id)
+    else:
+        hidden_libraries.discard(library_id)
+    user_data["hidden_libraries"] = sorted(hidden_libraries)
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
@@ -4349,6 +4383,9 @@ def manga_list(request: Request):
     if not perms.get("is_admin"):
         lib_perms = perms.get("libraries", {})
         libraries = [l for l in libraries if lib_perms.get(str(l["id"]), True) is not False]
+    hidden_libraries = set(str(x) for x in auth.load_user_data(username).get("hidden_libraries", []))
+    if hidden_libraries:
+        libraries = [l for l in libraries if str(l["id"]) not in hidden_libraries]
     return templates.TemplateResponse(request, "manga_list.html", {
         "libraries": libraries,
         "last_tab":  admin.get("last_tab", None),
@@ -5027,6 +5064,14 @@ async def api_set_user_permissions(request: Request, username: str):
 @app.post("/api/admin/users")
 async def api_create_user(request: Request):
     return await auth.route_admin_create_user(request)
+
+@app.delete("/api/admin/users/{username}")
+async def api_delete_user(request: Request, username: str):
+    return await auth.route_admin_delete_user(request, username)
+
+@app.post("/api/admin/users/{username}/role")
+async def api_set_user_role(request: Request, username: str):
+    return await auth.route_admin_set_role(request, username)
 
 # ── READING SESSION ROUTES ────────────────────────────────────────────────────
 

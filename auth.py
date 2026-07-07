@@ -514,6 +514,69 @@ async def route_admin_create_user(request: Request):
     return JSONResponse({"ok": True, "username": username, "role": role})
 
 
+async def route_admin_delete_user(request: Request, username: str):
+    """DELETE /api/admin/users/{username} — permanently removes the account,
+    its sessions, its permissions entry, and its per-user data file (reading
+    history, favourites, private collections, etc.)."""
+    err = require_admin(request)
+    if err:
+        return err
+    current_admin = get_current_user(request)
+    if username == current_admin:
+        return JSONResponse({"ok": False, "error": "You can't delete your own account."}, status_code=400)
+    data = _load_users()
+    user = next((u for u in data["users"] if u["username"] == username), None)
+    if not user:
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
+    if user.get("role") == "admin":
+        remaining_admins = [u for u in data["users"] if u.get("role") == "admin" and u["username"] != username]
+        if not remaining_admins:
+            return JSONResponse({"ok": False, "error": "Can't delete the last admin account."}, status_code=400)
+
+    data["users"] = [u for u in data["users"] if u["username"] != username]
+    _save_users(data)
+    _delete_sessions_for_user(username)
+    perms_data = load_permissions()
+    perms_data.pop(username, None)
+    save_permissions(perms_data)
+    user_file = _user_data_file(username)
+    if user_file and os.path.exists(user_file):
+        try:
+            os.remove(user_file)
+        except Exception:
+            pass
+    return JSONResponse({"ok": True})
+
+
+async def route_admin_set_role(request: Request, username: str):
+    """POST /api/admin/users/{username}/role — { role: "user"|"admin" }"""
+    err = require_admin(request)
+    if err:
+        return err
+    current_admin = get_current_user(request)
+    if username == current_admin:
+        return JSONResponse({"ok": False, "error": "You can't change your own role."}, status_code=400)
+    body = await request.json()
+    role = body.get("role")
+    if role not in ("user", "admin"):
+        return JSONResponse({"ok": False, "error": "Invalid role."}, status_code=400)
+    data = _load_users()
+    user = next((u for u in data["users"] if u["username"] == username), None)
+    if not user:
+        return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
+    if user.get("role") == "admin" and role != "admin":
+        remaining_admins = [u for u in data["users"] if u.get("role") == "admin" and u["username"] != username]
+        if not remaining_admins:
+            return JSONResponse({"ok": False, "error": "Can't demote the last admin account."}, status_code=400)
+
+    user["role"] = role
+    _save_users(data)
+    user_data = load_user_data(username)
+    user_data["is_admin"] = (role == "admin")
+    save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+
 async def route_claim_session(request: Request):
     """
     GET /auth/claim?token=...&next=/ — turn an already-issued session token

@@ -27,6 +27,8 @@ createApp({
       scanStatus: {},
       metaScanStatus: {},
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
+      hiddenLibraries: [],
+      libraryVisibilityStatus: { msg: '', type: '' },
 
       // ── USERNAME ──
       username:           '',
@@ -39,6 +41,10 @@ createApp({
       backdropList:   true,
       backdropDetail: true,
       backdropStatus: { msg: '', type: '' },
+
+      // ── BLE SCROLLER ──
+      hideBleScroller:   true,
+      bleScrollerStatus: { msg: '', type: '' },
 
       // ── COLLECTIONS PREFERENCES ──
       showCollectionsRow:     true,
@@ -311,6 +317,8 @@ createApp({
         }
         this.backdropList           = data.backdrop_list            !== false;
         this.backdropDetail         = data.backdrop_detail          !== false;
+        this.hideBleScroller        = data.hide_ble_scroller         !== false;
+        this.hiddenLibraries        = (data.hidden_libraries || []).map(String);
         this.showCollectionsRow     = data.show_collections_row     !== false;
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
@@ -533,6 +541,48 @@ createApp({
         this.backdropStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.backdropStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    async saveBleScrollerPref() {
+      try {
+        const res  = await fetch(apiUrl('/api/settings/ble-scroller'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ hide_ble_scroller: this.hideBleScroller }),
+        });
+        const data = await res.json();
+        this.bleScrollerStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.bleScrollerStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.bleScrollerStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    isLibraryHidden(lib) {
+      return this.hiddenLibraries.includes(String(lib.id));
+    },
+
+    async toggleLibraryVisibility(lib) {
+      const key    = String(lib.id);
+      const hidden = !this.hiddenLibraries.includes(key);
+      if (hidden) this.hiddenLibraries.push(key);
+      else this.hiddenLibraries = this.hiddenLibraries.filter(id => id !== key);
+      try {
+        const res  = await fetch(apiUrl('/api/settings/library-visibility'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ library_id: lib.id, hidden }),
+        });
+        const data = await res.json();
+        this.libraryVisibilityStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.libraryVisibilityStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.libraryVisibilityStatus = { msg: '', type: '' }; }, 2000);
     },
 
     async saveCollectionsPrefs() {
@@ -1115,6 +1165,46 @@ createApp({
       } catch (e) {
         this.allTagsList = [];
       }
+    },
+
+    // ── CHANGE A USER'S ROLE (promote/demote admin) ──
+    async changeUserRole(username, role) {
+      if (!confirm(`Change ${username}'s role to ${role}?`)) {
+        await this.loadUserPermissions();   // resets the <select>'s displayed value
+        return;
+      }
+      try {
+        const res  = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(username)}/role`), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ role }),
+        });
+        const data = await res.json();
+        this.permStatus = data.ok
+          ? { msg: `✓ ${username} is now ${role}.`, type: 'ok' }
+          : { msg: data.error || 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.permStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      await this.loadUserPermissions();
+      setTimeout(() => { this.permStatus = { msg: '', type: '' }; }, 3000);
+    },
+
+    // ── DELETE A USER ──
+    async deleteUser(username) {
+      if (!confirm(`Permanently delete ${username}? This removes their account, reading history, favourites, and permissions. This can't be undone.`)) return;
+      try {
+        const res  = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(username)}`), { method: 'DELETE' });
+        const data = await res.json();
+        this.permStatus = data.ok
+          ? { msg: `✓ Deleted ${username}.`, type: 'ok' }
+          : { msg: data.error || 'Something went wrong.', type: 'err' };
+        if (data.ok && this.expandedUser === username) this.expandedUser = null;
+      } catch (e) {
+        this.permStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      await this.loadUserPermissions();
+      setTimeout(() => { this.permStatus = { msg: '', type: '' }; }, 3000);
     },
 
     // ── EXPAND / COLLAPSE USER ROW ──
