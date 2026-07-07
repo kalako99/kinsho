@@ -4524,7 +4524,26 @@ def get_manga_dims(request: Request, library_id: int, manga_id: str):
     dims = load_manga_dims(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    return JSONResponse(dims, headers={"Cache-Control": "private, max-age=120"})
+
+    # A flat max-age meant every reader could be looking at a rescanned
+    # manga's stale page list/count for up to that whole window (or longer,
+    # in practice, since browsers can hold onto a cached response well past
+    # max-age without the tab ever having been reloaded) - the exact
+    # "deleted a page, rescanned, still shows broken until a hard refresh"
+    # symptom. Switched to a validator instead of a fixed window: an ETag
+    # derived from the manga's own last-rescan timestamp (only ever changes
+    # when scan_library actually rebuilt this manga's data - a plain
+    # integrity Recheck alone never touches it, since Recheck was never
+    # meant to change the page list either). "no-cache" (not "no-store")
+    # still lets the browser cache the body, but forces it to send a
+    # conditional request every time; a match is a bodyless 304, so a
+    # reader gets exactly-fresh data on its very next normal load - no
+    # arbitrary staleness window, and no manual hard-refresh needed.
+    etag = f'"{manga.get("last_updated", "")}"'
+    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(dims, headers=headers)
 
 # ── VOLUME ROUTES (Case 2) ──
 

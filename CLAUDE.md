@@ -512,6 +512,25 @@ compounding each other:
   Reload scan silently no-opped until this was fixed. Same fix shape as the
   archive case: also compare each subfolder's own mtime against what's
   stored per-chapter/volume before trusting the folder-level skip.
+- **A third, separate bug on top of both of the above (2026-07-08 follow-up):**
+  even with `dims.json` correctly rebuilt server-side, the reader still
+  showed broken pages until a hard refresh, because `GET
+  /api/manga/{library_id}/{manga_id}/dims` sent a flat `Cache-Control:
+  private, max-age=120` — any browser that had fetched that manga's dims
+  in the last two minutes (and in practice, often quite a bit longer, since
+  browsers can hold a cached response well past `max-age` if the tab is
+  never hard-reloaded) kept using the stale copy regardless of what the
+  server now had. Replaced the flat time window with a validator: an ETag
+  built from the manga's own `last_updated` timestamp (only changes when
+  `scan_library` actually rebuilt this manga — a plain integrity Recheck
+  alone never touches it, since Recheck was never meant to change the page
+  list either). `Cache-Control: private, no-cache` still lets the browser
+  cache the body, but forces a conditional request every time; a match
+  returns a bodyless 304, a mismatch returns the fresh body — so every
+  viewer gets exactly-current data on their very next normal page load, no
+  manual refresh needed by anyone, and no arbitrary staleness window either
+  way. Verified live: matching `If-None-Match` → 304, non-matching → fresh
+  200 with a full body.
 
 ---
 
