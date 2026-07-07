@@ -794,12 +794,31 @@ is what pulls in new code; recreating each container is what makes a
 `/manga` is ever touched by any of this, since both live outside the image
 entirely.
 
-## BLE hardware scroller — done (2026-07-07)
+## BLE hardware scroller — feature complete, scroll-feel tuning in progress
 
 Goal: physical scroll input (a small BLE peripheral) for high-definition
 scrolling inside `templates/chapter_reader.html` on the Android app
 specifically — turning a page/chapter's continuous image strip with a
 dedicated slider instead of a touchscreen swipe.
+
+**Current status (as of the 551279e commit): in the scroll-feel testing
+phase.** Everything structural is done and confirmed working on real
+hardware — pairing/connect UI (M3), auto-reconnect across chapters and
+across manga switches without disconnecting (M4, confirmed live) — so
+what's left is purely tuning how the motion itself feels, not plumbing.
+Two real bugs have been found and fixed so far from live testing feedback
+(not just guessed at): the low-speed whole-pixel stutter, and a "jumps
+back periodically" bug caused by the conveyor-belt virtualization's
+`recenterConveyor()` fighting with kinsho's own tracked scroll position
+mid-continuous-scroll (see "Jump back" fix entry below for the full
+mechanism). The latest round — the jump-back fix plus a constant-
+acceleration ramp (`KINSHO_MAX_ACCEL`) replacing the earlier exponential
+smoothing — is pushed but **not yet live-tested**; that's the next thing
+to verify on the actual tablet + Scroller-HD hardware after redeploying
+the server (no app rebuild needed for this round — it's all in
+`templates/chapter_reader.html`). If it's still not smooth enough after
+this round, the tuning knobs table below is the first place to look
+before treating it as another bug.
 
 - **`arduino/`** at the repo root holds the hardware sketches — gitignored
   (see `.gitignore`), since it's hardware source, not app source. Each
