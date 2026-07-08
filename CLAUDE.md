@@ -554,6 +554,41 @@ compounding each other:
   way. Verified live: matching `If-None-Match` → 304, non-matching → fresh
   200 with a full body.
 
+### 12. Fix backdrop not showing for covers whose filename needs URL-encoding (2026-07-08)
+
+Reported bug: the manga detail page's backdrop image (`hero-bg`, the blurred
+full-bleed background behind the cover) silently didn't render for some
+manga, even though the small cover thumbnail displayed fine for the same
+manga.
+
+Root cause: `manga_detail.html` (and the same `hero-bg` pattern in
+`volume_detail.html`/`collection_detail.html`) builds the backdrop's inline
+style via a Vue template literal —
+`` `background-image:url('${manga.cover_url_large}')` `` — with the URL
+wrapped in **single quotes** for CSS. Every place `main.py` builds a
+`/covers/{library_id}/{manga_name}/{filename}` URL ran `quote()` over the
+`manga_name` path segment, but never over the `filename` segment — the
+cover's actual filename, which comes straight from whatever the source
+archive/loose folder named that page image, and can contain anything
+(apostrophes, parentheses, `+`, non-ASCII, etc.), unlike the manga name
+which the app itself controls the character set of less strictly. A cover
+filename containing an unescaped `'` breaks the single-quoted CSS `url()`
+outright — the whole `background-image` declaration fails to parse, so
+nothing renders. The `<img :src="manga.cover_url">` thumbnail elsewhere on
+the same page was unaffected: browsers percent-encode literal special
+characters in an attribute value before firing the actual request, but that
+same rescue doesn't happen for a raw string interpolated into inline CSS.
+
+Fixed by wrapping the filename segment in `quote()` too, at every call site
+in `main.py` that builds this URL shape (manga list/detail, OPDS, and the
+collection/admin cover-picker endpoints — 7 sites in total). Verified the
+round-trip: `quote()` percent-encodes `'`, spaces, parens, and `+`
+(`I'll Retire After Saving the World (Official)+.jpg` → `I%27ll%20Retire...`),
+and `GET /covers/{library_id}/{manga_name}/{filename}`'s `filename` path
+parameter is decoded automatically by Starlette the same way the already-quoted
+`manga_name` segment already was — no route or JS change needed, just closing
+the gap in what was being quoted server-side.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

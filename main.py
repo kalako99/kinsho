@@ -2740,7 +2740,7 @@ def get_mangas(
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{cover_filename}"
+            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
         else:
             m["cover_url"] = None
         if "is_complete" not in m:
@@ -2795,7 +2795,7 @@ def get_mangas_for_search(request: Request, library_id: int):
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{cover_filename}"
+            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
         else:
             m["cover_url"] = None
         dims = load_manga_dims(library_id, m["name"])
@@ -2826,8 +2826,8 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     if cover:
         cover_filename = os.path.basename(cover)
         name, ext = os.path.splitext(cover_filename)
-        manga["cover_url"]       = f"/covers/{library_id}/{quote(manga['name'])}/{cover_filename}"
-        manga["cover_url_large"] = f"/covers/{library_id}/{quote(manga['name'])}/{name}+{ext}"
+        manga["cover_url"]       = f"/covers/{library_id}/{quote(manga['name'])}/{quote(cover_filename)}"
+        manga["cover_url_large"] = f"/covers/{library_id}/{quote(manga['name'])}/{quote(name + '+' + ext)}"
     else:
         manga["cover_url"]       = None
         manga["cover_url_large"] = None
@@ -2975,7 +2975,7 @@ def _resolve_member_cover_urls(username: str, library_id: int, manga_id: str) ->
     filename = os.path.basename(cover)
     name, ext = os.path.splitext(filename)
     base = f"/covers/{library_id}/{quote(manga['name'])}"
-    return f"{base}/{filename}", f"{base}/{name}+{ext}"
+    return f"{base}/{quote(filename)}", f"{base}/{quote(name + '+' + ext)}"
 
 def _resolve_member_cover_url(username: str, library_id: int, manga_id: str) -> Optional[str]:
     return _resolve_member_cover_urls(username, library_id, manga_id)[0]
@@ -2988,7 +2988,7 @@ def _resolve_collection_cover_urls(username: str, collection_id: str, visible_me
         filename = override["filename"]
         name, ext = os.path.splitext(filename)
         base = f"/covers/{override['library_id']}/{quote(override['manga_name'])}"
-        return f"{base}/{filename}", f"{base}/{name}+{ext}"
+        return f"{base}/{quote(filename)}", f"{base}/{quote(name + '+' + ext)}"
     if not visible_members:
         return None, None
     first = visible_members[0]
@@ -3342,8 +3342,8 @@ def get_collection_cover_options(request: Request, collection_id: str):
                 "manga_id":    m["manga_id"],
                 "manga_name":  m["manga_name"],
                 "filename":    small_name,
-                "url_large":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{filename}",
-                "url_small":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{small_name}",
+                "url_large":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{quote(filename)}",
+                "url_small":   f"/covers/{m['library_id']}/{quote(manga['name'])}/{quote(small_name)}",
                 "is_selected": is_selected,
             })
     return JSONResponse({"covers": options, "has_override": bool(override)})
@@ -3439,8 +3439,8 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
         small_name = name[:-1] + ext
         covers.append({
             "filename":    small_name,
-            "url_large":   f"/covers/{library_id}/{quote(manga['name'])}/{filename}",
-            "url_small":   f"/covers/{library_id}/{quote(manga['name'])}/{small_name}",
+            "url_large":   f"/covers/{library_id}/{quote(manga['name'])}/{quote(filename)}",
+            "url_small":   f"/covers/{library_id}/{quote(manga['name'])}/{quote(small_name)}",
             "is_selected": small_name == selected or (selected is None and small_name == manga.get("cover")),
         })
     return JSONResponse({"covers": covers, "selected": selected or manga.get("cover")})
@@ -4224,7 +4224,7 @@ def get_category_list(
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{cover_filename}"
+            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
         else:
             m["cover_url"] = None
         mangas_by_id[m["id"]] = m
@@ -5215,7 +5215,7 @@ def _opds_cover_url(library_id: int, manga: dict, user_covers: dict) -> Optional
     cover = user_covers.get(manga["id"]) or manga.get("cover")
     if not cover:
         return None
-    return f"/covers/{library_id}/{quote(manga['name'])}/{os.path.basename(cover)}"
+    return f"/covers/{library_id}/{quote(manga['name'])}/{quote(os.path.basename(cover))}"
 
 def _opds_chapter_info(library_id: int, manga_id: str, chapter: dict) -> tuple:
     """Return (page_count, first_page_url) for a case1/case3 chapter."""
