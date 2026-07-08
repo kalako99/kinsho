@@ -3571,7 +3571,14 @@
       // kinks. See CLAUDE.md's scroller tuning table for what to adjust if
       // this still isn't smooth enough, or feels laggy to respond.
       let kinshoDisplayRate = 0;
-      const KINSHO_MAX_ACCEL = 60; // notches/sec² — how fast the displayed speed can ramp up/down
+      // notches/sec² — how fast the displayed speed can ramp up/down. kinshoRate/
+      // kinshoDisplayRate are in raw 1/120-notch units (KINSHO_UNITS_PER_NOTCH), so
+      // this gets multiplied by that factor below before comparing against them —
+      // omitting that scaling was a real bug (2026-07-08): it made maxChange 120x
+      // smaller than intended, so ramping from 0 to boost max (25 notches/sec = 3000
+      // raw units) took ~50s instead of the ~0.2s this value now targets. That's what
+      // read as "unresponsive, keeps drifting long after returning to center."
+      const KINSHO_MAX_ACCEL = 125;
 
       let kinshoLastFrameTime = performance.now();
       function kinshoScrollLoop(now) {
@@ -3589,7 +3596,7 @@
         // disconnect (kinshoRate forced to 0 above) a smooth, bounded-time
         // decel to a stop instead of an abrupt freeze.
         const rateDiff  = kinshoRate - kinshoDisplayRate;
-        const maxChange = KINSHO_MAX_ACCEL * dt;
+        const maxChange = KINSHO_MAX_ACCEL * KINSHO_UNITS_PER_NOTCH * dt;
         if (Math.abs(rateDiff) <= maxChange) {
           kinshoDisplayRate = kinshoRate;
         } else {

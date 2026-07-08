@@ -806,18 +806,24 @@ phase.** Everything structural is done and confirmed working on real
 hardware — pairing/connect UI (M3), auto-reconnect across chapters and
 across manga switches without disconnecting (M4, confirmed live) — so
 what's left is purely tuning how the motion itself feels, not plumbing.
-Two real bugs have been found and fixed so far from live testing feedback
-(not just guessed at): the low-speed whole-pixel stutter, and a "jumps
-back periodically" bug caused by the conveyor-belt virtualization's
+Three real bugs have been found and fixed so far from live testing feedback
+(not just guessed at): the low-speed whole-pixel stutter, a "jumps back
+periodically" bug caused by the conveyor-belt virtualization's
 `recenterConveyor()` fighting with kinsho's own tracked scroll position
 mid-continuous-scroll (see "Jump back" fix entry below for the full
-mechanism). The latest round — the jump-back fix plus a constant-
-acceleration ramp (`KINSHO_MAX_ACCEL`) replacing the earlier exponential
-smoothing — is pushed but **not yet live-tested**; that's the next thing
-to verify on the actual tablet + Scroller-HD hardware after redeploying
-the server (no app rebuild needed for this round — it's all in
-`templates/chapter_reader.html`). If it's still not smooth enough after
-this round, the tuning knobs table below is the first place to look
+mechanism), and a `KINSHO_MAX_ACCEL` unit-scaling bug (raw 1/120-notch
+units vs. plain notches/sec²) that made the jump-back fix's replacement
+constant-acceleration ramp run ~120x slower than intended — full-range
+ramp took ~50s instead of ~0.2s, which live-tested as sluggish/unresponsive,
+speed "accumulating" without settling, and scrolling continuing long after
+the slider returned to center. Fixed same day (2026-07-08) by scaling
+`KINSHO_MAX_ACCEL` by `KINSHO_UNITS_PER_NOTCH` and retuning the default to
+125 (see the tuning table below). This latest round — jump-back fix plus
+the corrected acceleration ramp — is pushed but **not yet live-tested**;
+that's the next thing to verify on the actual tablet + Scroller-HD hardware
+after redeploying the server (no app rebuild needed for this round — it's
+all in `templates/chapter_reader.html`). If it's still not smooth enough
+after this round, the tuning knobs table below is the first place to look
 before treating it as another bug.
 
 - **`arduino/`** at the repo root holds the hardware sketches — gitignored
@@ -962,7 +968,7 @@ effect, no rebuild:**
 |---|---|---|
 | `KINSHO_PX_PER_NOTCH` | 100 | Overall scroll sensitivity — pixels of on-screen movement per firmware "notch". Raise for faster scrolling at the same slider position, lower for slower. |
 | `KINSHO_UNITS_PER_NOTCH` | 120 | Must match `RESOLUTION_MULTIPLIER` in the firmware — only change this if that constant changes too. |
-| `KINSHO_MAX_ACCEL` | 60 (notches/sec²) | How fast the rendered scroll speed can ramp up/down toward each newly received rate — added 2026-07-08 because BLE notifications don't always arrive on a perfectly even ~50ms beat (Android's main thread can be busy laying out scrolled-in images right when one needs delivering), and jumping straight to each new value read as choppy. A **constant** acceleration cap (not a percentage-of-gap/exponential chase) so continuously re-targeting a new speed — e.g. the user still actively adjusting the slider — still produces one smooth curve rather than a series of kinks. Raise if scrolling still feels stuttery/jittery or sluggish to reach the target speed; lower (smoother, but slower to reach a newly commanded speed) if it still feels jerky on big speed changes. |
+| `KINSHO_MAX_ACCEL` | 125 (notches/sec²) | How fast the rendered scroll speed can ramp up/down toward each newly received rate — added 2026-07-08 because BLE notifications don't always arrive on a perfectly even ~50ms beat (Android's main thread can be busy laying out scrolled-in images right when one needs delivering), and jumping straight to each new value read as choppy. A **constant** acceleration cap (not a percentage-of-gap/exponential chase) so continuously re-targeting a new speed — e.g. the user still actively adjusting the slider — still produces one smooth curve rather than a series of kinks. Applied against `kinshoRate`/`kinshoDisplayRate` after multiplying by `KINSHO_UNITS_PER_NOTCH`, since those are in raw 1/120-notch units, not plain notches/sec — the original ship (60, unscaled) was a **bug**, not a conservative tuning choice: it made the real ramp 120x slower than the label implied (~50s to reach boost-zone max instead of ~0.2s), which is what read as sluggish/unresponsive and "keeps drifting after returning to center" in the first live test of this feature (2026-07-08 follow-up, fixed same day). 125 targets a ~0.2s full-range ramp (cruise max in ~40ms). Raise if scrolling still feels sluggish to reach the target speed; lower (smoother, but slower to reach a newly commanded speed) if it feels jerky on big/fast speed changes. |
 
 **Android (`kinsho-android` repo, `KinshoBleBridge.java`) — rebuild + reinstall
 to take effect:**
