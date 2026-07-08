@@ -806,25 +806,40 @@ phase.** Everything structural is done and confirmed working on real
 hardware — pairing/connect UI (M3), auto-reconnect across chapters and
 across manga switches without disconnecting (M4, confirmed live) — so
 what's left is purely tuning how the motion itself feels, not plumbing.
-Three real bugs have been found and fixed so far from live testing feedback
+Four real bugs have been found and fixed so far from live testing feedback
 (not just guessed at): the low-speed whole-pixel stutter, a "jumps back
 periodically" bug caused by the conveyor-belt virtualization's
 `recenterConveyor()` fighting with kinsho's own tracked scroll position
 mid-continuous-scroll (see "Jump back" fix entry below for the full
-mechanism), and a `KINSHO_MAX_ACCEL` unit-scaling bug (raw 1/120-notch
-units vs. plain notches/sec²) that made the jump-back fix's replacement
-constant-acceleration ramp run ~120x slower than intended — full-range
-ramp took ~50s instead of ~0.2s, which live-tested as sluggish/unresponsive,
+mechanism), a `KINSHO_MAX_ACCEL` unit-scaling bug (raw 1/120-notch units vs.
+plain notches/sec²) that made the jump-back fix's replacement
+constant-acceleration ramp run ~120x slower than intended — full-range ramp
+took ~50s instead of ~0.2s, which live-tested as sluggish/unresponsive,
 speed "accumulating" without settling, and scrolling continuing long after
-the slider returned to center. Fixed same day (2026-07-08) by scaling
+the slider returned to center (fixed 2026-07-08 by scaling
 `KINSHO_MAX_ACCEL` by `KINSHO_UNITS_PER_NOTCH` and retuning the default to
-125 (see the tuning table below). This latest round — jump-back fix plus
-the corrected acceleration ramp — is pushed but **not yet live-tested**;
-that's the next thing to verify on the actual tablet + Scroller-HD hardware
-after redeploying the server (no app rebuild needed for this round — it's
-all in `templates/chapter_reader.html`). If it's still not smooth enough
-after this round, the tuning knobs table below is the first place to look
-before treating it as another bug.
+125 — see the tuning table below) — and, once that made the scroller
+responsive enough to actually feel the next layer of the problem, an
+unthrottled-progress-bar bug: `syncScrollPosition()` ran
+`updateProgressBar()`/`scheduleProgressSave()` (several full-manifest linear
+scans plus DOM queries each) on every native `scroll` event, up to ~60/sec
+during continuous kinsho-driven scrolling, which was expensive enough to
+occasionally blow the frame budget — a dropped/delayed frame produces a
+catch-up jump whose visible size scales with current scroll speed, so it
+live-tested as "smooth at low speed, increasingly choppy toward high speed,
+plateauing at a max" even while holding the potentiometer at a constant
+position (no acceleration/ramping involved at all at that point — this is
+why it looked like a curve-shape problem but wasn't one). Fixed 2026-07-08
+by throttling that bookkeeping to ~12Hz (`SCROLL_BOOKKEEPING_THROTTLE_MS`,
+`chapter_reader.html`'s `syncScrollPosition`) with a trailing call so the
+final state after scrolling stops is never more than one throttle window
+stale. **Pushed but not yet live-tested** — that's the next thing to verify
+on the actual tablet + Scroller-HD hardware after redeploying the server (no
+app rebuild needed — it's all in `templates/chapter_reader.html`). If
+scrolling is still choppy at high speed after this, the likely next suspect
+is the underlying image decode/paint cost of the newly-visible page content
+itself (more pixels cross into view per second at higher scroll speed,
+independent of any JS bookkeeping), not the acceleration ramp.
 
 - **`arduino/`** at the repo root holds the hardware sketches — gitignored
   (see `.gitignore`), since it's hardware source, not app source. Each

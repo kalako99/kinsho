@@ -1959,12 +1959,43 @@
     }
   }
 
+  // updateProgressBar()/scheduleProgressSave() each do several full-manifest
+  // linear scans (getCurrentGlobalPageIdx, checkChapterCompletion, the
+  // active-chapter/active-page lookups inside updateProgressBar itself) plus
+  // DOM queries — the UI they drive (progress bar, chapter label, page
+  // slider) doesn't need per-frame precision, but syncScrollPosition used to
+  // run them on every single native 'scroll' event unthrottled. Continuous
+  // BLE-scroller-driven scrolling writes reader.scrollTop every rAF frame
+  // (~60Hz), and that cost was enough to occasionally blow the frame budget
+  // — the resulting dropped/delayed frames read as scroll choppiness that
+  // got WORSE the faster the scroller was going (a bigger catch-up jump per
+  // dropped frame at higher px/sec), which is why it looked like an
+  // acceleration-curve problem but wasn't one (2026-07-08). Throttled to
+  // ~12Hz with a trailing call so the final position after scrolling stops
+  // is never more than one throttle window stale.
+  const SCROLL_BOOKKEEPING_THROTTLE_MS = 80;
+  let _scrollBookkeepingLastRun = 0;
+  let _scrollBookkeepingTimer   = null;
+  function runScrollBookkeeping() {
+    _scrollBookkeepingLastRun = performance.now();
+    _scrollBookkeepingTimer = null;
+    updateProgressBar();
+    scheduleProgressSave();
+  }
+  function throttledScrollBookkeeping() {
+    const elapsed = performance.now() - _scrollBookkeepingLastRun;
+    if (elapsed >= SCROLL_BOOKKEEPING_THROTTLE_MS) {
+      runScrollBookkeeping();
+    } else if (!_scrollBookkeepingTimer) {
+      _scrollBookkeepingTimer = setTimeout(runScrollBookkeeping, SCROLL_BOOKKEEPING_THROTTLE_MS - elapsed);
+    }
+  }
+
   // ── SYNC: lightweight, called on every native scroll event. ──
   function syncScrollPosition() {
     if (manifest.length === 0) return;
     virtualY = manifest[windowLo].globalY + reader.scrollTop;
-    updateProgressBar();
-    scheduleProgressSave();
+    throttledScrollBookkeeping();
     if (
       currentChapIdx >= chapterList.length - 1 &&
       reader.scrollTop >= reader.scrollHeight - reader.clientHeight - 1
