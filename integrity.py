@@ -35,6 +35,22 @@ SSIM_COMPARE_SIZE = 256   # both images resized to this before scoring — bound
                           # page still compare cleanly.
 SSIM_WINDOW = 7           # matches the common default for 8-bit images.
 
+# A page that's mostly one flat color (a solid-black transition panel, a
+# mostly-white page with a small inset) trivially scores ~1.0 SSIM in that
+# flat region as long as the OTHER image is also near that same level in the
+# same spot — common, since white margins are near-universal in manga. With
+# that region covering most of the page, it can pull the whole-image mean
+# above SSIM_DUPLICATE_THRESHOLD even when the actual artwork is completely
+# different. DOMINANT_COLOR_TOLERANCE is how close (in 0-255 grayscale
+# levels) a pixel has to be to an image's single most common intensity to
+# count as "that image's dominant color" for masking purposes.
+DOMINANT_COLOR_TOLERANCE = 14
+# If masking out both images' shared dominant-color pixels leaves less than
+# this fraction of the frame, there isn't enough real content left to trust
+# a similarity score either way — treated as inconclusive (returns 0.0, i.e.
+# not a match) rather than falling back to the whole (bias-inflated) image.
+MIN_COMPARABLE_FRACTION = 0.05
+
 
 def _phash(data: bytes) -> int:
     """8x8 average hash — cheap way to shortlist near-duplicate candidates."""
@@ -65,10 +81,23 @@ def _box_filter(arr: np.ndarray, win: int) -> np.ndarray:
     return total / (win * win)
 
 
+def _dominant_color_mask(arr: np.ndarray, tolerance: float) -> np.ndarray:
+    """Boolean mask marking pixels within `tolerance` grayscale levels of the
+    array's single most common intensity — its dominant/background color."""
+    values, counts = np.unique(np.round(arr).astype(np.uint8), return_counts=True)
+    dominant = values[np.argmax(counts)]
+    return np.abs(arr - dominant) <= tolerance
+
+
 def _ssim_score(data_a: bytes, data_b: bytes) -> float:
     """Windowed SSIM between two images, decoded, grayscaled, and resized to
     a common size first so source resolution/aspect differences don't block
-    the comparison."""
+    the comparison. Pixels that are close to BOTH images' own dominant color
+    at the same spot are excluded from the mean before scoring — see
+    DOMINANT_COLOR_TOLERANCE above for why. Deliberately an intersection,
+    not "either image's background": a flat region in only ONE image,
+    compared against real content in the other, already scores low there and
+    should keep counting against a match."""
     img_a = Image.open(io.BytesIO(data_a)).convert('L').resize(
         (SSIM_COMPARE_SIZE, SSIM_COMPARE_SIZE), Image.LANCZOS)
     img_b = Image.open(io.BytesIO(data_b)).convert('L').resize(
@@ -89,7 +118,13 @@ def _ssim_score(data_a: bytes, data_b: bytes) -> float:
 
     ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / \
                ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2))
-    return float(ssim_map.mean())
+
+    shared_dominant = _dominant_color_mask(x, DOMINANT_COLOR_TOLERANCE) & \
+                       _dominant_color_mask(y, DOMINANT_COLOR_TOLERANCE)
+    included = ~shared_dominant
+    if included.sum() < ssim_map.size * MIN_COMPARABLE_FRACTION:
+        return 0.0
+    return float(ssim_map[included].mean())
 
 
 def _find_duplicate_groups(hashes: dict, raw_data: dict) -> list:

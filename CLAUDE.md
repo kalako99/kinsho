@@ -451,6 +451,28 @@ Five independent, unrelated changes done together in one pass:
   hard dependency (`requirements.txt`) — the only non-Pillow image-processing
   dependency in the project, needed for the box-filter math to be fast
   enough to run per-chapter in the existing idle-gated background pass.
+- **Dominant-color masking for SSIM (2026-07-08 follow-up)** — reported
+  false positives on pages that are 80%+ a single flat color (a solid-black
+  transition panel, a mostly-white page with a small inset). Cause: a
+  window that's flat in both images trivially scores ~1.0 SSIM regardless
+  of what the rest of the page looks like, as long as both images are near
+  the same level there — common, since white margins are near-universal in
+  manga, so two genuinely different pages sharing a big white background
+  could clear the 80% threshold on the background alone. Fixed in
+  `_ssim_score` (`integrity.py`): before averaging the SSIM map, pixels
+  that are within `DOMINANT_COLOR_TOLERANCE` (14 grayscale levels) of BOTH
+  images' own single most-common intensity (`_dominant_color_mask`) are
+  excluded — deliberately an intersection, not either image's background
+  alone, since a flat region in only one image compared against real
+  content in the other already scores low there and should keep counting
+  against a match. If masking leaves less than `MIN_COMPARABLE_FRACTION`
+  (5%) of the frame, there's not enough real content left to trust a score
+  either way, so it returns 0.0 (not a match) rather than falling back to
+  the whole bias-inflated image. Verified with synthetic test images: two
+  different pages sharing an 85% white background scored ~0.018 after the
+  fix (previously would have cleared 0.80 on the shared background alone);
+  a true near-duplicate sharing the same background still scored ~0.997, so
+  real detection power is unaffected.
 - **"Permissions" section renamed to "Accounts"** — label-only rename in
   `settings.html`'s sidebar nav; the internal `activeSection` key is still
   the string `'permissions'` (no reason to touch every conditional over a
