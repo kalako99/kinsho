@@ -620,6 +620,34 @@ cards) — built with `v-text`, not `{{ }}` mustaches, since this file isn't
 wrapped in `{% raw %}` (see the note under Integrity checking above about why
 that matters here).
 
+### 14. Fix popups closing when a text-selection drag ends outside them (2026-07-08)
+
+Reported bug: selecting text inside a popup (e.g. the Fetch Metadata popup on
+manga detail) by clicking and dragging, then releasing the mouse past the
+popup's border, closed the popup instead of completing the selection.
+
+Root cause: every popup in the app closes on click-outside via
+`@click.self="closeFn"` on the `.popup-overlay`/`.cover-picker-overlay` div —
+`.self` only checks that the *click event's* target is the overlay itself.
+But a native `click` event's target isn't simply "whatever was under the
+pointer at mouseup" — per spec it resolves to the nearest common ancestor of
+the mousedown and mouseup targets. Starting a drag-select on text inside the
+popup and releasing outside its border makes that common ancestor the
+overlay (the popup's parent), so `.self` matched and the popup closed
+mid-selection, even though the interaction started *inside* the popup.
+
+Fixed by no longer trusting the click event's target alone: each app now
+tracks whether the *mousedown* also landed directly on the overlay
+(`onOverlayMouseDown`), and only closes on click if both the mousedown and
+the click resolved to the overlay itself (`onOverlayClick(e, closeFn)`) —
+`@mousedown="onOverlayMouseDown" @click="onOverlayClick($event, closeFn)"`
+replacing `@click.self="closeFn"`. Applied to all 18 occurrences of this
+pattern across `manga_detail.html`, `volume_detail.html`,
+`collection_detail.html`, `collections_list.html`
+(`static/collections_list.js`) — every popup/cover-picker overlay in the
+app, not just the one reported, since it was the identical bug everywhere
+this close-on-outside-click convention was used.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

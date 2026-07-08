@@ -20,6 +20,20 @@ const app = createApp({
   },
 
   methods: {
+    // Popup overlays close on click-outside, but only if the SAME
+    // mousedown also started on the overlay itself — otherwise selecting
+    // text inside a popup and releasing the mouse past its border closes
+    // the popup mid-drag. The native 'click' event's target resolves to
+    // the nearest common ancestor of the mousedown/mouseup targets, which
+    // is the overlay whenever a drag crosses the popup's border, even
+    // though the drag started inside the popup content.
+    onOverlayMouseDown(e) {
+      this._overlayMouseDownSelf = (e.target === e.currentTarget);
+    },
+    onOverlayClick(e, closeFn) {
+      if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
+    },
+
     async loadCollections() {
       this.loading = true;
       try {

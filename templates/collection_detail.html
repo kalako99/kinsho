@@ -1229,7 +1229,7 @@
   <div v-else class="state-msg">Collection not found.</div>
 
   <!-- ADD SERIES POPUP -->
-  <div class="popup-overlay" v-if="showAddMemberPopup" @click.self="showAddMemberPopup = false">
+  <div class="popup-overlay" v-if="showAddMemberPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddMemberPopup = false)">
     <div class="popup add-member-popup">
       <div class="popup-title">Add Series</div>
       <select v-model="addMemberLibraryId" class="desc-textarea library-select" style="min-height:auto; margin-bottom:10px; cursor:pointer;" @change="searchAddMember">
@@ -1258,7 +1258,7 @@
   </div>
 
   <!-- ADD TAG POPUP -->
-  <div class="popup-overlay" v-if="showAddPopup" @click.self="showAddPopup = false">
+  <div class="popup-overlay" v-if="showAddPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddPopup = false)">
     <div class="popup">
       <div class="popup-title">Add Tag</div>
       <input type="text" v-model="tagInput" placeholder="Type a tag…" @keyup.enter="saveTag" ref="tagInputRef"/>
@@ -1273,7 +1273,7 @@
   </div>
 
   <!-- DELETE CONFIRM POPUP -->
-  <div class="popup-overlay" v-if="showDeletePopup" @click.self="cancelDelete">
+  <div class="popup-overlay" v-if="showDeletePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, cancelDelete)">
     <div class="popup">
       <div class="popup-title">Remove Tags</div>
       <div class="popup-confirm-msg">Remove these tags from the collection?</div>
@@ -1288,7 +1288,7 @@
   </div>
 
   <!-- ADD GENRE POPUP -->
-  <div class="popup-overlay" v-if="showAddGenrePopup" @click.self="showAddGenrePopup = false">
+  <div class="popup-overlay" v-if="showAddGenrePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddGenrePopup = false)">
     <div class="popup">
       <div class="popup-title">Add Genre</div>
       <input type="text" v-model="genreInput" placeholder="Type a genre…" @keyup.enter="saveGenre" ref="genreInputRef"/>
@@ -1303,7 +1303,7 @@
   </div>
 
   <!-- DELETE GENRE CONFIRM POPUP -->
-  <div class="popup-overlay" v-if="showDeleteGenrePopup" @click.self="cancelDeleteGenre">
+  <div class="popup-overlay" v-if="showDeleteGenrePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, cancelDeleteGenre)">
     <div class="popup">
       <div class="popup-title">Remove Genres</div>
       <div class="popup-confirm-msg">Remove these genres from the collection?</div>
@@ -1318,7 +1318,7 @@
   </div>
 
   <!-- COVER PICKER POPUP -->
-  <div class="cover-picker-overlay" v-if="showCoverPicker" @click.self="showCoverPicker = false">
+  <div class="cover-picker-overlay" v-if="showCoverPicker" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showCoverPicker = false)">
     <div class="cover-picker-box" @click.stop>
       <div class="cover-picker-header">
         <span class="cover-picker-title">Choose Cover</span>
@@ -1431,6 +1431,20 @@ createApp({
   },
 
   methods: {
+    // Popup overlays close on click-outside, but only if the SAME
+    // mousedown also started on the overlay itself — otherwise selecting
+    // text inside a popup and releasing the mouse past its border closes
+    // the popup mid-drag. The native 'click' event's target resolves to
+    // the nearest common ancestor of the mousedown/mouseup targets, which
+    // is the overlay whenever a drag crosses the popup's border, even
+    // though the drag started inside the popup content.
+    onOverlayMouseDown(e) {
+      this._overlayMouseDownSelf = (e.target === e.currentTarget);
+    },
+    onOverlayClick(e, closeFn) {
+      if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
+    },
+
     async loadCollection() {
       try {
         const res = await fetch(apiUrl(`/api/collections/${this.collectionId}`));

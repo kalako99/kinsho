@@ -270,7 +270,7 @@
   </div>
 
   <!-- NEW COLLECTION POPUP -->
-  <div class="popup-overlay" v-if="showCreatePopup" @click.self="showCreatePopup = false">
+  <div class="popup-overlay" v-if="showCreatePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showCreatePopup = false)">
     <div class="popup">
       <div class="popup-title">New Collection</div>
       <input type="text" v-model="newCollectionName" placeholder="Collection name…" @keyup.enter="createCollection" ref="newNameRef"/>
