@@ -833,13 +833,31 @@ why it looked like a curve-shape problem but wasn't one). Fixed 2026-07-08
 by throttling that bookkeeping to ~12Hz (`SCROLL_BOOKKEEPING_THROTTLE_MS`,
 `chapter_reader.html`'s `syncScrollPosition`) with a trailing call so the
 final state after scrolling stops is never more than one throttle window
-stale. **Pushed but not yet live-tested** — that's the next thing to verify
-on the actual tablet + Scroller-HD hardware after redeploying the server (no
-app rebuild needed — it's all in `templates/chapter_reader.html`). If
-scrolling is still choppy at high speed after this, the likely next suspect
-is the underlying image decode/paint cost of the newly-visible page content
-itself (more pixels cross into view per second at higher scroll speed,
-independent of any JS bookkeeping), not the acceleration ramp.
+stale. **Live-tested (2026-07-08): improved, not yet perfect** — confirmed
+the right direction, so the same class of fix continued: `updateProgressBar()`
+was still doing its DOM/manifest-scan work unconditionally on every throttled
+tick even though the progress bar/chapter label/page slider it updates are
+only ever visible for ~3s after a tap (`barVisible`, `hideAll()`/`showAll()`)
+— most of a continuous BLE-scroller read happens with that UI hidden. Worse,
+`rebuildFragProgress()` (removes/recreates one DOM element + 3 listeners per
+page in the newly-entered chapter) fired on every chapter-boundary crossing
+regardless of visibility, and crossing chapter boundaries gets more frequent
+the faster you scroll — a second, independent way the per-tick cost scaled
+with speed. Fixed by gating all of `updateProgressBar()` behind
+`if (!barVisible) return`, with `showAll()` forcing one full call on reveal
+so nothing is stale when the UI reappears (`chapter_reader.html`, same day).
+**Pushed but not yet live-tested** — verify next on the tablet + Scroller-HD
+hardware after redeploying (no app rebuild needed). If scrolling is still
+choppy at high speed after this, the likely next suspect is the underlying
+image decode/paint cost of the newly-visible page content itself (more
+pixels cross into view per second at higher scroll speed, independent of any
+JS bookkeeping), not the acceleration ramp — a native Android touch-event
+synthesis approach (dispatching real `MotionEvent`s into the WebView so
+Chromium's own compositor-driven scroll/momentum pipeline drives it, rather
+than JS writing `scrollTop` every frame) was discussed as the option for if
+JS-side optimization can't get there, but deliberately deferred — it's a
+much bigger change living in the `kinsho-android` repo, worth doing only if
+this direction turns out not to be enough.
 
 - **`arduino/`** at the repo root holds the hardware sketches — gitignored
   (see `.gitignore`), since it's hardware source, not app source. Each

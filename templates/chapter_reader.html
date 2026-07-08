@@ -1435,7 +1435,11 @@
       if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
       hideAll();
     }, 3000);
-    if (typeof updatePinnedTooltips === 'function') updatePinnedTooltips();
+    // updateProgressBar() was skipped while barVisible was false (see its
+    // own comment) — barVisible is now true above, so this call rebuilds
+    // whatever went stale (frag segments, chapter label, page slider) and
+    // internally calls updatePinnedTooltips() itself once it's done.
+    if (typeof updateProgressBar === 'function') updateProgressBar();
   }
 
   let barVisible     = false;
@@ -2675,6 +2679,16 @@
   thumbStrip.addEventListener('touchend',   ()  => { _onStripDragEnd(); }, { passive: true });
 
   function updateProgressBar() {
+    // Everything below is UI bookkeeping for the progress bar/chapter
+    // label/page slider, which hideAll() hides ~3s after every tap — most
+    // of a continuous BLE-scroller read happens with it hidden. Doing this
+    // work while invisible was pure waste, and rebuildFragProgress() below
+    // in particular (removes/creates one DOM element + 3 listeners per page
+    // in the newly-entered chapter, on every chapter-boundary crossing) got
+    // MORE frequent the faster you scrolled — showAll() forces one full
+    // call on reveal so nothing here goes stale while hidden (2026-07-08).
+    if (!barVisible) return;
+
     const scrollTop = virtualY;
     const vh        = viewH;
     const midY      = scrollTop + vh * 0.5;
