@@ -589,6 +589,37 @@ parameter is decoded automatically by Starlette the same way the already-quoted
 `manga_name` segment already was — no route or JS change needed, just closing
 the gap in what was being quoted server-side.
 
+### 13. Library page/chapter/volume totals in Settings (2026-07-08)
+
+`GET /api/settings/page-counts` (`main.py`) — for every library the current
+user can access (`auth.can_access_library`, same as everywhere else — admins
+see all, regular users see what their permissions allow), sums pages,
+chapters, and volumes across every visible manga's `dims.json`
+(`auth.is_manga_blocked`/`blocked_tags` filtering applied per-manga, same as
+list/detail endpoints), via the new `manga_content_counts(dims)` helper next
+to `checkable_items_for_manga`. A manga has chapters or volumes, never both,
+so exactly one of those two counts is nonzero per manga — pages are just
+`len(pages)` summed across whichever bucket is populated. Returns per-library
+`{library_id, library_name, total_pages, total_chapters, total_volumes}` plus
+`grand_total_pages`/`grand_total_chapters`/`grand_total_volumes` across every
+included library.
+
+Computed live from `dims.json` on each request rather than cached at scan
+time — deliberate, since nothing in `data.json`'s manga records tracks a
+running page/chapter/volume total today, and this endpoint is only hit when
+the Libraries settings section loads or a scan finishes, not a hot path. If
+it ever becomes slow on a very large install, the fix would be caching this
+per-manga at scan time rather than optimizing the request path itself.
+
+`static/settings.js`'s `loadPageCounts()` fetches this on mount and again
+after any library scan completes (`pollScanStatus`'s completion branch), into
+`pageCounts` (keyed by library id) and `pageCountsGrand`. `settings.html`
+shows a grand-total line above the Libraries cards and a per-library line on
+each library card (both the admin editor cards and the non-admin read-only
+cards) — built with `v-text`, not `{{ }}` mustaches, since this file isn't
+wrapped in `{% raw %}` (see the note under Integrity checking above about why
+that matters here).
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

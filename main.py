@@ -379,6 +379,18 @@ def checkable_items_for_manga(dims: dict) -> list:
                 })
     return items
 
+def manga_content_counts(dims: dict) -> tuple[int, int, int]:
+    """(pages, chapters, volumes) for one manga's dims.json. A manga has
+    chapters or volumes, never both (same assumption as
+    checkable_items_for_manga), so exactly one of the latter two is nonzero.
+    PDF/EPUB volumes still carry a "pages" list in dims.json same as
+    archive/loose ones, so this needs no format check."""
+    volumes  = dims.get("volumes") or {}
+    chapters = dims.get("chapters") or {}
+    buckets  = volumes or chapters
+    pages    = sum(len(v.get("pages", [])) for v in buckets.values())
+    return pages, len(chapters), len(volumes)
+
 def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
     """
     A ComicInfo.xml sitting directly in the manga's own folder (next to the
@@ -2461,6 +2473,51 @@ def get_settings(request: Request):
         "hidden_libraries":         user_data.get("hidden_libraries", []),
         "show_collections_row":     user_data.get("show_collections_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
+    })
+
+@app.get("/api/settings/page-counts")
+def get_library_page_counts(request: Request):
+    """Total pages/chapters/volumes per library (summed from every visible
+    manga's dims.json) plus grand totals, scoped to what this user can
+    actually see — same can_access_library/blocked_tags filtering as
+    everywhere else, not a raw admin-only stat."""
+    username = auth.get_current_user(request)
+    data = load_app_data()
+    perms = auth.resolve_permissions(username)
+    blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
+
+    libraries = []
+    grand_pages = grand_chapters = grand_volumes = 0
+    for lib in data.get("libraries", []):
+        lib_id = lib["id"]
+        if not auth.can_access_library(username, lib_id):
+            continue
+        manga_data = data.get("manga_data", {}).get(str(lib_id), {})
+        pages = chapters = volumes = 0
+        for manga in manga_data.get("mangas", []):
+            dims = load_manga_dims(lib_id, manga["name"])
+            if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
+                continue
+            p, c, v = manga_content_counts(dims)
+            pages += p
+            chapters += c
+            volumes += v
+        libraries.append({
+            "library_id":      lib_id,
+            "library_name":    lib.get("name", ""),
+            "total_pages":     pages,
+            "total_chapters":  chapters,
+            "total_volumes":   volumes,
+        })
+        grand_pages += pages
+        grand_chapters += chapters
+        grand_volumes += volumes
+
+    return JSONResponse({
+        "libraries":             libraries,
+        "grand_total_pages":     grand_pages,
+        "grand_total_chapters":  grand_chapters,
+        "grand_total_volumes":   grand_volumes,
     })
 
 @app.post("/api/settings/data-path")

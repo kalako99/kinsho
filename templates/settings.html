@@ -640,6 +640,11 @@
 
   <div class="settings-section">
     <div class="section-label">Libraries</div>
+    <div class="card" v-if="pageCountsGrand" style="margin-bottom:14px; font-size:0.8rem; color:var(--color-muted,#888);">
+      <span v-text="pageCountsGrand.pages.toLocaleString()"></span> pages available to you across all libraries
+      <template v-if="pageCountsGrand.chapters"> · <span v-text="pageCountsGrand.chapters.toLocaleString()"></span> chapters</template>
+      <template v-if="pageCountsGrand.volumes"> · <span v-text="pageCountsGrand.volumes.toLocaleString()"></span> volumes</template>
+    </div>
     <!-- ── ADMIN VIEW: full library controls ── -->
     <template v-if="isAdmin">
 
@@ -670,6 +675,11 @@
             <path d="M9 6V4h6v2"/>
           </svg>
         </button>
+      </div>
+      <div v-if="pageCounts[String(lib.id)]" style="font-size:0.72rem; color:var(--color-muted,#888); margin:-6px 0 10px;">
+        <span v-text="pageCounts[String(lib.id)].pages.toLocaleString()"></span> pages
+        <template v-if="pageCounts[String(lib.id)].chapters"> · <span v-text="pageCounts[String(lib.id)].chapters.toLocaleString()"></span> chapters</template>
+        <template v-if="pageCounts[String(lib.id)].volumes"> · <span v-text="pageCounts[String(lib.id)].volumes.toLocaleString()"></span> volumes</template>
       </div>
       <div class="field-label">Folder path</div>
       <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
@@ -759,6 +769,11 @@
             Show on home page
             <input type="checkbox" :checked="!isLibraryHidden(lib)" @change="toggleLibraryVisibility(lib)" style="width:16px; height:16px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
           </label>
+        </div>
+        <div v-if="pageCounts[String(lib.id)]" style="font-size:0.72rem; color:var(--color-muted,#888); margin-top:4px;">
+          <span v-text="pageCounts[String(lib.id)].pages.toLocaleString()"></span> pages
+          <template v-if="pageCounts[String(lib.id)].chapters"> · <span v-text="pageCounts[String(lib.id)].chapters.toLocaleString()"></span> chapters</template>
+          <template v-if="pageCounts[String(lib.id)].volumes"> · <span v-text="pageCounts[String(lib.id)].volumes.toLocaleString()"></span> volumes</template>
         </div>
         <div style="display:flex; align-items:center; gap:10px; margin-top:6px; flex-wrap:wrap;">
           <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">

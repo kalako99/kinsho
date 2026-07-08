@@ -29,6 +29,8 @@ createApp({
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
       hiddenLibraries: [],
       libraryVisibilityStatus: { msg: '', type: '' },
+      pageCounts: {},        // library_id (string) -> {total_pages, total_chapters, total_volumes}
+      pageCountsGrand: null, // null while unloaded, so the UI can tell "loading" from "zero"
 
       // ── USERNAME ──
       username:           '',
@@ -166,6 +168,7 @@ createApp({
   async mounted() {
     await this.$nextTick();
     this.loadSettings();
+    this.loadPageCounts();
     await this.loadAccount();
   },
 
@@ -332,6 +335,30 @@ createApp({
       }
     },
 
+    // ── PAGE/CHAPTER/VOLUME COUNTS (Libraries section) ──
+    async loadPageCounts() {
+      try {
+        const res  = await fetch(apiUrl('/api/settings/page-counts'));
+        const data = await res.json();
+        const byLib = {};
+        for (const lib of (data.libraries || [])) {
+          byLib[String(lib.library_id)] = {
+            pages:    lib.total_pages,
+            chapters: lib.total_chapters,
+            volumes:  lib.total_volumes,
+          };
+        }
+        this.pageCounts = byLib;
+        this.pageCountsGrand = {
+          pages:    data.grand_total_pages    ?? 0,
+          chapters: data.grand_total_chapters ?? 0,
+          volumes:  data.grand_total_volumes  ?? 0,
+        };
+      } catch (e) {
+        console.error('Failed to load page counts:', e);
+      }
+    },
+
     // ── SAVE DATA PATH ──
     async saveDataPath() {
       const path = this.dataPath.trim();
@@ -455,6 +482,7 @@ createApp({
                         ...this.scanStatus,
                         [libraryId]: { msg: `✓ ${data.manga_count} mangas found — scanned at ${timeStr}`, type: 'ok' }
                     };
+                    this.loadPageCounts();
                     clearInterval(interval);
                 }
             } catch (e) {
