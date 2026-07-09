@@ -648,6 +648,35 @@ pattern across `manga_detail.html`, `volume_detail.html`,
 app, not just the one reported, since it was the identical bug everywhere
 this close-on-outside-click convention was used.
 
+### 15. Exclude solid-color pages from duplicate matching entirely (2026-07-09)
+
+Follow-up to the dominant-color-masking fix above (#9's follow-up):
+requested that pages which are completely one flat color (a title card, a
+scene-transition blackout) never get flagged as a "duplicate" of another
+page — the masking fix already stopped a mostly-flat page from *false*-matching
+genuinely different content, but did nothing for the exact-SHA1-match path,
+which doesn't look at content at all: two solid-color pages that happen to be
+byte-identical (or reach the SSIM path and score high because there's a
+nonzero page.get("pages") worth of matching background) would still get
+flagged, even though "these two blank pages are similar" isn't useful
+information — a manga having several such pages is expected content, not
+corruption or an accidental repeat.
+
+Fixed with a pre-filter, not more masking: `_is_solid_color()` (`integrity.py`)
+reuses `_dominant_color_mask()` at the same downsized grayscale used for
+SSIM, and flags a page where ≥`SOLID_COLOR_FRACTION` (98%) of pixels are
+within `DOMINANT_COLOR_TOLERANCE` of its own dominant color. `_find_duplicate_groups()`
+drops any such page from both `hashes` and `raw_data` before exact-SHA1
+grouping even runs — so a solid page can no longer enter a duplicate group
+at all, whether by exact byte match or by SSIM, rather than relying on
+`_ssim_score`'s existing `MIN_COMPARABLE_FRACTION` abstain (which only ever
+applied to the near-duplicate path, never the exact-hash one). Verified: two
+byte-identical solid-white pages and two solid-white pages with different
+JPEG compression both now produce zero duplicate groups, while a real
+near-duplicate pair (same artwork, recompressed) still gets flagged
+correctly (~0.99 similarity) — the filter only removes flat pages from
+consideration, it doesn't touch real-content matching.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

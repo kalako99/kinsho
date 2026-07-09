@@ -50,6 +50,14 @@ DOMINANT_COLOR_TOLERANCE = 14
 # a similarity score either way — treated as inconclusive (returns 0.0, i.e.
 # not a match) rather than falling back to the whole (bias-inflated) image.
 MIN_COMPARABLE_FRACTION = 0.05
+# A page where at least this fraction of pixels are within
+# DOMINANT_COLOR_TOLERANCE of its own dominant color is treated as
+# essentially one solid color (a title card, a scene-transition blackout)
+# and excluded from duplicate matching entirely, before any hashing —
+# two blank/solid pages "matching" isn't a useful finding even when they're
+# byte-identical, since a manga having several such pages is expected
+# content, not corruption or an accidental repeat.
+SOLID_COLOR_FRACTION = 0.98
 
 
 def _phash(data: bytes) -> int:
@@ -87,6 +95,21 @@ def _dominant_color_mask(arr: np.ndarray, tolerance: float) -> np.ndarray:
     values, counts = np.unique(np.round(arr).astype(np.uint8), return_counts=True)
     dominant = values[np.argmax(counts)]
     return np.abs(arr - dominant) <= tolerance
+
+
+def _is_solid_color(data: bytes) -> bool:
+    """Whether an image is essentially one flat color end to end — see
+    SOLID_COLOR_FRACTION above. Returns False (don't exclude) on anything
+    that fails to decode; a real corruption finding for it is already
+    produced elsewhere, and silently dropping it from duplicate matching
+    here would just hide that."""
+    try:
+        img = Image.open(io.BytesIO(data)).convert('L').resize(
+            (SSIM_COMPARE_SIZE, SSIM_COMPARE_SIZE), Image.LANCZOS)
+    except Exception:
+        return False
+    arr = np.asarray(img, dtype=np.float64)
+    return bool(_dominant_color_mask(arr, DOMINANT_COLOR_TOLERANCE).mean() >= SOLID_COLOR_FRACTION)
 
 
 def _ssim_score(data_a: bytes, data_b: bytes) -> float:
@@ -145,6 +168,11 @@ def _find_duplicate_groups(hashes: dict, raw_data: dict) -> list:
     Returns [{"filenames": [...], "similarity": float}, ...] — similarity is
     always 1.0 for exact groups, the measured SSIM score for near ones.
     """
+    solid = {name for name, data in raw_data.items() if _is_solid_color(data)}
+    if solid:
+        hashes   = {name: h for name, h in hashes.items() if name not in solid}
+        raw_data = {name: d for name, d in raw_data.items() if name not in solid}
+
     by_hash = defaultdict(list)
     for name, h in hashes.items():
         by_hash[h].append(name)
