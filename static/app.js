@@ -247,11 +247,19 @@ const app = createApp({
 
         const backdropEnabled = settings.backdrop_list !== false;
         const lockBackdrop = settings.lock_backdrop === true;
-        if (lockBackdrop && this.bgLayerStyle) {
-          // Keep whatever backdrop is already showing — don't recompute it.
+        if (lockBackdrop && settings.locked_backdrop_url) {
+          // A backdrop was already locked in (persisted server-side, so this
+          // survives full page reloads, not just this Vue instance's lifetime).
+          this.bgLayerStyle = { backgroundImage: `url('${settings.locked_backdrop_url}')` };
+          this.bgIsRaster = true;
         } else if (backdropEnabled && bgManga && bgManga.coverLarge) {
           this.bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
           this.bgIsRaster = true;
+          if (lockBackdrop) {
+            // First load with the lock on and nothing captured yet — lock in
+            // whatever's showing right now so it persists from here on.
+            this.persistLockedBackdrop(bgManga.coverLarge);
+          }
         } else {
           this.bgLayerStyle = null;
           this.bgIsRaster = false;
@@ -261,6 +269,18 @@ const app = createApp({
         await this.loadLastUpdated(libraryId, 1, historyByMangaId);
       } catch (e) {
         console.error('Failed to load mangas:', e);
+      }
+    },
+
+    async persistLockedBackdrop(url) {
+      try {
+        await fetch(apiUrl('/api/settings/backdrop'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ locked_backdrop_url: url }),
+        });
+      } catch (e) {
+        console.error('Failed to persist locked backdrop:', e);
       }
     },
 

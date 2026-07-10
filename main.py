@@ -2470,6 +2470,7 @@ def get_settings(request: Request):
         "backdrop_list":            user_data.get("backdrop_list",   True),
         "backdrop_detail":          user_data.get("backdrop_detail", True),
         "lock_backdrop":            user_data.get("lock_backdrop",   False),
+        "locked_backdrop_url":      user_data.get("locked_backdrop_url", ""),
         "hide_ble_scroller":        user_data.get("hide_ble_scroller", True),
         "hidden_libraries":         user_data.get("hidden_libraries", []),
         "show_collections_row":     user_data.get("show_collections_row", True),
@@ -2688,7 +2689,11 @@ async def save_backdrop(request: Request):
     if "backdrop_detail" in body:
         user_data["backdrop_detail"] = bool(body["backdrop_detail"])
     if "lock_backdrop" in body:
-        user_data["lock_backdrop"]   = bool(body["lock_backdrop"])
+        user_data["lock_backdrop"] = bool(body["lock_backdrop"])
+        if not user_data["lock_backdrop"]:
+            user_data["locked_backdrop_url"] = ""
+    if "locked_backdrop_url" in body:
+        user_data["locked_backdrop_url"] = body["locked_backdrop_url"] or ""
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 

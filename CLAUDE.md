@@ -696,15 +696,28 @@ Two small, unrelated additions:
 - **"Lock backdrop" toggle (Appearance → Display).** `lock_backdrop`
   (`{data_path}/{username}.json`, `POST /api/settings/backdrop` alongside
   the existing `backdrop_list`/`backdrop_detail` keys — same endpoint,
-  just a third optional key). When on, `static/app.js`'s `loadMangas`
-  (the function that recomputes the library page's blurred backdrop from
-  `this.lastRead[0]`, the most recently read manga, every time it runs —
-  on tab switch, on `visibilitychange`, after a scan) skips recomputing
-  `bgLayerStyle` whenever one is already set, leaving whatever's currently
-  displayed alone instead of swapping it for the new tab's/session's
-  last-read manga. The very first computation (page load, `bgLayerStyle`
-  still `null`) still runs normally even with the lock on — there has to
-  be an initial backdrop before there's anything to lock onto.
+  just extra optional keys). When on, the library page's blurred backdrop
+  stops following `this.lastRead[0]` (the most recently read manga) and
+  stays on whichever cover was showing when the lock was captured.
+  **First shipped as in-memory-only (skip recomputing `bgLayerStyle` in
+  `static/app.js`'s `loadMangas` whenever one was already set) — broken by
+  design, not just a bug**: `bgLayerStyle` is plain Vue component state, and
+  the library page does a full reload (new page load, fresh Vue instance,
+  `bgLayerStyle` back to `null`) every time you navigate to a manga to read
+  it and then back — exactly the moment a new "most recently read" manga
+  exists, so the lock defeated itself on almost every use. Fixed same day
+  by persisting the actual locked-in cover URL server-side
+  (`locked_backdrop_url` in `{username}.json`, same endpoint) instead of
+  relying on component memory: the first time `loadMangas` runs with the
+  lock on and no `locked_backdrop_url` saved yet, it computes the backdrop
+  normally from `this.lastRead[0]` same as always, displays it, and POSTs
+  that cover URL back to `/api/settings/backdrop` to persist it. Every
+  subsequent `loadMangas` call — including after a full page reload —
+  checks `locked_backdrop_url` first and, if set, uses that instead of
+  recomputing from last-read at all. Unchecking the toggle clears
+  `locked_backdrop_url` server-side (handled in the same `save_backdrop`
+  handler in `main.py`), so re-enabling the lock later captures a fresh
+  "current" backdrop rather than reusing a stale one.
 
 ---
 
