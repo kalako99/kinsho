@@ -246,7 +246,10 @@ const app = createApp({
         }
 
         const backdropEnabled = settings.backdrop_list !== false;
-        if (backdropEnabled && bgManga && bgManga.coverLarge) {
+        const lockBackdrop = settings.lock_backdrop === true;
+        if (lockBackdrop && this.bgLayerStyle) {
+          // Keep whatever backdrop is already showing — don't recompute it.
+        } else if (backdropEnabled && bgManga && bgManga.coverLarge) {
           this.bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
           this.bgIsRaster = true;
         } else {

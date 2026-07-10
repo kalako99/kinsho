@@ -677,6 +677,35 @@ near-duplicate pair (same artwork, recompressed) still gets flagged
 correctly (~0.99 similarity) — the filter only removes flat pages from
 consideration, it doesn't touch real-content matching.
 
+### 16. Admin's covers seed new users' defaults + lockable library-page backdrop (2026-07-10)
+
+Two small, unrelated additions:
+
+- **New users start with the creating admin's cover choices.** Per-manga
+  cover overrides (`user_data["covers"]`, set via `POST
+  /api/manga/{library_id}/{manga_id}/cover`) were always per-account and
+  started empty — a brand-new user fell back to `manga.get("cover")` (the
+  scan-time default) for every manga until they picked their own. Now
+  `auth.route_admin_create_user` copies whichever admin is *creating* the
+  account's own `covers` dict into the new user's `{username}.json` at
+  creation time (one-time seed, not a live sync — the new user can still
+  override any of them afterward, same as before). Deliberately keyed off
+  the requesting admin rather than a fixed "main admin" concept, since
+  the app has no notion of a single primary admin among possibly several
+  admin accounts.
+- **"Lock backdrop" toggle (Appearance → Display).** `lock_backdrop`
+  (`{data_path}/{username}.json`, `POST /api/settings/backdrop` alongside
+  the existing `backdrop_list`/`backdrop_detail` keys — same endpoint,
+  just a third optional key). When on, `static/app.js`'s `loadMangas`
+  (the function that recomputes the library page's blurred backdrop from
+  `this.lastRead[0]`, the most recently read manga, every time it runs —
+  on tab switch, on `visibilitychange`, after a scan) skips recomputing
+  `bgLayerStyle` whenever one is already set, leaving whatever's currently
+  displayed alone instead of swapping it for the new tab's/session's
+  last-read manga. The very first computation (page load, `bgLayerStyle`
+  still `null`) still runs normally even with the lock on — there has to
+  be an initial backdrop before there's anything to lock onto.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

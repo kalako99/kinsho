@@ -872,6 +872,10 @@
         <span style="font-size:0.85rem;">Backdrop on Manga / Volume detail page</span>
         <input type="checkbox" v-model="backdropDetail" @change="saveBackdrop('detail')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Lock Library page backdrop (stop it changing with your last-read manga)</span>
+        <input type="checkbox" v-model="lockBackdrop" @change="saveBackdrop('lock')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
       <div class="status-msg" :class="backdropStatus.type" v-text="backdropStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
   </div>

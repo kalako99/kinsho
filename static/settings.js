@@ -42,6 +42,7 @@ createApp({
       // ── BACKDROP ──
       backdropList:   true,
       backdropDetail: true,
+      lockBackdrop:   false,
       backdropStatus: { msg: '', type: '' },
 
       // ── BLE SCROLLER ──
@@ -320,6 +321,7 @@ createApp({
         }
         this.backdropList           = data.backdrop_list            !== false;
         this.backdropDetail         = data.backdrop_detail          !== false;
+        this.lockBackdrop           = data.lock_backdrop            === true;
         this.hideBleScroller        = data.hide_ble_scroller         !== false;
         this.hiddenLibraries        = (data.hidden_libraries || []).map(String);
         this.showCollectionsRow     = data.show_collections_row     !== false;
@@ -553,9 +555,9 @@ createApp({
 
     async saveBackdrop(key) {
       try {
-        const body = key === 'list'
-          ? { backdrop_list:   this.backdropList }
-          : { backdrop_detail: this.backdropDetail };
+        const body = key === 'list'   ? { backdrop_list:   this.backdropList }
+          : key === 'detail'          ? { backdrop_detail: this.backdropDetail }
+          : { lock_backdrop: this.lockBackdrop };
         const res  = await fetch(apiUrl('/api/settings/backdrop'), {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },

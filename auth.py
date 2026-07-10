@@ -504,7 +504,12 @@ async def route_admin_create_user(request: Request):
     data = _load_users()
     data["users"].append(new_user)
     _save_users(data)
-    save_user_data(username, {"is_admin": role == "admin"})
+
+    new_user_data = {"is_admin": role == "admin"}
+    admin_covers = load_user_data(get_current_user(request)).get("covers")
+    if admin_covers:
+        new_user_data["covers"] = admin_covers
+    save_user_data(username, new_user_data)
 
     perms_data    = load_permissions()
     default_perms = perms_data.get("_default", _DEFAULT_PERMISSIONS.copy())
