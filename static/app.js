@@ -150,7 +150,7 @@ const app = createApp({
         const res  = await fetch(apiUrl('/api/collections'));
         const data = await res.json();
         this.collectionsRow = this.showCollectionsRow
-          ? (data.collections || []).slice(0, 20).map(c => ({
+          ? (data.collections || []).slice().sort(() => Math.random() - 0.5).slice(0, 20).map(c => ({
               id:          c.id,
               title:       c.name,
               cover:       c.cover_url,
