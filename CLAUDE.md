@@ -777,6 +777,54 @@ a true whole-batch call (kept for any non-UI/API caller that wants it,
 and it's still hardened by the per-item try/except from the same day) —
 only the Recheck All *button* stopped using that path.
 
+**Second follow-up, same day**: sequential one-at-a-time walking fixed the
+silent-hang problem but was reported as genuinely slower overall than just
+clicking each row's Recheck button by hand — expected, since a fully
+sequential walk can't overlap any of the per-item I/O wait (opening/reading
+a chapter's whole archive, especially over a network drive) the way a human
+clicking at their own pace effectively also doesn't, but a *concurrent* walk
+can. `recheckAllIssues()` now runs a small fixed-size pool (`CONCURRENCY =
+4`) of workers pulling from a shared cursor over the same id list, instead
+of one worker doing them one by one — each worker still fires the identical
+single-item `{issue_ids: [id]}` request, just several in flight at once.
+
+Testing this also surfaced a real, unrelated bug it happened to make more
+visible: **the single-row Recheck button and the bulk "Recheck All" button
+shared one `integrityRechecking` flag**, so clicking Recheck on a single row
+also flipped the "Recheck All" button's own label to "Rechecking…" — making
+a single click look like it had kicked off a check of the *entire* list,
+which read as "even a single recheck got much slower" (it hadn't; the
+button just lied about what was running). Fixed by splitting it into two
+independent flags: `integrityRechecking` (bulk only) and a new
+`recheckingIssueId` (which single row, if any, is mid-request) — each
+button now only reflects and disables for its own operation, and the
+per-row button also gets its own "Rechecking…" label while that specific
+row is in flight.
+
+Running genuinely concurrent rechecks also introduced a real race that
+didn't exist under strict sequential processing: `record_integrity_result`
+and the endpoint's own clear-on-gone-item paths each did an unguarded
+load-mutate-save of `integrity_issues.json`, so two of them completing at
+the same moment could each save a version missing the other's update,
+silently losing a clear or an append. Fixed with `_integrity_issues_lock`
+(`main.py`, a `threading.RLock` — re-entrant so `record_integrity_result`
+can hold it across its whole load-mutate-save while its own internal
+`load_integrity_issues()`/`save_integrity_issues()` calls re-acquire it from
+the same thread without deadlocking) wrapping every read *and* write of
+that file, not just writes — `save_integrity_issues()` truncates the file
+before writing, so an unguarded concurrent read could otherwise observe a
+half-written, unparseable file, not just a stale one. Added
+`_clear_and_save_issue()` as the atomic equivalent of the old
+load-mutate-save-inline pattern for the two "item no longer exists" branches
+in the recheck endpoint, and the same lock now also guards `dismiss`/
+`dismiss-all`.
+
+Sequential vs. concurrent, and the shared-flag bug, were reported together
+and initially looked like the same complaint ("recheck all is slow/broken")
+— worth remembering they were actually three separate, independently-fixed
+issues (throughput, a mislabeled button, and a write race the throughput
+fix newly exposed), not one root cause.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

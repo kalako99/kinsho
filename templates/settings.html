@@ -1239,10 +1239,10 @@
       <div style="display:flex; gap:10px; margin-bottom:14px;">
         <button
           class="btn btn-primary"
-          @click="recheckAllIssues" :disabled="integrityRechecking"
+          @click="recheckAllIssues" :disabled="integrityRechecking || recheckingIssueId !== null"
           v-text="integrityRechecking ? 'Rechecking…' : 'Recheck All'"
         ></button>
-        <button class="btn" @click="dismissAllIssues" :disabled="integrityRechecking">Dismiss All</button>
+        <button class="btn" @click="dismissAllIssues" :disabled="integrityRechecking || recheckingIssueId !== null">Dismiss All</button>
       </div>
 
       <div class="card issue-card" v-for="issue in integrityIssues" :key="issue.id">
@@ -1257,7 +1257,11 @@
         <div class="issue-detail" v-text="issue.detail"></div>
         <div class="issue-actions">
           <a :href="`/manga/${issue.library_id}/${issue.manga_id}`" class="btn" style="text-decoration:none;">Open manga</a>
-          <button class="btn" @click="recheckIssue(issue.id)" :disabled="integrityRechecking">Recheck</button>
+          <button
+            class="btn" @click="recheckIssue(issue.id)"
+            :disabled="integrityRechecking || recheckingIssueId !== null"
+            v-text="recheckingIssueId === issue.id ? 'Rechecking…' : 'Recheck'"
+          ></button>
           <button class="btn" @click="dismissIssue(issue.id)">Dismiss</button>
         </div>
       </div>

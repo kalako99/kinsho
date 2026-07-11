@@ -421,6 +421,16 @@ def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
 
 INTEGRITY_RECHECK_SECONDS = 90 * 24 * 60 * 60  # ~3 months
 
+# Guards every access to integrity_issues.json — the admin Recheck All action
+# can now fire several rechecks concurrently (each running in its own thread
+# via asyncio.to_thread). Re-entrant so a caller doing an atomic load-mutate-save
+# (e.g. record_integrity_result) can hold it across all three steps while those
+# steps' own load_integrity_issues()/save_integrity_issues() calls re-acquire it
+# from the same thread without deadlocking. Reads take it too, not just writes —
+# save_integrity_issues() truncates the file before writing, so an unguarded
+# read overlapping a write could see a half-written, unparseable file.
+_integrity_issues_lock = threading.RLock()
+
 def _integrity_issues_file() -> Optional[str]:
     data_path = get_data_path()
     if not data_path:
@@ -431,19 +441,21 @@ def load_integrity_issues() -> dict:
     path = _integrity_issues_file()
     if not path or not os.path.exists(path):
         return {"issues": []}
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"issues": []}
+    with _integrity_issues_lock:
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {"issues": []}
 
 def save_integrity_issues(data: dict):
     path = _integrity_issues_file()
     if not path:
         return
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with _integrity_issues_lock:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
 
 def _clear_issues_for_item(issues_data: dict, library_id: int, manga_id: str, item_type: str, item_id: str):
     issues_data["issues"] = [
@@ -451,6 +463,14 @@ def _clear_issues_for_item(issues_data: dict, library_id: int, manga_id: str, it
         if not (i["library_id"] == library_id and i["manga_id"] == manga_id
                 and i["item_type"] == item_type and i["item_id"] == item_id)
     ]
+
+def _clear_and_save_issue(library_id: int, manga_id: str, item_type: str, item_id: str):
+    """Atomic clear+save (holds _integrity_issues_lock) for use outside record_integrity_result —
+    e.g. when a Recheck finds the manga/chapter/volume itself no longer exists at all."""
+    with _integrity_issues_lock:
+        issues_data = load_integrity_issues()
+        _clear_issues_for_item(issues_data, library_id, manga_id, item_type, item_id)
+        save_integrity_issues(issues_data)
 
 def record_integrity_result(
     library_id: int, manga_id: str, manga_name: str, item: dict, result: dict
@@ -461,34 +481,35 @@ def record_integrity_result(
     exactly how a Recheck clears a fixed issue). One issue per duplicate-page
     group, so each row in the admin list is one concrete problem.
     """
-    issues_data = load_integrity_issues()
-    _clear_issues_for_item(issues_data, library_id, manga_id, item["item_type"], item["item_id"])
-    now = datetime.now().isoformat()
+    with _integrity_issues_lock:
+        issues_data = load_integrity_issues()
+        _clear_issues_for_item(issues_data, library_id, manga_id, item["item_type"], item["item_id"])
+        now = datetime.now().isoformat()
 
-    if result["corrupt"]:
-        issues_data["issues"].append({
-            "id": uuid.uuid4().hex,
-            "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
-            "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
-            "type": "corrupt", "detail": result["corrupt"], "filenames": [],
-            "detected_at": now,
-        })
-    for group in result.get("duplicate_groups", []):
-        filenames = group["filenames"]
-        similarity = group.get("similarity", 1.0)
-        if similarity >= 1.0:
-            detail = f"{len(filenames)} identical pages: {', '.join(filenames)}"
-        else:
-            detail = f"{len(filenames)} near-duplicate pages ({similarity:.0%} similar): {', '.join(filenames)}"
-        issues_data["issues"].append({
-            "id": uuid.uuid4().hex,
-            "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
-            "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
-            "type": "duplicate_pages",
-            "detail": detail,
-            "filenames": filenames, "detected_at": now,
-        })
-    save_integrity_issues(issues_data)
+        if result["corrupt"]:
+            issues_data["issues"].append({
+                "id": uuid.uuid4().hex,
+                "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
+                "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
+                "type": "corrupt", "detail": result["corrupt"], "filenames": [],
+                "detected_at": now,
+            })
+        for group in result.get("duplicate_groups", []):
+            filenames = group["filenames"]
+            similarity = group.get("similarity", 1.0)
+            if similarity >= 1.0:
+                detail = f"{len(filenames)} identical pages: {', '.join(filenames)}"
+            else:
+                detail = f"{len(filenames)} near-duplicate pages ({similarity:.0%} similar): {', '.join(filenames)}"
+            issues_data["issues"].append({
+                "id": uuid.uuid4().hex,
+                "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
+                "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
+                "type": "duplicate_pages",
+                "detail": detail,
+                "filenames": filenames, "detected_at": now,
+            })
+        save_integrity_issues(issues_data)
 
 def run_integrity_check_for_item(library_id: int, manga_id: str, manga_name: str, dims: dict, item: dict) -> None:
     """Runs the check, records the result, and stamps this item's dims.json entry — used by
@@ -2329,8 +2350,7 @@ async def recheck_integrity_issues_endpoint(request: Request):
             manga_data = data.get("manga_data", {}).get(str(issue["library_id"]), {})
             manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == issue["manga_id"]), None)
             if not manga:
-                _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
-                save_integrity_issues(issues_data)
+                _clear_and_save_issue(issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
                 continue
             dims = load_manga_dims(issue["library_id"], manga["name"])
             current_item = next(
@@ -2340,8 +2360,7 @@ async def recheck_integrity_issues_endpoint(request: Request):
             )
             if not current_item:
                 # Chapter/volume no longer exists — nothing left to check, clear the finding.
-                _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
-                save_integrity_issues(issues_data)
+                _clear_and_save_issue(issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
                 continue
             await asyncio.to_thread(
                 run_integrity_check_for_item, issue["library_id"], issue["manga_id"], manga["name"], dims, current_item
@@ -2364,9 +2383,10 @@ async def dismiss_integrity_issue_endpoint(request: Request):
         return err
     body = await request.json()
     issue_id = body.get("issue_id")
-    issues_data = load_integrity_issues()
-    issues_data["issues"] = [i for i in issues_data["issues"] if i["id"] != issue_id]
-    save_integrity_issues(issues_data)
+    with _integrity_issues_lock:
+        issues_data = load_integrity_issues()
+        issues_data["issues"] = [i for i in issues_data["issues"] if i["id"] != issue_id]
+        save_integrity_issues(issues_data)
     return JSONResponse({"ok": True, "count": len(issues_data["issues"])})
 
 @app.post("/api/admin/integrity/dismiss-all")
@@ -2374,9 +2394,10 @@ async def dismiss_all_integrity_issues_endpoint(request: Request):
     err = auth.require_admin(request)
     if err:
         return err
-    issues_data = load_integrity_issues()
-    issues_data["issues"] = []
-    save_integrity_issues(issues_data)
+    with _integrity_issues_lock:
+        issues_data = load_integrity_issues()
+        issues_data["issues"] = []
+        save_integrity_issues(issues_data)
     return JSONResponse({"ok": True, "count": 0})
 
 def run_scan(library_id: int):

@@ -111,7 +111,8 @@ createApp({
       // ── ADMIN: INTEGRITY ISSUES ──
       integrityIssues:      [],
       integrityIssueCount:  0,
-      integrityRechecking:  false,
+      integrityRechecking:  false,   // Recheck All (bulk) in progress
+      recheckingIssueId:    null,    // single-row Recheck currently in progress, if any
       integrityStatus:      { msg: '', type: '' },
 
       // ── ADMIN: USER PERMISSIONS ──
@@ -1090,8 +1091,12 @@ createApp({
     },
 
     async recheckIssue(issueId) {
-      this.integrityRechecking = true;
-      this.integrityStatus     = { msg: '', type: '' };
+      // Own flag, separate from integrityRechecking (the Recheck All / bulk
+      // flag) — otherwise a single-row click made the "Recheck All" button
+      // itself flip to "Rechecking…", making it look like the whole batch
+      // had been kicked off by one row's click.
+      this.recheckingIssueId = issueId;
+      this.integrityStatus   = { msg: '', type: '' };
       try {
         const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1104,35 +1109,50 @@ createApp({
       } catch (e) {
         this.integrityStatus = { msg: 'Recheck failed.', type: 'err' };
       }
-      this.integrityRechecking = false;
+      this.recheckingIssueId = null;
       setTimeout(() => { this.integrityStatus = { msg: '', type: '' }; }, 3000);
     },
 
     async recheckAllIssues() {
-      // Walks the list one issue at a time (same request shape as a single
-      // Recheck click) rather than one giant backend call — gives visible
-      // progress and means one bad item can't stall the whole thing silently.
+      // Walks the list issue-by-issue (same request shape as a single Recheck
+      // click) rather than one giant backend call — gives visible progress and
+      // means one bad/slow item can't stall the whole thing silently. Runs a
+      // small pool of these concurrently instead of one at a time so waiting
+      // on I/O (a slow/network drive) for one item overlaps with the others
+      // instead of serializing the whole batch.
+      const CONCURRENCY = 4;
       this.integrityRechecking = true;
       const ids = this.integrityIssues.map(i => i.id);
-      for (let i = 0; i < ids.length; i++) {
-        const id = ids[i];
-        // A chapter/volume can carry more than one issue row; rechecking one
-        // already re-checks and clears every row for that same item, so a
-        // later id in this snapshot may already be gone — skip it if so.
-        if (!this.integrityIssues.some(iss => iss.id === id)) continue;
-        this.integrityStatus = { msg: `Rechecking ${i + 1} of ${ids.length}…`, type: 'scanning' };
-        try {
-          const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ issue_ids: [id] }),
-          });
-          const data = await res.json();
-          this.integrityIssues     = data.issues || [];
-          this.integrityIssueCount = data.count || 0;
-        } catch (e) {
-          console.error('Recheck failed for issue', id, e);
+      const total = ids.length;
+      let cursor = 0;
+      let done = 0;
+
+      const worker = async () => {
+        while (cursor < ids.length) {
+          const id = ids[cursor++];
+          // A chapter/volume can carry more than one issue row; rechecking one
+          // already re-checks and clears every row for that same item, so a
+          // later id in this snapshot may already be gone — skip it if so.
+          if (this.integrityIssues.some(iss => iss.id === id)) {
+            try {
+              const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ issue_ids: [id] }),
+              });
+              const data = await res.json();
+              this.integrityIssues     = data.issues || [];
+              this.integrityIssueCount = data.count || 0;
+            } catch (e) {
+              console.error('Recheck failed for issue', id, e);
+            }
+          }
+          done++;
+          this.integrityStatus = { msg: `Rechecking ${done} of ${total}…`, type: 'scanning' };
         }
-      }
+      };
+
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
+
       this.integrityStatus = { msg: '✓ Recheck complete.', type: 'ok' };
       this.integrityRechecking = false;
       setTimeout(() => { this.integrityStatus = { msg: '', type: '' }; }, 4000);
