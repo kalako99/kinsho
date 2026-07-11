@@ -455,7 +455,12 @@ def save_integrity_issues(data: dict):
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with _integrity_issues_lock:
         with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+            # No indent: after a whole-library drive dropout this file can hold
+            # thousands of entries, and it's read/written on every single recheck —
+            # pretty-printing that repeatedly is pure wasted CPU (this file is
+            # never meant to be hand-edited, unlike the smaller config-ish JSON
+            # files elsewhere that keep indent=2 for readability).
+            json.dump(data, f)
 
 def _clear_issues_for_item(issues_data: dict, library_id: int, manga_id: str, item_type: str, item_id: str):
     issues_data["issues"] = [
@@ -520,6 +525,47 @@ def run_integrity_check_for_item(library_id: int, manga_id: str, manga_name: str
     if bucket is not None and item["item_id"] in bucket:
         bucket[item["item_id"]]["integrity_checked_at"] = datetime.now().isoformat()
         save_manga_dims(library_id, manga_name, dims)
+
+def prune_stale_integrity_issues(library_id: int, mangas: list) -> None:
+    """Drops integrity issues for this library whose manga/chapter/volume no
+    longer exists after a rescan — the exact same "item is gone" check Recheck
+    already does per-issue, just applied to the whole library in one pass.
+
+    Recheck can NEVER clear an issue on content that's genuinely gone (a
+    missing folder always reports "corrupt" again — see record_integrity_result
+    — so clicking Recheck on a permanently-deleted chapter just replaces the
+    issue with a fresh copy of itself, forever). Only a rescan actually removes
+    a dead chapter from dims.json, so this is the only place that can tell
+    "content that's really gone" apart from "content that's still there but
+    broken" — a scan already has to read every manga's fresh dims anyway, so
+    doing this here is one bulk pass instead of admins clicking Recheck one
+    slow-and-futile row at a time on content that was deleted, not corrupted.
+    """
+    with _integrity_issues_lock:
+        issues_data = load_integrity_issues()
+        lib_issues = [i for i in issues_data["issues"] if i["library_id"] == library_id]
+        if not lib_issues:
+            return
+        mangas_by_id = {m["id"]: m for m in mangas}
+        dims_cache: dict = {}
+
+        def item_still_exists(issue: dict) -> bool:
+            manga = mangas_by_id.get(issue["manga_id"])
+            if not manga:
+                return False
+            if manga["name"] not in dims_cache:
+                dims_cache[manga["name"]] = load_manga_dims(library_id, manga["name"])
+            dims = dims_cache[manga["name"]]
+            return any(
+                it["item_type"] == issue["item_type"] and it["item_id"] == issue["item_id"]
+                for it in checkable_items_for_manga(dims)
+            )
+
+        issues_data["issues"] = [
+            i for i in issues_data["issues"]
+            if i["library_id"] != library_id or item_still_exists(i)
+        ]
+        save_integrity_issues(issues_data)
 
 # ── LRU PAGE CACHE ──
 # Keyed by (archive_path, entry_name) or (pdf_path, page_index)
@@ -2433,6 +2479,12 @@ def run_scan(library_id: int):
         data["all_tags"] = rebuild_all_tags(data)
         data["all_genres"] = rebuild_all_genres(data)
     save_app_data(data)
+    # Only prune if the library's root path(s) were actually reachable this
+    # scan — never on a drive that's currently disconnected, which would
+    # otherwise look identical to "everything in this library got deleted"
+    # and wipe out every real issue instead of just the genuinely-gone ones.
+    if any(os.path.exists(p) for p in raw_paths if p):
+        prune_stale_integrity_issues(library_id, mangas)
     _scan_running.discard(library_id)
     print(f"[Scan] Done. Saved to data.json.")
     t = threading.Thread(target=extract_thumbs_for_library, args=(library_id,), daemon=True)

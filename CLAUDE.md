@@ -825,6 +825,61 @@ and initially looked like the same complaint ("recheck all is slow/broken")
 issues (throughput, a mislabeled button, and a write race the throughput
 fix newly exposed), not one root cause.
 
+**Third follow-up, same day**: reported again as still much slower than
+before for the exact error class the original dropout produced en masse —
+`Failed to list folder contents: [Errno 2] No such file or directory: ...`
+(a chapter/volume folder that's flat-out gone) — 10-15s per row where it
+used to be instant, meaning "Recheck All" across a whole dropped-drive's
+worth of these would take *hours*, not the seconds it should. Root cause
+this time wasn't concurrency or the UI — it's that **Recheck can never
+actually clear this class of issue in the first place**:
+`record_integrity_result` unconditionally re-appends a fresh "corrupt" entry
+whenever `result["corrupt"]` is still truthy, which it always will be for a
+folder that's genuinely gone — so clicking Recheck on real, permanent
+content-deletion just replaces the issue with an identical copy of itself
+(new id, new timestamp), forever. It only *looked* like it used to clear
+instantly because the endpoint has a separate, genuinely-fast path: if
+`checkable_items_for_manga(dims)` no longer lists the chapter/volume at all
+(dims.json already updated by an earlier rescan to drop it), Recheck clears
+it with zero filesystem access. Whether a given row hits that fast path or
+the slow real-check path purely depends on whether a library rescan has
+happened *since* the content actually disappeared — for a large batch of
+issues from one big dropout, most of them hadn't been through a rescan yet,
+so nearly every row was hitting the slow path that, on top of it all, was
+never even going to succeed at clearing anything.
+
+Fixed at the source instead of trying to make the slow path faster:
+`prune_stale_integrity_issues()` (`main.py`), called from `run_scan()` right
+after a library's fresh manga list is saved. A scan already reads the whole
+library's current, authoritative state — this reuses that instead of
+needing an admin to click Recheck, one slow-and-futile row at a time, on
+content a scan already knows is gone. It walks every open issue for that
+library, and for each one checks whether `checkable_items_for_manga()`
+against the freshly-scanned `dims.json` still lists that exact
+chapter/volume; if not (manga gone entirely, or just that one chapter),
+the issue is dropped, in one single load-mutate-save of
+`integrity_issues.json` for the *whole* library instead of one HTTP
+round-trip per row. Real corruption on content that still exists is
+untouched — only issues for content the fresh scan no longer knows about
+get cleared, and only from a scan, never implicitly from a Recheck click.
+Guarded against the exact scenario that caused all this in the first place:
+if none of the library's root path(s) are reachable at scan time (`os.path.exists`),
+pruning is skipped entirely for that scan — a rescan attempted while the
+drive is *still* disconnected must never be allowed to look identical to
+"every manga in this library got deleted" and wipe out every real issue
+instead of just the genuinely-gone ones.
+
+Also dropped `indent=2` from `save_integrity_issues()` — after a
+whole-library dropout this file can hold thousands of entries and gets
+read/written on every single recheck; pretty-printing that repeatedly is
+pure wasted CPU for a file nobody hand-edits, unlike the smaller
+config-shaped JSON files elsewhere that keep `indent=2` for that reason.
+
+The practical upshot: after this fix, hitting Reload on a library is what
+actually clears the backlog from a drive dropout (in one pass, in seconds)
+— Recheck/Recheck All are for confirming whether content that's *still
+there* is actually fixed, not for content that's simply gone.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
