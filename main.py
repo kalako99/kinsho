@@ -2325,27 +2325,34 @@ async def recheck_integrity_issues_endpoint(request: Request):
         if key in seen:
             continue
         seen.add(key)
-        manga_data = data.get("manga_data", {}).get(str(issue["library_id"]), {})
-        manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == issue["manga_id"]), None)
-        if not manga:
-            _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
-            save_integrity_issues(issues_data)
+        try:
+            manga_data = data.get("manga_data", {}).get(str(issue["library_id"]), {})
+            manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == issue["manga_id"]), None)
+            if not manga:
+                _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
+                save_integrity_issues(issues_data)
+                continue
+            dims = load_manga_dims(issue["library_id"], manga["name"])
+            current_item = next(
+                (it for it in checkable_items_for_manga(dims)
+                 if it["item_type"] == issue["item_type"] and it["item_id"] == issue["item_id"]),
+                None,
+            )
+            if not current_item:
+                # Chapter/volume no longer exists — nothing left to check, clear the finding.
+                _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
+                save_integrity_issues(issues_data)
+                continue
+            await asyncio.to_thread(
+                run_integrity_check_for_item, issue["library_id"], issue["manga_id"], manga["name"], dims, current_item
+            )
+            checked += 1
+        except Exception as e:
+            # One item failing (e.g. a flaky network drive mid-batch) must not abort
+            # the whole batch — every other item still gets checked, same as if each
+            # had been rechecked individually one at a time.
+            print(f"[Integrity] Recheck failed for {issue.get('manga_name')} / {issue.get('item_name')}: {e}")
             continue
-        dims = load_manga_dims(issue["library_id"], manga["name"])
-        current_item = next(
-            (it for it in checkable_items_for_manga(dims)
-             if it["item_type"] == issue["item_type"] and it["item_id"] == issue["item_id"]),
-            None,
-        )
-        if not current_item:
-            # Chapter/volume no longer exists — nothing left to check, clear the finding.
-            _clear_issues_for_item(issues_data, issue["library_id"], issue["manga_id"], issue["item_type"], issue["item_id"])
-            save_integrity_issues(issues_data)
-            continue
-        await asyncio.to_thread(
-            run_integrity_check_for_item, issue["library_id"], issue["manga_id"], manga["name"], dims, current_item
-        )
-        checked += 1
 
     updated = load_integrity_issues()["issues"]
     return JSONResponse({"ok": True, "checked": checked, "issues": updated, "count": len(updated)})
@@ -2361,6 +2368,16 @@ async def dismiss_integrity_issue_endpoint(request: Request):
     issues_data["issues"] = [i for i in issues_data["issues"] if i["id"] != issue_id]
     save_integrity_issues(issues_data)
     return JSONResponse({"ok": True, "count": len(issues_data["issues"])})
+
+@app.post("/api/admin/integrity/dismiss-all")
+async def dismiss_all_integrity_issues_endpoint(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    issues_data = load_integrity_issues()
+    issues_data["issues"] = []
+    save_integrity_issues(issues_data)
+    return JSONResponse({"ok": True, "count": 0})
 
 def run_scan(library_id: int):
     _scan_running.add(library_id)

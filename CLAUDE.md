@@ -719,6 +719,39 @@ Two small, unrelated additions:
   handler in `main.py`), so re-enabling the lock later captures a fresh
   "current" backdrop rather than reusing a stale one.
 
+### 17. "Recheck All" not clearing issues after a drive dropout + Dismiss All (2026-07-11)
+
+Reported after a network-drive disconnect/reconnect had flagged a large batch
+of integrity issues: clicking **Recheck** on each issue individually cleared
+it, but **Recheck All** cleared nothing.
+
+Root cause: `recheck_integrity_issues_endpoint` (`main.py`) looped over every
+targeted issue with no per-item error handling — a single item throwing (a
+manga drive still flaky partway through reconnecting, mid-batch, is exactly
+the kind of transient failure a large bulk pass is more likely to hit than
+any one isolated click) took down the **entire** request with an unhandled
+500. The single-issue Recheck path never hit this because each click is its
+own isolated request — one bad item there only fails that one request, not a
+batch of a hundred others. On the frontend, `static/settings.js`'s
+`recheckAllIssues()`/`recheckIssue()` both do `await res.json()` and only
+update `this.integrityIssues` from a successful response; a 500 (HTML error
+page, not JSON) throws inside that `await`, lands in the `catch` block, and
+the catch handler never touches `this.integrityIssues` — so the list stayed
+exactly as it was, with no visible error either, reading as "nothing
+happened" even though some items earlier in the loop may have actually
+cleared server-side already (`record_integrity_result` saves to disk
+per-item as it goes, independent of the crashed response). Fixed by wrapping
+each item's processing in its own `try/except` inside the loop — one item's
+failure is now logged and skipped, and every other item in the batch still
+gets checked and reflected in the response, matching "Recheck All" to
+actually behave like pressing Recheck on every item.
+
+Also added, as requested alongside this: a **Dismiss All** button next to
+Recheck All in the Issues section, `POST /api/admin/integrity/dismiss-all`
+(clears `integrity_issues.json` entirely — no per-item loop needed, unlike
+Recheck), gated behind the same `confirm()` pattern already used for the
+other destructive admin actions (delete user, log out everywhere).
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)

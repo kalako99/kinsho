@@ -1236,11 +1236,14 @@
     </div>
 
     <template v-else>
-      <button
-        class="btn btn-primary" style="margin-bottom:14px;"
-        @click="recheckAllIssues" :disabled="integrityRechecking"
-        v-text="integrityRechecking ? 'Rechecking…' : 'Recheck All'"
-      ></button>
+      <div style="display:flex; gap:10px; margin-bottom:14px;">
+        <button
+          class="btn btn-primary"
+          @click="recheckAllIssues" :disabled="integrityRechecking"
+          v-text="integrityRechecking ? 'Rechecking…' : 'Recheck All'"
+        ></button>
+        <button class="btn" @click="dismissAllIssues" :disabled="integrityRechecking">Dismiss All</button>
+      </div>
 
       <div class="card issue-card" v-for="issue in integrityIssues" :key="issue.id">
         <div class="issue-trace">

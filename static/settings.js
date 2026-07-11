@@ -1141,6 +1141,18 @@ createApp({
       }
     },
 
+    async dismissAllIssues() {
+      if (!confirm(`Dismiss all ${this.integrityIssues.length} issue(s)? This just clears the list — it doesn't fix anything.`)) return;
+      try {
+        const res  = await fetch(apiUrl('/api/admin/integrity/dismiss-all'), { method: 'POST' });
+        const data = await res.json();
+        this.integrityIssues     = [];
+        this.integrityIssueCount = data.count || 0;
+      } catch (e) {
+        console.error('Failed to dismiss all issues:', e);
+      }
+    },
+
     // ── CREATE USER (admin only) ──
     async createUser() {
       const username = this.newUsername.trim().toLowerCase();
