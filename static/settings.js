@@ -1109,20 +1109,31 @@ createApp({
     },
 
     async recheckAllIssues() {
+      // Walks the list one issue at a time (same request shape as a single
+      // Recheck click) rather than one giant backend call — gives visible
+      // progress and means one bad item can't stall the whole thing silently.
       this.integrityRechecking = true;
-      this.integrityStatus     = { msg: 'Rechecking every flagged item…', type: 'scanning' };
-      try {
-        const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        });
-        const data = await res.json();
-        this.integrityIssues     = data.issues || [];
-        this.integrityIssueCount = data.count || 0;
-        this.integrityStatus     = { msg: `✓ Rechecked ${data.checked} item(s).`, type: 'ok' };
-      } catch (e) {
-        this.integrityStatus = { msg: 'Recheck failed.', type: 'err' };
+      const ids = this.integrityIssues.map(i => i.id);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        // A chapter/volume can carry more than one issue row; rechecking one
+        // already re-checks and clears every row for that same item, so a
+        // later id in this snapshot may already be gone — skip it if so.
+        if (!this.integrityIssues.some(iss => iss.id === id)) continue;
+        this.integrityStatus = { msg: `Rechecking ${i + 1} of ${ids.length}…`, type: 'scanning' };
+        try {
+          const res  = await fetch(apiUrl('/api/admin/integrity/recheck'), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issue_ids: [id] }),
+          });
+          const data = await res.json();
+          this.integrityIssues     = data.issues || [];
+          this.integrityIssueCount = data.count || 0;
+        } catch (e) {
+          console.error('Recheck failed for issue', id, e);
+        }
       }
+      this.integrityStatus = { msg: '✓ Recheck complete.', type: 'ok' };
       this.integrityRechecking = false;
       setTimeout(() => { this.integrityStatus = { msg: '', type: '' }; }, 4000);
     },

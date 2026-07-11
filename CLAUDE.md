@@ -752,6 +752,31 @@ Recheck All in the Issues section, `POST /api/admin/integrity/dismiss-all`
 Recheck), gated behind the same `confirm()` pattern already used for the
 other destructive admin actions (delete user, log out everywhere).
 
+**Follow-up, same day**: the try/except fix above stopped the crash, but
+against a genuinely large batch (the same network-drive-dropout scenario
+that originally flagged everything) the single request driving the whole
+loop server-side was still reported as "slow and doesn't seem to be doing
+anything after 20 minutes" — one HTTP request silently doing all the work
+with zero progress feedback until it finally finishes (or the caller gives
+up waiting). Reworked `recheckAllIssues()` (`static/settings.js`) to drop
+the `{}` (recheck-everything) call entirely and instead walk
+`this.integrityIssues` client-side, issuing the exact same
+`{issue_ids: [id]}` request the single-row Recheck button already uses, one
+at a time, in sequence — so it's now *literally* "press Recheck on every
+row" as requested, not a different code path that happens to cover the same
+issues. This gives a live `Rechecking N of M…` status between requests
+instead of one opaque wait, and since each item is now its own independent
+request, a stuck/slow one only delays the items after it rather than
+blocking a single all-or-nothing response. Each snapshot id is checked
+against the live `this.integrityIssues` before firing its request, since
+one item's recheck can clear more than one row (multiple issues sharing a
+chapter/volume) and an already-cleared id later in the same walk should be
+skipped rather than re-checked pointlessly. The backend's
+`recheck_integrity_issues_endpoint` still accepts an empty `issue_ids` for
+a true whole-batch call (kept for any non-UI/API caller that wants it,
+and it's still hardened by the per-item try/except from the same day) —
+only the Recheck All *button* stopped using that path.
+
 ---
 
 ## Security audit — auth.py & permissions (2026-07-02, all findings fixed 2026-07-03)
