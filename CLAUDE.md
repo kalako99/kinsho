@@ -1307,6 +1307,14 @@ this direction turns out not to be enough.
     speed). Kinsho's own tracked position had no way to know that had
     happened, so the very next frame it wrote its own stale value straight
     back over the recenter's adjustment — a real, visible jump backward
+    (**update, 2026-07-19**: the conveyor-belt fixes below eliminated the
+    direct `reader.scrollTop` writes this bullet describes — `recenterConveyor`'s
+    shift path no longer touches `scrollTop` at all, only the two spacer
+    elements' heights — so this exact race is now structurally impossible
+    for the shift path; the `>3px` tolerance check described here is left
+    as-is since it's still a correct, harmless safety net for the
+    `_rebuildConveyorWindow` "big jump" path, which still does write
+    `scrollTop` directly)
     (or forward). Fixed by checking every frame (not just on idle→active)
     whether `reader.scrollTop` has drifted from the tracked position by
     more than a few pixels (ordinary float→integer rounding from kinsho's
@@ -1357,3 +1365,124 @@ to take effect:**
 The connection-priority fix above is the one Android-side knob that affects
 feel; there's no adjustable constant there, just the fixed
 `CONNECTION_PRIORITY_HIGH` request.
+
+## Long-strip reader: virtualized-scroll bug fixes (2026-07-19)
+
+Six bugs reported by the user from real-device reading sessions (confirmed
+reproducing in a desktop browser too, not Android/WebView-specific): a hard
+scroll "floor" after roughly 40 pages that acted like end-of-chapter
+regardless of the chapter's real length; an occasional black/unloaded page
+mid-scroll while later pages were already loaded; the reading position
+sometimes resetting to the top of the current image while scrolling with a
+mouse; the segmented progress bar under-counting at the true last page (e.g.
+35/40); the same bar occasionally flashing/teleporting between page 1 and
+another page while scrolling normally; and not being able to drag-scroll via
+the black letterbox bars that appear when zoomed out in long-strip mode.
+
+Root-caused via a full trace of `chapter_reader.html`'s conveyor-belt
+virtualization (`SLOT_COUNT = 80` materialized DOM slots out of a much
+longer full-chapter `manifest[]`) plus a comparative study of how
+SumatraPDF (`DisplayModel`/`RenderCache`) and PDF.js (`pdf_viewer.js`/
+`pdf_rendering_queue.js`) solve the same "very long virtualized scroll"
+problem — both separate the *scrollable range* (computed once from full
+document geometry, never bounded by what's currently rendered) from the
+*rendered range* (a much smaller, continuously-updated window). This
+codebase had conflated the two: `#reader`'s native `scrollHeight` was simply
+the sum of whatever ~80 slots happened to be materialized, and the window
+only grew when scrolling settled (`scrollend` or a settle-poll fallback) —
+never during one long continuous gesture. Decided against a PDF.js-style
+full rewrite of the render/visibility pipeline (a multi-week undertaking for
+a framework-free, test-free, ~4400-line solo-maintained file) in favor of a
+surgical fix that removes the actual conflation:
+
+- **Full-height spacer pair** (`topSpacer`/`bottomSpacer`, permanent
+  siblings of the materialized slot pool inside `#reader`, sized by a new
+  `_syncSpacers()`): `#reader`'s real `scrollHeight` is now always the true
+  full-manifest height (`cursorY`), from first paint onward, never bounded
+  by the conveyor window — this alone removes the false "floor," since a
+  continuous scroll can never outrun the actual DOM's real scrollable
+  extent. `_rebuildConveyorWindow`/`_shiftConveyorWindow` no longer write
+  `reader.scrollTop` directly at all (previously the only two places that
+  did) — `_syncSpacers()` replaces that manual compensation entirely, and
+  `virtualY` simplifies from `manifest[windowLo].globalY + reader.scrollTop`
+  to just `reader.scrollTop` (the two are now numerically identical by
+  construction). A separate, concrete bug found alongside this: the
+  last-page-popup check in `syncScrollPosition` compared against the
+  **windowed** `reader.scrollHeight` instead of the true `cursorY` bound
+  `momentumLoop` already used correctly — the mismatch between those two
+  "are we at the end" checks is what made hitting the false floor
+  specifically look like "the last page," not just an unresponsive scroll.
+- **`overflow-anchor: none`** added to `#reader` — without it, the browser's
+  own default scroll-anchoring could apply a second, independent, async
+  `scrollTop` correction on top of the conveyor's manual one whenever slots
+  were added/removed above the fold, which is what most likely caused the
+  "position resets to top of image" / progress-bar flash bugs specifically
+  during mouse-wheel scrolling (a physical wheel delivers discrete notches,
+  each its own settle-eligible gesture, so window shifts fired far more
+  often than during one long touch/trackpad fling). Eliminating the manual
+  `scrollTop` writes above removes the second writer this was racing
+  against in the first place.
+- **Mid-gesture recenter trigger**: `syncScrollPosition` now also calls the
+  existing `recenterConveyor()` proactively once the current position gets
+  within `EDGE_MARGIN` (20 pages) of either edge of the materialized window
+  — not only from `scrollend`/settle. Safe to do mid-gesture specifically
+  *because* shifts no longer write `scrollTop` (the old warning about
+  recentering fighting native momentum applied to the previous
+  scrollTop-writing version) — this closes the one gap the spacer fix alone
+  would leave open (an extreme-velocity single gesture outrunning the
+  80-slot window before a settle event ever fires).
+- **Progress-bar undercount**: six call sites (`updateProgressBar`,
+  `getCurrentGlobalPageIdx`, `getVisibleChapterId`, `getCurrentPageIdx`,
+  `checkChapterCompletion`, `getCurrentPosition` — one more than originally
+  scoped; `getVisibleChapterId` used the identical pattern and was found
+  during implementation) all computed "current position" from the viewport
+  **midpoint** (`virtualY + viewH/2`), which can never reach past
+  `cursorY - viewH/2` once `virtualY` is clamped at true max scroll — any
+  trailing page/segment shorter than half a viewport could never be marked
+  active. Fixed with a shared `currentTrackingY()` helper that returns the
+  true `cursorY` once at true max scroll, and the ordinary midpoint
+  everywhere else — deliberately not switching every site to bottom-edge
+  tracking generally, which would change "current page" semantics
+  everywhere and make chapter-boundary detection more sensitive to any
+  transient bad `scrollTop`, risking the flash/teleport bug rather than
+  helping it.
+- **Letterbox drag-scroll**: `applyStripWidth()` (the zoom control) used to
+  resize `#reader` itself (`style.width`/`left`/`right`), so the black
+  letterbox area at reduced zoom was literally outside `#reader`'s own DOM
+  bounds and could never receive scroll/touch/pointer input. Fixed by
+  introducing `#reader-inner` (all slot-pool/spacer content now lives here
+  instead of directly in `#reader`) — `applyStripWidth` now resizes/centers
+  `readerInner` (`width` + `margin: 0 auto`) while `#reader` itself, along
+  with every scroll-mechanics reference (`scrollTop`/`scrollHeight`/
+  `clientHeight`, all `scroll`/`scrollend`/touch listeners), stays
+  permanently full-bleed — the letterbox gutter is now squarely inside
+  `#reader`'s own hit-test region at any zoom level.
+- Housekeeping folded in: deleted `SLOT_RENDER_RADIUS = 40`, a dead constant
+  (declared, never read anywhere) from an apparently earlier, abandoned
+  attempt at this same decoupling.
+
+**Verified so far**: JS syntax-checked after every edit; isolated headless
+(no live server, synthetic large manifests) tests confirming — a
+continuous, no-settle-ever scroll across a 500-page synthetic manifest in
+both directions never hits a false floor and reaches the true start/end
+exactly, with `scrollHeight` staying correct throughout; the last-page
+popup fires exactly at the true end and nowhere before; the progress-tracking
+fix reaches the true end/a short trailing page while leaving ordinary
+mid-scroll tracking numerically identical to before; and the letterbox
+gutter resolves to `#reader` itself (not `document.body`) as the
+`elementFromPoint` hit target once zoomed out, with `#reader` confirmed
+never resizing. **Not yet verified**: real on-device/live-server testing
+with actual manga content, particularly the mouse-wheel position-reset bug
+(3) and progress-bar flash (5), which the `overflow-anchor` fix is expected
+to resolve but couldn't be confirmed synthetically (that's genuinely
+browser-internal scroll-anchoring behavior, not simulable without a real
+wheel-scroll session against real DOM mutations under real network timing).
+Bug 2 (black/unloaded page mid-scroll) was assessed as mostly-expected
+network completion ordering rather than a distinct bug, and its optional
+refinements (widening the fetch-priority band, direction-aware prefetch for
+long-strip mode) were deliberately left undone as polish, not urgent.
+
+Full analysis, the SumatraPDF/PDF.js comparison, and the staged plan this
+was implemented from are preserved in the `kinsho-android` repo's CLAUDE.md
+bug-list entry and the session's plan file, for anyone who wants the full
+reasoning rather than just this summary.

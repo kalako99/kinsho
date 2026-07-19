@@ -143,8 +143,32 @@
       -webkit-overflow-scrolling: touch;
       scrollbar-width: none;
       background: #000;
+      /* Without this, the browser's own default scroll-anchoring can apply
+         a second, independent scrollTop correction on top of the conveyor's
+         manual one whenever slots are added/removed above the fold --
+         two uncoordinated corrections for the same DOM mutation is what
+         produced the "position resets to top of image" / progress-bar
+         flash bugs during ordinary mouse-wheel scrolling. */
+      overflow-anchor: none;
     }
     #reader::-webkit-scrollbar { display: none; }
+
+    #reader-inner {
+      /* Zoom (applyStripWidth) resizes THIS element, not #reader -- #reader
+         itself stays permanently full-bleed so the black letterbox area at
+         zoomed-out widths is still part of #reader's own scrollable/
+         draggable bounds, not empty space outside it (the bug 6 fix). */
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .reader-spacer {
+      width: 100%;
+      /* height set in JS by _syncSpacers(); flanks the materialized slot
+         pool so #reader's real scrollHeight always equals the true
+         full-manifest height (cursorY), never just the materialized
+         window's own content height. */
+    }
 
     .page-slot {
       width: 100%;
@@ -1189,7 +1213,7 @@
   <button class="bm-panel-btn" id="scrollerDisconnectBtn" style="display:none">Disconnect</button>
 </div>
 
-<div id="reader"></div>
+<div id="reader"><div id="reader-inner"></div></div>
 
 <div class="frag-progress left" id="fragProgress"></div>
 
@@ -1375,7 +1399,12 @@
   const chapterId = parts[5];
   const startPage = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
 
-  const reader  = document.getElementById('reader');
+  const reader      = document.getElementById('reader');
+  // Content lives in here, not directly in #reader -- #reader itself is the
+  // one scroll-mechanics element (scrollTop/scrollHeight/clientHeight, all
+  // scroll/scrollend/touch listeners) and stays permanently full-bleed;
+  // readerInner is what applyStripWidth's zoom resizes (see bug 6 fix).
+  const readerInner = document.getElementById('reader-inner');
   const topbar  = document.getElementById('topbar');
   const titleEl = document.getElementById('topbarTitle');
   const backBtn = document.getElementById('backBtn');
@@ -1385,9 +1414,6 @@
   // This is the buffer the user can natively scroll within before a
   // recenter is needed — keep generous so a single flick can't outrun it.
   const SLOT_COUNT = 80;
-  // How many manifest indices ahead/behind to keep a slot assigned (not recycled).
-  // Slots outside this window get freed and reassigned to pages entering the window.
-  const SLOT_RENDER_RADIUS = 40;
 
   // ── FULLSCREEN ──
   function enterFullscreen() {
@@ -1605,15 +1631,45 @@
   buildManifest(readerSettings.padding);
 
   // ── CONVEYOR WINDOW STATE ──
-  // slotPool[k] is always the (k+1)-th DOM child of #reader and corresponds
-  // to manifest[windowLo + k]. The window is materialized/shifted by
-  // _rebuildConveyorWindow / _shiftConveyorWindow below.
+  // slotPool[k] corresponds to manifest[windowLo + k] and is always a DOM
+  // child of #reader positioned between topSpacer and bottomSpacer (NOT
+  // necessarily the (k+1)-th child overall -- the two spacers are permanent
+  // fixtures that never get cleared by a rebuild). The window is
+  // materialized/shifted by _rebuildConveyorWindow / _shiftConveyorWindow
+  // below.
   const slotPool = [];
   let windowLo = 0;
   let windowHi = -1;
 
   // Map from manifest index → slot pool index (-1 = not materialized)
   const assignedSlot = new Int32Array(manifest.length).fill(-1);
+
+  // ── FULL-HEIGHT SPACERS ──
+  // #reader's native scrollHeight must always equal the TRUE full-manifest
+  // height (cursorY), never just the sum of the ~SLOT_COUNT materialized
+  // slots -- otherwise a long continuous scroll can hit a genuine native
+  // scrollTop ceiling well before the real end of the chapter (the "scroll
+  // stops after ~40 pages" bug). topSpacer/bottomSpacer are permanent
+  // fixtures flanking the slot pool that make up the difference: their
+  // combined height plus the materialized slots' heights always equals
+  // cursorY exactly, so reader.scrollTop is always numerically identical to
+  // virtualY (see syncScrollPosition below) -- no offset arithmetic needed.
+  const topSpacer = document.createElement('div');
+  const bottomSpacer = document.createElement('div');
+  topSpacer.className = bottomSpacer.className = 'reader-spacer';
+  readerInner.appendChild(topSpacer);
+  readerInner.appendChild(bottomSpacer);
+
+  function _syncSpacers() {
+    if (manifest.length === 0) {
+      topSpacer.style.height = '0px';
+      bottomSpacer.style.height = '0px';
+      return;
+    }
+    topSpacer.style.height = manifest[windowLo].globalY + 'px';
+    const windowEndY = manifest[windowHi].globalY + manifest[windowHi].scaledH;
+    bottomSpacer.style.height = Math.max(0, cursorY - windowEndY) + 'px';
+  }
 
   // ── VIRTUAL SCROLL STATE ──
   // virtualY is the only source of truth for scroll position.
@@ -1829,6 +1885,26 @@
     return lo;
   }
 
+  // ── CURRENT-POSITION TRACKING Y ──
+  // Long-strip "current page"/"current chapter" tracking uses the viewport
+  // MIDPOINT (virtualY + half a viewport), not the bottom edge -- correct
+  // everywhere except at the true end of the manifest: virtualY is clamped
+  // there (see setVirtualY/momentumLoop), so the midpoint can never reach
+  // past cursorY - viewH/2, permanently short of the true last page/chapter
+  // by up to half a viewport. Any trailing page shorter than that half-
+  // viewport gap can never be marked "current" no matter how far the user
+  // scrolls, once scrolling further is physically impossible -- the
+  // segmented-progress-bar undercount bug. Clamping to the true cursorY
+  // only at the true max scroll (not switching every call site to
+  // bottom-edge tracking everywhere) fixes exactly that one case without
+  // changing "current page" semantics anywhere else -- a bottom-edge switch
+  // would flip pages earlier throughout and make chapter-boundary detection
+  // MORE sensitive to any transient bad scrollTop, risking the progress-bar
+  // flash/teleport bug rather than helping it.
+  function currentTrackingY() {
+    return (virtualY >= cursorY - viewH - 1) ? cursorY : (virtualY + viewH * 0.5);
+  }
+
   // ── BUILD A SLOT ──
   function _makeSlotEl() {
     const el  = document.createElement('div');
@@ -1845,15 +1921,22 @@
   // ── FULL REBUILD: clears the conveyor and materializes a new window of
   // up to SLOT_COUNT entries centered on newWindowLo, then sets scrollTop
   // so targetGlobalY lands at the same point in the viewport. ──
+  // Removes only the materialized slot-pool children, leaving topSpacer/
+  // bottomSpacer in place as permanent fixtures -- reader.replaceChildren()
+  // would also wipe the spacers, which must never happen.
+  function _clearSlotPool() {
+    for (const { el } of slotPool) el.remove();
+    slotPool.length = 0;
+  }
+
   function _rebuildConveyorWindow(newWindowLo, targetGlobalY) {
     for (let i = windowLo; i <= windowHi; i++) {
       manifest[i].loaded = false;
       assignedSlot[i] = -1;
     }
-    reader.replaceChildren();
-    slotPool.length = 0;
+    _clearSlotPool();
 
-    if (manifest.length === 0) { windowLo = 0; windowHi = -1; return; }
+    if (manifest.length === 0) { windowLo = 0; windowHi = -1; _syncSpacers(); return; }
 
     const count = Math.min(SLOT_COUNT, manifest.length);
     windowLo = Math.max(0, Math.min(newWindowLo, manifest.length - count));
@@ -1867,9 +1950,13 @@
       slotPool.push({ el, img });
       assignedSlot[i] = i - windowLo;
     }
-    reader.appendChild(frag);
+    readerInner.insertBefore(frag, bottomSpacer);
 
-    reader.scrollTop = targetGlobalY - manifest[windowLo].globalY;
+    // topSpacer must be sized BEFORE reader.scrollTop is set below, since
+    // its height is what makes targetGlobalY and scrollTop numerically
+    // equal (see the FULL-HEIGHT SPACERS comment above).
+    _syncSpacers();
+    reader.scrollTop = targetGlobalY;
 
     // Load the slot images CENTER-OUT from the page actually at the
     // viewport top — not in windowLo→windowHi DOM order. All ~SLOT_COUNT
@@ -1892,18 +1979,18 @@
   }
 
   // ── INCREMENTAL SHIFT: moves the window by `delta` entries by dropping
-  // slots off one end and adding them on the other, correcting scrollTop
-  // by the exact pixel delta so the visible content doesn't move. ──
+  // slots off one end and adding them on the other. Never touches
+  // reader.scrollTop directly -- _syncSpacers() at the end keeps the
+  // spacers' heights consistent with the new window, which is what keeps
+  // the visible content from moving (see FULL-HEIGHT SPACERS above). ──
   function _shiftConveyorWindow(delta) {
     if (delta > 0) {
-      let removedHeight = 0;
       const frag = document.createDocumentFragment();
       for (let k = 0; k < delta; k++) {
         const oldIdx = windowLo + k;
-        removedHeight += manifest[oldIdx].scaledH;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
-        reader.removeChild(reader.firstChild);
+        slotPool[k].el.remove();
 
         const newIdx = windowHi + 1 + k;
         const { el } = _makeSlotEl();
@@ -1911,40 +1998,45 @@
         frag.appendChild(el);
         loadEntry(manifest[newIdx]);
       }
-      reader.appendChild(frag);
+      readerInner.insertBefore(frag, bottomSpacer);
       windowLo += delta;
       windowHi += delta;
-      reader.scrollTop -= removedHeight;
     } else {
       const n = -delta;
-      let addedHeight = 0;
       const frag = document.createDocumentFragment();
       for (let k = n - 1; k >= 0; k--) {
         const newIdx = windowLo - 1 - k;
         const { el } = _makeSlotEl();
         el.style.height = manifest[newIdx].scaledH + 'px';
-        addedHeight += manifest[newIdx].scaledH;
         frag.appendChild(el);
         loadEntry(manifest[newIdx]);
       }
-      reader.insertBefore(frag, reader.firstChild);
+      readerInner.insertBefore(frag, topSpacer.nextSibling);
       for (let k = 0; k < n; k++) {
         const oldIdx = windowHi - k;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
-        reader.removeChild(reader.lastChild);
+        slotPool[slotPool.length - 1 - k].el.remove();
       }
       windowLo -= n;
       windowHi -= n;
-      reader.scrollTop += addedHeight;
     }
 
+    // Rebuild slotPool by walking the DOM strictly between the two spacers
+    // -- robust regardless of how many slots were added/removed above,
+    // and never mistakes a spacer for a slot the way indexing
+    // reader.children directly would now that spacers are permanent
+    // siblings of the slot pool.
     slotPool.length = 0;
-    const children = reader.children;
-    for (let k = 0; k < children.length; k++) {
-      slotPool.push({ el: children[k], img: children[k].querySelector('img') });
+    let node = topSpacer.nextSibling;
+    let k = 0;
+    while (node && node !== bottomSpacer) {
+      slotPool.push({ el: node, img: node.querySelector('img') });
       assignedSlot[windowLo + k] = k;
+      node = node.nextSibling;
+      k++;
     }
+    _syncSpacers();
     prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
   }
 
@@ -1997,26 +2089,43 @@
   }
 
   // ── SYNC: lightweight, called on every native scroll event. ──
+  // How close (in manifest entries) the current position may get to either
+  // edge of the materialized window before syncScrollPosition proactively
+  // recenters mid-gesture, rather than waiting for scrollend/settle. Keeps
+  // a long continuous scroll (fast flick, held wheel, BLE scroller) from
+  // ever outrunning the window and hitting #reader's real DOM edge -- the
+  // "scroll stops after ~40 pages" bug. Safe to call recenterConveyor here
+  // now that _shiftConveyorWindow never writes reader.scrollTop directly
+  // (see its own comment) -- it can no longer fight native scroll momentum
+  // the way the old scrollTop-compensating version could.
+  const EDGE_MARGIN = Math.floor(SLOT_COUNT / 4);
+
   function syncScrollPosition() {
     if (manifest.length === 0) return;
-    virtualY = manifest[windowLo].globalY + reader.scrollTop;
+    virtualY = reader.scrollTop;
     throttledScrollBookkeeping();
-    if (
-      currentChapIdx >= chapterList.length - 1 &&
-      reader.scrollTop >= reader.scrollHeight - reader.clientHeight - 1
-    ) {
+    // True end-of-manifest bound (matches momentumLoop's own check below) --
+    // NOT reader.scrollHeight, which is now always the full cursorY thanks
+    // to the spacers and would make this fire at the wrong position anyway.
+    if (currentChapIdx >= chapterList.length - 1 && virtualY >= cursorY - viewH - 1) {
       showLastPagePopup();
+    }
+    const idxAtTop = firstIndexAfter(virtualY);
+    if (idxAtTop - windowLo < EDGE_MARGIN || windowHi - idxAtTop < EDGE_MARGIN) {
+      recenterConveyor();
     }
   }
 
   // ── NATIVE SCROLL WIRING ──
-  // recenterConveyor must run only AFTER scrolling (including native
-  // momentum) has fully settled — running it mid-momentum writes scrollTop
-  // and aborts the browser's inertia animation. scrollend is the correct
-  // signal for this. For browsers without it, a fixed-time debounce on
-  // 'scroll' is unreliable (events are throttled/coalesced during
-  // compositor-driven momentum), so fall back to RAF-polling for a
-  // scrollTop that hasn't moved for two consecutive frames.
+  // recenterConveyor is now safe to call at any time, including mid-gesture
+  // (see EDGE_MARGIN above and _shiftConveyorWindow's own comment) -- it no
+  // longer writes reader.scrollTop directly except via _rebuildConveyorWindow's
+  // "big jump" branch, which EDGE_MARGIN's small, frequent recenters keep
+  // this code path from reaching in ordinary continuous scrolling. scrollend
+  // (or the settle-poll fallback below, for browsers without it) still runs
+  // recenterConveyor too, as a final correction once scrolling fully stops --
+  // harmless to call redundantly, since recenterConveyor no-ops if the
+  // window's already correctly centered.
   const supportsScrollEnd = 'onscrollend' in window;
 
   reader.addEventListener('scroll', () => {
@@ -2069,8 +2178,7 @@
       manifest[i].loaded = false;
       assignedSlot[i] = -1;
     }
-    reader.replaceChildren();
-    slotPool.length = 0;
+    _clearSlotPool();
     windowLo = 0;
     windowHi = -1;
   }
@@ -2264,7 +2372,7 @@
       const entry = spManifest[spCurrentIdx];
       return entry ? manifest.indexOf(entry) : 0;
     }
-    const midY = virtualY + viewH * 0.5;
+    const midY = currentTrackingY();
     let idx = 0;
     for (let i = 0; i < manifest.length; i++) {
       if (manifest[i].globalY <= midY) idx = i;
@@ -2690,9 +2798,7 @@
     // call on reveal so nothing here goes stale while hidden (2026-07-08).
     if (!barVisible) return;
 
-    const scrollTop = virtualY;
-    const vh        = viewH;
-    const midY      = scrollTop + vh * 0.5;
+    const midY = currentTrackingY();
 
     // Determine which chapter is currently visible
     let visibleChapterId = chapterId;
@@ -2894,10 +3000,15 @@
   function applyStripWidth(pct) {
     readerSettings.stripWidth = pct;
     const effectiveW = Math.round(viewW * pct / 100);
-    const inset = (100 - pct) / 2;
-    reader.style.width  = pct + '%';
-    reader.style.left   = inset + '%';
-    reader.style.right  = inset + '%';
+    // Resize readerInner, not #reader itself -- #reader stays permanently
+    // full-bleed so the black letterbox area at zoomed-out widths is still
+    // part of #reader's own scrollable/draggable bounds (bug 6 fix), not
+    // empty space outside them. readerInner is a normal static block (not
+    // position:fixed), so simple width + auto-margin centers it -- no
+    // separate left/right inset math needed the way #reader's old
+    // fixed-positioning required.
+    readerInner.style.width  = pct + '%';
+    readerInner.style.margin = '0 auto';
     bbZoomRange.value       = pct;
     bbZoomValue.textContent = pct + '%';
 
@@ -3687,7 +3798,7 @@
     if (readerSettings.mode === 'single-page') {
       return (spManifest[spCurrentIdx] || {}).chapterId || chapterId;
     }
-    const midY = virtualY + viewH * 0.5;
+    const midY = currentTrackingY();
     let visibleChapterId = chapterId;
     for (const entry of manifest) {
       if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
@@ -3716,7 +3827,7 @@
     if (readerSettings.mode === 'single-page') {
       return (spManifest[spCurrentIdx] || {}).localIdx || 0;
     }
-    const midY = virtualY + viewH * 0.5;
+    const midY = currentTrackingY();
     let idx = 0;
     for (let i = 0; i < manifest.length; i++) {
       const e = manifest[i];
@@ -3728,7 +3839,7 @@
 
   function checkChapterCompletion() {
     if (readerSettings.mode !== 'long-strip') return;
-    const midY = virtualY + viewH * 0.5;
+    const midY = currentTrackingY();
 
     let visibleChapterId = chapterId;
     for (const entry of manifest) {
@@ -3780,7 +3891,7 @@
     if (readerSettings.mode === 'single-page') {
       pageIdx = (spManifest[spCurrentIdx] || {}).localIdx || 0;
     } else {
-      const midY = virtualY + viewH * 0.5;
+      const midY = currentTrackingY();
       for (const e of manifest) {
         if (e.chapterId === cid && midY >= e.globalY) pageIdx = e.localIdx;
       }
