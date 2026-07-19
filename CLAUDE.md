@@ -1482,6 +1482,40 @@ network completion ordering rather than a distinct bug, and its optional
 refinements (widening the fetch-priority band, direction-aware prefetch for
 long-strip mode) were deliberately left undone as polish, not urgent.
 
+**Live-tested update (2026-07-19, same day)**: bugs 1/3/4/5/6 all confirmed
+fixed and working well on real devices ("all scrolling is really good now").
+Bug 2 turned out to be real and specifically cold-start-only, not just
+theoretical: opening a chapter fresh showed a black page around page 4,
+resolving again by page 9 — i.e. several pages in the *middle* of the
+initial screenful(s), not just far-off pages, loaded out of order. Root
+cause: the fixed `±2`-slot "high priority" `fetchPriority` band (`
+_rebuildConveyorWindow`'s center-out load loop) is tiny relative to
+`SLOT_COUNT=80` — everything beyond it, including pages the user reaches
+within the first few seconds of reading, competed on equal `'low'` footing
+with pages far outside the initial view, racing to complete in arbitrary
+order. This only ever showed up at the very first materialization (all ~80
+requests fire nearly simultaneously); ordinary scrolling only adds a couple
+of new pages per shift, so it was never noticeable there — consistent with
+what was reported. Fixed by replacing the fixed radius with
+`HIGH_PRI_AHEAD`/`HIGH_PRI_BEHIND` (floors of 12/4 pages, plus a
+viewport/page-height-scaled term for unusually short "cuts"), biased forward
+since long-strip reading is essentially always downward even before any
+scroll has happened to establish a direction. Verified the floor dominates
+(≥12 pages ahead get priority) across a range of realistic viewport/page-height
+combinations, not just a lucky specific case.
+
+Separately (`kinsho-android` repo, not this one): the user also asked for
+the visible Android scrollbar to disappear, since the segmented progress
+bar is meant to be the only scroll indicator. `chapter_reader.html`'s CSS
+already fully suppressed its own scrollbar (`scrollbar-width: none` +
+`::-webkit-scrollbar{display:none}` on `#reader`, `overflow: hidden` on
+`html`/`body`) — the visible one was Android WebView's own native fading
+scrollbar overlay, a `View`-level feature drawn by the WebView widget itself
+over the page, entirely independent of CSS. Fixed with
+`webView.setVerticalScrollBarEnabled(false)` in `MainActivity.java`'s
+`applyTotalFullscreen()` — see that repo's own CLAUDE.md/git history for
+detail, since no code in this repo could have addressed it.
+
 Full analysis, the SumatraPDF/PDF.js comparison, and the staged plan this
 was implemented from are preserved in the `kinsho-android` repo's CLAUDE.md
 bug-list entry and the session's plan file, for anyone who wants the full

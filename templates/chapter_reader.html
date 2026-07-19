@@ -1967,11 +1967,42 @@
     // scroll symptom on a cold server. fetchPriority nudges supporting
     // browsers the same way (harmless no-op elsewhere).
     const centerIdx = Math.max(windowLo, Math.min(windowHi, firstIndexAfter(targetGlobalY)));
+
+    // How many pages ahead/behind center get 'high' fetchPriority, in
+    // viewport-relative terms rather than a tiny fixed count. A fixed ±2
+    // (the old value) is far too narrow relative to SLOT_COUNT=80: every
+    // other page in the ~80-slot window competes on equal 'low' footing
+    // with no ordering guarantee between them, so a page just outside that
+    // ±2 band -- still well within the first screenful or two the user
+    // will actually read within seconds of opening the chapter -- could
+    // finish loading well after a page much further away, purely by
+    // network race. This only shows up on the very first materialization
+    // (all ~80 requests fire at once); ordinary scrolling only ever adds a
+    // couple of new pages per shift, so this never mattered there -- a real
+    // reported bug, confirmed to appear only right after opening a chapter.
+    // Biased forward (more pages ahead than behind) since long-strip
+    // reading is essentially always downward, even before any actual scroll
+    // has happened to establish a direction.
+    const avgPageH = manifest[centerIdx]?.scaledH || viewH;
+    // Floors of 12/4 are deliberately generous rather than purely
+    // viewport-derived -- long-strip "cuts" vary wildly in height across
+    // different manga/webtoons, and the reported bug specifically involved
+    // pages several past the visible screenful (up to ~9) still racing on
+    // equal footing with the rest of the window; a floor directly sized to
+    // comfortably cover that, with the viewport-based term as a secondary
+    // boost for unusually short pages, is more robust than trusting the
+    // page-height assumption alone.
+    const HIGH_PRI_AHEAD  = Math.max(12, Math.ceil((viewH * 3) / avgPageH));
+    const HIGH_PRI_BEHIND = Math.max(4, Math.ceil(viewH / avgPageH));
+
     for (let d = 0; d <= windowHi - windowLo; d++) {
       for (const i of (d === 0 ? [centerIdx] : [centerIdx + d, centerIdx - d])) {
         if (i < windowLo || i > windowHi) continue;
         const si = assignedSlot[i];
-        if (si !== -1) slotPool[si].img.fetchPriority = (Math.abs(i - centerIdx) <= 2) ? 'high' : 'low';
+        if (si !== -1) {
+          const rel = i - centerIdx;
+          slotPool[si].img.fetchPriority = (rel >= -HIGH_PRI_BEHIND && rel <= HIGH_PRI_AHEAD) ? 'high' : 'low';
+        }
         loadEntry(manifest[i]);
       }
     }
