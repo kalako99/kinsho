@@ -2140,6 +2140,17 @@
     // to the spacers and would make this fire at the wrong position anyway.
     if (currentChapIdx >= chapterList.length - 1 && virtualY >= cursorY - viewH - 1) {
       showLastPagePopup();
+      // checkChapterCompletion() only ever fires on a chapter-boundary crossing
+      // (visibleChapterId changing), which never happens for the manga's last
+      // chapter — there's no next chapter to scroll into, so it would otherwise
+      // never get marked completed. This is that missing case: reaching the true
+      // end of the whole manifest completes the last chapter directly. Guarded
+      // so it only posts once per page load, not on every scroll tick spent
+      // sitting at the bottom.
+      if (!finalChapterCompletionSaved) {
+        finalChapterCompletionSaved = true;
+        saveReadingProgress(chapterList[chapterList.length - 1].id);
+      }
     }
     const idxAtTop = firstIndexAfter(virtualY);
     if (idxAtTop - windowLo < EDGE_MARGIN || windowHi - idxAtTop < EDGE_MARGIN) {
@@ -3240,6 +3251,9 @@
   let spCurrentIdx = 0; // index into manifest for current chapter pages
   const spManifest = manifest.filter(e => e.chapterId === chapterId);
   let lastSeenChapterId = chapterId;
+  // Guards the "reached the true end of the manga" completion save in
+  // syncScrollPosition (long-strip mode) so it only fires once per page load.
+  let finalChapterCompletionSaved = false;
   let bmEndToEnd = false;
   let bmEndToEndActive = false;
   let progressSaveTimer = null;
