@@ -82,6 +82,48 @@ function roundUpToMultiple(n, multiple) {
   return remainder === 0 ? n : n + (multiple - remainder);
 }
 
+// ── RANDOM ROW: STABLE FOR UP TO AN HOUR ──
+// Previously reshuffled on every single mount() (every page navigation,
+// since this is a traditional multi-page app -- Vue instance torn down
+// and rebuilt each time) and on every visibilitychange back to visible
+// (switching back to the app without navigating anywhere at all), which
+// made the row feel like noise rather than "your" random picks. Capped
+// to reshuffling at most once per hour per library instead, cached in
+// localStorage (not a plain JS field, which wouldn't survive a page
+// reload) as {ids, ts} -- only the ids persist, not full manga objects,
+// so a cached pick's cover/progress/name always come from the current
+// load, never stale, even though which manga are picked stays fixed.
+const RANDOM_ROW_CACHE_MS = 60 * 60 * 1000;
+
+function pickRandomRow(libraryId, mangas) {
+  const key = `kinsho_random_row_${libraryId}`;
+  let cached = null;
+  try {
+    cached = JSON.parse(localStorage.getItem(key) || 'null');
+  } catch (e) {
+    cached = null;
+  }
+  const isFresh = cached && (Date.now() - cached.ts) < RANDOM_ROW_CACHE_MS;
+  const mangaById = new Map(mangas.map(m => [m.id, m]));
+  const rehydrated = isFresh ? cached.ids.map(id => mangaById.get(id)).filter(Boolean) : [];
+  // Re-picks immediately if none of the cached ids still resolve (a
+  // rescan removed/renamed manga) rather than showing an empty row for
+  // up to an hour; a partial match is fine as-is -- the row just shows
+  // fewer than 20 until the next natural reshuffle.
+  if (isFresh && rehydrated.length > 0) {
+    return rehydrated;
+  }
+
+  const picked = [...mangas].sort(() => Math.random() - 0.5).slice(0, 20);
+  try {
+    localStorage.setItem(key, JSON.stringify({ ids: picked.map(m => m.id), ts: Date.now() }));
+  } catch (e) {
+    // localStorage unavailable/full -- fine to skip persisting, the row
+    // still renders from `picked` for this one load.
+  }
+  return picked;
+}
+
 // ── MAIN APP ──
 const app = createApp({
   components: { MangaThumb },
@@ -258,7 +300,7 @@ const app = createApp({
           .map(h => mangaById[h.manga_id])
           .filter(Boolean);
 
-        this.random     = [...mangas].sort(() => Math.random() - 0.5).slice(0, 20);
+        this.random     = pickRandomRow(libraryId, mangas);
         this.favourites = [...mangas]
           .filter(m => favouriteIds.has(m.id))
           .sort(() => Math.random() - 0.5)
