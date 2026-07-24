@@ -206,7 +206,20 @@ def get_cover_image(request: Request, library_id: int, manga_name: str, filename
         return JSONResponse({"error": "Not found"}, status_code=404)
     if not os.path.isfile(file_path):
         return JSONResponse({"error": "Not found"}, status_code=404)
-    return FileResponse(file_path)
+
+    # Previously had no Cache-Control of its own, which the default_no_store
+    # middleware then forced to "no-store" -- every visit to the manga list
+    # re-downloaded every cover's full bytes over the network, even when
+    # nothing had changed since the last visit. ETag from the file's own
+    # mtime (not a fixed max-age window) so a cover that's genuinely
+    # regenerated (rescan, re-fetched metadata, admin picking a different
+    # cover) is picked up on the very next load -- same validator-over-
+    # fixed-window reasoning as the manga dims route above.
+    etag = f'"{os.path.getmtime(file_path)}"'
+    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return FileResponse(file_path, headers=headers)
 
 # ── DATA MODELS ──
 class Library(BaseModel):
