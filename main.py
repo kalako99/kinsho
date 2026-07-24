@@ -2878,12 +2878,29 @@ def scan_status(library_id: int):
         "last_scanned": manga_data.get("last_scanned"),
     })
 
+def _round_up_to_multiple(n: int, multiple: Optional[int]) -> int:
+    """Rounds n UP to the next multiple of `multiple` (never down -- for
+    finishing a dangling grid row with a few more items, not cutting
+    content that would otherwise have been shown)."""
+    if not multiple or multiple <= 1:
+        return n
+    remainder = n % multiple
+    return n if remainder == 0 else n + (multiple - remainder)
+
 @app.get("/api/mangas/{library_id}")
 def get_mangas(
     request: Request,
     library_id: int,
     sort: Optional[str] = Query(default="last_updated"),
     page: int = Query(default=1, ge=1),
+    # How many columns the requesting client's .manga-grid is currently
+    # rendering (CSS repeat(auto-fill, ...), so it depends on viewport
+    # width/orientation and can't be known server-side) -- when given,
+    # last_updated's per-page counts are rounded up to the next full row
+    # of this width instead of the flat 50/100 split, so a page never ends
+    # on a dangling partial row. Omitted (or invalid) falls back to the
+    # unrounded 50/100 split exactly as before.
+    columns: Optional[int] = Query(default=None, ge=1),
 ):
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
@@ -2929,12 +2946,14 @@ def get_mangas(
  
     total = len(result)
     if sort == "last_updated":
+        per_page_1 = _round_up_to_multiple(50, columns)
+        per_page_n = _round_up_to_multiple(100, columns)
         if page == 1:
-            per_page = 50
+            per_page = per_page_1
             offset = 0
         else:
-            per_page = 100
-            offset = 50 + (page - 2) * 100
+            per_page = per_page_n
+            offset = per_page_1 + (page - 2) * per_page_n
         page_items = result[offset: offset + per_page]
     else:
         per_page = total

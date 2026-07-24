@@ -58,6 +58,29 @@ const vDragScroll = {
   }
 };
 
+// ── LAST-UPDATED ROW-COMPLETION HELPERS ──
+// .manga-grid's column count comes entirely from CSS
+// (repeat(auto-fill, minmax(...))), driven by the live viewport width --
+// there is no fixed number to hardcode, and it changes with screen size
+// and orientation. Reading the resolved grid-template-columns gives the
+// exact count the browser is actually rendering right now: one length
+// value per column, regardless of how many (or how few) items currently
+// occupy the grid.
+function currentGridColumns() {
+  const grid = document.querySelector('.manga-grid');
+  if (!grid) return 1;
+  const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length;
+  return cols || 1;
+}
+
+// Rounds n UP to the next multiple of `multiple` (never down -- the goal
+// is finishing a dangling row with a few more items, not cutting content
+// that would otherwise have been shown).
+function roundUpToMultiple(n, multiple) {
+  if (!multiple || multiple <= 1) return n;
+  const remainder = n % multiple;
+  return remainder === 0 ? n : n + (multiple - remainder);
+}
 
 // ── MAIN APP ──
 const app = createApp({
@@ -95,6 +118,11 @@ const app = createApp({
       lastUpdated:      [],
       lastUpdatedPage:  1,
       lastUpdatedTotal: 0,
+      // Column count the most recent loadLastUpdated() fetch was aligned
+      // to -- lastUpdatedTotalPages needs the same value the server used
+      // to compute per-page counts, or its page-button count would drift
+      // from what's actually being served.
+      lastUpdatedColumns: 1,
       activeTheme: null,
       bgLayerStyle: null,
       bgIsRaster: false,
@@ -103,8 +131,10 @@ const app = createApp({
 
   computed: {
     lastUpdatedTotalPages() {
-      if (this.lastUpdatedTotal <= 50) return 1;
-      return 1 + Math.ceil((this.lastUpdatedTotal - 50) / 100);
+      const perPage1 = roundUpToMultiple(50, this.lastUpdatedColumns);
+      const perPageN = roundUpToMultiple(100, this.lastUpdatedColumns);
+      if (this.lastUpdatedTotal <= perPage1) return 1;
+      return 1 + Math.ceil((this.lastUpdatedTotal - perPage1) / perPageN);
     },
   },
 
@@ -287,9 +317,10 @@ const app = createApp({
     // ── LOAD LAST UPDATED PAGE ──
     async loadLastUpdated(libraryId, page, historyByMangaId) {
       try {
+        const columns = currentGridColumns();
         const needsHistory = !historyByMangaId;
         const [res, historyRes] = await Promise.all([
-          fetch(`/api/mangas/${libraryId}?sort=last_updated&page=${page}`),
+          fetch(`/api/mangas/${libraryId}?sort=last_updated&page=${page}&columns=${columns}`),
           needsHistory ? fetch(`/api/reading/history/${libraryId}`) : Promise.resolve(null),
         ]);
         const data = await res.json();
@@ -317,8 +348,9 @@ const app = createApp({
             progress,
           };
         });
-        this.lastUpdatedPage  = data.page;
-        this.lastUpdatedTotal = data.total;
+        this.lastUpdatedPage    = data.page;
+        this.lastUpdatedTotal   = data.total;
+        this.lastUpdatedColumns = columns;
       } catch (e) {
         console.error('Failed to load last updated:', e);
       }
