@@ -440,6 +440,16 @@ def manga_pages_read(dims: dict, history_entry: dict, is_volume_manga: bool) -> 
     furthest_idx = ordered_ids.index(furthest_id) + 1
     return sum(len(buckets[k].get("pages", [])) for k in ordered_ids[:furthest_idx])
 
+def completed_chapter_count(history_entry: dict) -> int:
+    """How many chapters/volumes this user has actually marked completed
+    for one manga -- a plain count, independent of order or gaps. This is
+    the "X of Y chapters read" progress number; deliberately NOT derived
+    from furthest_chapter/furthest_volume, which tracks the highest
+    POSITION reached (used for manga_pages_read above) and can be a very
+    different number if reading started mid-series (e.g. one chapter read
+    at position 50/100 is 1 completed chapter, not "50% progress")."""
+    return sum(1 for ch in history_entry.get("chapters", {}).values() if ch.get("completed"))
+
 def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
     """
     A ComicInfo.xml sitting directly in the manga's own folder (next to the
@@ -4302,6 +4312,14 @@ async def save_reading_progress(request: Request):
             if completed_name:
                 ch_entry["name"] = completed_name
 
+            # Highest-position completed volume, NOT the length of an
+            # unbroken run from the first volume -- this used to stop
+            # (`break`) at the first not-completed volume it found walking
+            # from the start, so starting mid-series (reading volume 8 of
+            # 10 without ever touching 1-7) left this permanently None even
+            # though volume 8 genuinely was completed. Walking the whole
+            # list and keeping the last (== highest, since ordered
+            # ascending) completed match handles gaps correctly.
             ordered_volumes = sorted(
                 dims.get("volumes", {}).keys(),
                 key=lambda vid: natural_sort_key(dims["volumes"][vid].get("name", vid))
@@ -4312,8 +4330,6 @@ async def save_reading_progress(request: Request):
                 if entry["chapters"].get(vid, {}).get("completed"):
                     furthest = vid
                     furthest_name = dims["volumes"][vid].get("name")
-                else:
-                    break
             entry["furthest_volume"]      = furthest
             entry["furthest_volume_name"] = furthest_name
 
@@ -4347,6 +4363,9 @@ async def save_reading_progress(request: Request):
             if completed_name:
                 ch_entry["name"] = completed_name
 
+            # Highest-position completed chapter, NOT the length of an
+            # unbroken run from the first chapter -- see the volumes branch
+            # above for the full reasoning (same bug, same fix, mirrored).
             source_dict = dims.get("chapters") or dims.get("volumes", {})
             ordered_ids = sorted(
                 source_dict.keys(),
@@ -4358,8 +4377,6 @@ async def save_reading_progress(request: Request):
                 if entry["chapters"].get(cid, {}).get("completed"):
                     furthest = cid
                     furthest_name = source_dict[cid].get("name")
-                else:
-                    break
             entry["furthest_chapter"]      = furthest
             entry["furthest_chapter_name"] = furthest_name
 
@@ -4422,6 +4439,11 @@ def get_reading_history(request: Request, library_id: int):
             "furthest_chapter":     furthest_cid,
             "furthest_chapter_idx": furthest_idx,
             "total_chapters":       total_chapters,
+            # "X of Y chapters read" progress -- a plain count of chapters
+            # actually marked completed, independent of furthest_chapter's
+            # own "highest position reached" semantics (see
+            # completed_chapter_count's own docstring for why they differ).
+            "completed_count":      completed_chapter_count(entry),
         })
 
     result.sort(key=lambda x: x["last_read"] or "", reverse=True)
@@ -4520,27 +4542,13 @@ def get_category_list(
         if entry:
             dims = load_manga_dims(library_id, m["name"])
             is_volume_manga = m.get("manga_type") == "case2"
-            if is_volume_manga:
-                total_chapters = len(dims.get("volumes", {}))
-                furthest_vid = entry.get("furthest_volume")
-                ordered = sorted(
-                    dims.get("volumes", {}).keys(),
-                    key=lambda vid: natural_sort_key(dims["volumes"][vid].get("name", vid))
-                )
-                furthest_idx = ordered.index(furthest_vid) + 1 if furthest_vid and furthest_vid in ordered else 0
-            else:
-                total_chapters = len(dims.get("chapters", {}))
-                furthest_cid = entry.get("furthest_chapter")
-                furthest_idx = 0
-                if furthest_cid:
-                    ordered = sorted(
-                        dims.get("chapters", {}).keys(),
-                        key=lambda cid: natural_sort_key(dims["chapters"][cid].get("name", cid))
-                    )
-                    if furthest_cid in ordered:
-                        furthest_idx = ordered.index(furthest_cid) + 1
+            # "X of Y chapters read" -- a plain count of chapters actually
+            # marked completed, not furthest_chapter/furthest_volume's
+            # "highest position reached" (see completed_chapter_count's
+            # docstring for why they can differ substantially).
+            total_chapters = len(dims.get("volumes" if is_volume_manga else "chapters", {}))
             if total_chapters > 0:
-                progress = round(furthest_idx / total_chapters * 100)
+                progress = round(completed_chapter_count(entry) / total_chapters * 100)
         result.append({
             "id":          m["id"],
             "title":       m["name"],

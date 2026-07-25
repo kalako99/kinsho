@@ -436,8 +436,15 @@ const app = createApp({
 
         const mangas = allData.mangas.map((m) => {
           const h = historyByMangaId[m.id];
+          // "X of Y chapters read" -- a plain count of chapters actually
+          // marked completed (h.completed_count, from get_reading_history),
+          // not h.furthest_chapter_idx's "highest position reached". A
+          // single chapter read at position 50 of 100 is 1% progress, not
+          // 50% -- matters once reading starts mid-series instead of from
+          // chapter 1, which furthest_chapter_idx alone handled wrong
+          // (stuck at 0% until this got fixed server-side too).
           const progress = h && h.total_chapters > 0
-            ? Math.round(h.furthest_chapter_idx / h.total_chapters * 100)
+            ? Math.round(h.completed_count / h.total_chapters * 100)
             : 0;
           return {
             id:          m.id,
@@ -567,8 +574,15 @@ const app = createApp({
 
         const mangas = data.mangas.map((m) => {
           const h = historyByMangaId[m.id];
+          // "X of Y chapters read" -- a plain count of chapters actually
+          // marked completed (h.completed_count, from get_reading_history),
+          // not h.furthest_chapter_idx's "highest position reached". A
+          // single chapter read at position 50 of 100 is 1% progress, not
+          // 50% -- matters once reading starts mid-series instead of from
+          // chapter 1, which furthest_chapter_idx alone handled wrong
+          // (stuck at 0% until this got fixed server-side too).
           const progress = h && h.total_chapters > 0
-            ? Math.round(h.furthest_chapter_idx / h.total_chapters * 100)
+            ? Math.round(h.completed_count / h.total_chapters * 100)
             : 0;
           return {
             id:          m.id,
