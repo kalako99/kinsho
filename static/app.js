@@ -170,6 +170,14 @@ const app = createApp({
       activeTheme: null,
       bgLayerStyle: null,
       bgIsRaster: false,
+
+      // ── PER-LIBRARY TAB CACHE ──
+      // library_id -> the full computed display state buildTabState()
+      // returns for it (lastRead/random/favourites/lastUpdated/backdrop).
+      // Populated for the active tab on mount, then for every OTHER
+      // library in the background (see mounted()) so switching tabs is an
+      // instant local read instead of a fresh round-trip each time.
+      tabCache: {},
     };
   },
 
@@ -186,6 +194,17 @@ const app = createApp({
     await this.loadTheme();
     if (this.activeTab !== null) {
       await this.loadMangas(this.activeTab);
+      // Warm every other library's tab cache in the background, whether
+      // the user ever visits it this session or not, so switching tabs
+      // later is an instant local read instead of a fresh round-trip.
+      // Deliberately not awaited (and started only after the active tab's
+      // own load above has finished) so this never delays first paint or
+      // competes with it for the browser's connection pool.
+      for (const tab of this.tabs) {
+        if (tab.id !== this.activeTab) {
+          this.loadMangas(tab.id);
+        }
+      }
     }
     await this.loadCollectionsRow();
     await this.loadIntegrityBadge();
@@ -252,8 +271,32 @@ const app = createApp({
     openCollection(id) { window.location.href = `/collection/${id}`; },
     goToCollections()  { window.location.href = '/collections'; },
 
-    // ── LOAD MANGAS FOR ACTIVE TAB FROM API ──
+    // ── LOAD MANGAS FOR A TAB, CACHE IT, APPLY IT IF IT'S THE ACTIVE ONE ──
+    // Called both for the active tab (mounted()/switchTab()'s cache-miss
+    // fallback/visibilitychange) and for every other library in the
+    // background (mounted()'s prefetch loop) -- buildTabState() never
+    // touches live display state itself, so a background call for a tab
+    // the user isn't looking at can't clobber what's currently on screen.
     async loadMangas(libraryId) {
+      const state = await this.buildTabState(libraryId);
+      if (!state) return;
+      this.tabCache[libraryId] = state;
+      if (libraryId === this.activeTab) {
+        this.applyTabState(state);
+        if (state.bgUrlToLock) {
+          // First load with the lock-backdrop setting on and nothing
+          // captured yet — lock in whatever's showing right now so it
+          // persists from here on. Only done for the tab actually being
+          // displayed, never for a background prefetch of a different one.
+          this.persistLockedBackdrop(state.bgUrlToLock);
+        }
+      }
+    },
+
+    // Pure: fetches + computes everything one tab's view needs, without
+    // touching `this.*` — safe to run for a library the user isn't
+    // currently looking at (background prefetch) as well as the active one.
+    async buildTabState(libraryId) {
       try {
         const [allRes, settingsRes, historyRes] = await Promise.all([
           fetch(`/api/mangas/${libraryId}?sort=alphabetical`),
@@ -297,19 +340,19 @@ const app = createApp({
         const mangaById = Object.fromEntries(mangas.map(m => [m.id, m]));
 
         // Last Read: join history (already sorted by last_read desc) with mangas
-        this.lastRead = (historyData.history || [])
+        const lastRead = (historyData.history || [])
           .slice(0, 20)
           .map(h => mangaById[h.manga_id])
           .filter(Boolean);
 
-        this.random     = pickStableRow('random', libraryId, mangas);
-        this.favourites = pickStableRow('favourites', libraryId, mangas.filter(m => favouriteIds.has(m.id)));
+        const random     = pickStableRow('random', libraryId, mangas);
+        const favourites = pickStableRow('favourites', libraryId, mangas.filter(m => favouriteIds.has(m.id)));
 
-        // Set ambient blurred background from the most recently read manga,
-        // falling back to the first manga (natural sort) in the active library
+        // Ambient blurred background from the most recently read manga,
+        // falling back to the first manga (natural sort) in this library
         let bgManga = null;
-        if (this.lastRead.length > 0 && this.lastRead[0].coverLarge) {
-          bgManga = this.lastRead[0];
+        if (lastRead.length > 0 && lastRead[0].coverLarge) {
+          bgManga = lastRead[0];
         } else if (mangas.length > 0) {
           bgManga = [...mangas].sort((a, b) =>
             a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' })
@@ -318,29 +361,48 @@ const app = createApp({
 
         const backdropEnabled = settings.backdrop_list !== false;
         const lockBackdrop = settings.lock_backdrop === true;
+        let bgLayerStyle = null, bgIsRaster = false, bgUrlToLock = null;
         if (lockBackdrop && settings.locked_backdrop_url) {
           // A backdrop was already locked in (persisted server-side, so this
           // survives full page reloads, not just this Vue instance's lifetime).
-          this.bgLayerStyle = { backgroundImage: `url('${settings.locked_backdrop_url}')` };
-          this.bgIsRaster = true;
+          bgLayerStyle = { backgroundImage: `url('${settings.locked_backdrop_url}')` };
+          bgIsRaster = true;
         } else if (backdropEnabled && bgManga && bgManga.coverLarge) {
-          this.bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
-          this.bgIsRaster = true;
-          if (lockBackdrop) {
-            // First load with the lock on and nothing captured yet — lock in
-            // whatever's showing right now so it persists from here on.
-            this.persistLockedBackdrop(bgManga.coverLarge);
-          }
-        } else {
-          this.bgLayerStyle = null;
-          this.bgIsRaster = false;
+          bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
+          bgIsRaster = true;
+          if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
         }
 
-        // Load Last Updated page 1 separately (sorted + paginated), reuse history
-        await this.loadLastUpdated(libraryId, 1, historyByMangaId);
+        // Last Updated page 1, separately (sorted + paginated), reusing history
+        const lu = await this.fetchLastUpdatedPage(libraryId, 1, historyByMangaId);
+
+        return {
+          lastRead, random, favourites,
+          bgLayerStyle, bgIsRaster, bgUrlToLock,
+          lastUpdated:        lu ? lu.mangas  : [],
+          lastUpdatedPage:    lu ? lu.page    : 1,
+          lastUpdatedTotal:   lu ? lu.total   : 0,
+          lastUpdatedColumns: lu ? lu.columns : 1,
+        };
       } catch (e) {
         console.error('Failed to load mangas:', e);
+        return null;
       }
+    },
+
+    // Copies a buildTabState() result onto the live display fields —
+    // separate from loadMangas() so switchTab() can apply an
+    // already-cached state synchronously, with no fetch at all.
+    applyTabState(state) {
+      this.lastRead          = state.lastRead;
+      this.random             = state.random;
+      this.favourites         = state.favourites;
+      this.bgLayerStyle       = state.bgLayerStyle;
+      this.bgIsRaster         = state.bgIsRaster;
+      this.lastUpdated        = state.lastUpdated;
+      this.lastUpdatedPage    = state.lastUpdatedPage;
+      this.lastUpdatedTotal   = state.lastUpdatedTotal;
+      this.lastUpdatedColumns = state.lastUpdatedColumns;
     },
 
     async persistLockedBackdrop(url) {
@@ -355,8 +417,22 @@ const app = createApp({
       }
     },
 
-    // ── LOAD LAST UPDATED PAGE ──
+    // ── LOAD LAST UPDATED PAGE (active-tab pagination buttons call this directly) ──
     async loadLastUpdated(libraryId, page, historyByMangaId) {
+      const result = await this.fetchLastUpdatedPage(libraryId, page, historyByMangaId);
+      if (!result) return;
+      this.lastUpdated        = result.mangas;
+      this.lastUpdatedPage    = result.page;
+      this.lastUpdatedTotal   = result.total;
+      this.lastUpdatedColumns = result.columns;
+    },
+
+    // Pure: fetches + computes one Last Updated page without touching
+    // `this.*` — used by both loadLastUpdated() above (which applies the
+    // result live, for the active tab's own pagination) and
+    // buildTabState() (which caches it, possibly for a tab that isn't
+    // currently on screen).
+    async fetchLastUpdatedPage(libraryId, page, historyByMangaId) {
       try {
         const columns = currentGridColumns();
         const needsHistory = !historyByMangaId;
@@ -374,7 +450,7 @@ const app = createApp({
           }
         }
 
-        this.lastUpdated = data.mangas.map((m) => {
+        const mangas = data.mangas.map((m) => {
           const h = historyByMangaId[m.id];
           const progress = h && h.total_chapters > 0
             ? Math.round(h.furthest_chapter_idx / h.total_chapters * 100)
@@ -389,11 +465,10 @@ const app = createApp({
             progress,
           };
         });
-        this.lastUpdatedPage    = data.page;
-        this.lastUpdatedTotal   = data.total;
-        this.lastUpdatedColumns = columns;
+        return { mangas, page: data.page, total: data.total, columns };
       } catch (e) {
         console.error('Failed to load last updated:', e);
+        return null;
       }
     },
 
@@ -460,9 +535,20 @@ const app = createApp({
 
     switchTab(id) {
       this.activeTab = id;
-      this.lastUpdatedPage  = 1;
-      this.lastUpdatedTotal = 0;
-      this.loadMangas(id);
+      const cached = this.tabCache[id];
+      if (cached) {
+        // Already warmed by mounted()'s background prefetch (or a previous
+        // visit this session) -- apply instantly, no fetch at all.
+        this.applyTabState(cached);
+        if (cached.bgUrlToLock) this.persistLockedBackdrop(cached.bgUrlToLock);
+      } else {
+        // Not ready yet (prefetch still in flight, or this library was
+        // added after the page loaded) -- same fetch-then-render fallback
+        // as before this cache existed.
+        this.lastUpdatedPage  = 1;
+        this.lastUpdatedTotal = 0;
+        this.loadMangas(id);
+      }
       fetch('/api/settings/last-tab', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
