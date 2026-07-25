@@ -3280,12 +3280,24 @@ def _collection_summary(username: str, cid: str, record: dict, is_shared: bool, 
     }
 
 @app.get("/api/collections")
-def get_collections(request: Request):
+def get_collections(request: Request, lib: Optional[int] = Query(default=None)):
+    """`lib`, when given, scopes the result to collections that have at
+    least one VISIBLE member in that specific library -- a collection
+    that only contains manga from other libraries is omitted entirely,
+    not just shown with a lower member count. Deliberately checked against
+    the already-permission-filtered member list (a member the viewer can't
+    see doesn't count either way), and applied uniformly with no
+    admin/empty-collection exception the unscoped path below has: that
+    exception exists so a brand-new collection doesn't vanish outright for
+    the admin managing it, but relevance to one specific library's tab is
+    a different question a lib-scoped request is explicitly asking."""
     username = auth.get_current_user(request)
     user_data = auth.load_user_data(username)
     result = []
     for cid, rec in user_data.get("collections", {}).items():
         visible = _visible_members(username, rec.get("members", []))
+        if lib is not None and not any(m["library_id"] == lib for m in visible):
+            continue
         result.append(_collection_summary(username, cid, rec, False, visible))
     if not user_data.get("hide_admin_collections", False):
         for cid, rec in load_shared_collections().items():
@@ -3295,6 +3307,8 @@ def get_collections(request: Request):
             # their own shared collections, empty or not, or a brand-new
             # collection would 404 out of existence the instant it's created.
             if not visible and not _can_edit_collection(username, True):
+                continue
+            if lib is not None and not any(m["library_id"] == lib for m in visible):
                 continue
             result.append(_collection_summary(username, cid, rec, True, visible))
     return JSONResponse({"collections": result})

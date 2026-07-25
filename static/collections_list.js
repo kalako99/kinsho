@@ -6,6 +6,17 @@ const app = createApp({
       collections:       [],
       loading:           true,
 
+      // Set when this page was reached via a specific tab's "View more"
+      // (see app.js's goToCollections()) -- scopes /api/collections to
+      // collections with at least one member in that library, same rule
+      // the home page's own Collections row already applies. null (no
+      // lib= param at all) means an unscoped, "every collection" view.
+      libraryFilter: (() => {
+        const raw = new URLSearchParams(window.location.search).get('lib');
+        const n = parseInt(raw, 10);
+        return Number.isFinite(n) ? n : null;
+      })(),
+
       showCreatePopup:   false,
       newCollectionName: '',
 
@@ -37,7 +48,10 @@ const app = createApp({
     async loadCollections() {
       this.loading = true;
       try {
-        const res  = await fetch(apiUrl('/api/collections'));
+        const url = this.libraryFilter !== null
+          ? `/api/collections?lib=${this.libraryFilter}`
+          : '/api/collections';
+        const res  = await fetch(apiUrl(url));
         const data = await res.json();
         this.collections = data.collections || [];
       } catch (e) {

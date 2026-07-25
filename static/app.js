@@ -221,7 +221,7 @@ const app = createApp({
       lastRead:    activeState ? activeState.lastRead   : [],
       random:      activeState ? activeState.random     : [],
       favourites:  activeState ? activeState.favourites : [],
-      collectionsRow:       [],
+      collectionsRow:       activeState ? activeState.collectionsRow : [],
       showCollectionsRow:   true,
       collectionMembership: {},
 
@@ -259,6 +259,10 @@ const app = createApp({
 
   async mounted() {
     await this.loadTheme();
+    // Global on/off setting (not per-library) -- loaded before loadMangas()
+    // below since buildTabState() needs to know whether to even fetch a
+    // per-tab Collections row at all.
+    await this.loadCollectionsSetting();
 
     // Restore the scroll position from before navigating away, if the
     // chapter reader hasn't been visited since (see MANGA_LIST_SCROLL_KEY).
@@ -314,7 +318,7 @@ const app = createApp({
         }
       }
     }
-    await this.loadCollectionsRow();
+    await this.loadCollectionMembership();
     await this.loadIntegrityBadge();
 
     document.addEventListener('visibilitychange', () => {
@@ -339,32 +343,42 @@ const app = createApp({
       }
     },
 
-    // ── LOAD COLLECTIONS ROW ──
-    async loadCollectionsRow() {
+    // ── COLLECTIONS ROW: on/off SETTING (global, not per-library) ──
+    async loadCollectionsSetting() {
       try {
-        const settingsRes = await fetch(apiUrl('/api/settings'));
-        const settings = await settingsRes.json();
-        this.showCollectionsRow = settings.show_collections_row !== false;
+        const res  = await fetch(apiUrl('/api/settings'));
+        const data = await res.json();
+        this.showCollectionsRow = data.show_collections_row !== false;
       } catch (e) {
         this.showCollectionsRow = true;
       }
+    },
+
+    // Pure: fetches + shapes this SPECIFIC library's Collections row --
+    // lib= scopes /api/collections to collections with at least one
+    // member in this library, so one that only contains manga from other
+    // libraries doesn't show up here at all (see get_collections's own
+    // docstring for the exact rule this enforces server-side). Called
+    // from buildTabState() below, same as fetchLastUpdatedPage, so this
+    // row gets the same per-tab caching (instant tab switching, instant
+    // back-navigation) as the other rows instead of being fetched once,
+    // unscoped, and left stale across tab switches.
+    async fetchCollectionsRow(libraryId) {
+      if (!this.showCollectionsRow) return [];
       try {
-        const res  = await fetch(apiUrl('/api/collections'));
+        const res  = await fetch(apiUrl(`/api/collections?lib=${libraryId}`));
         const data = await res.json();
-        this.collectionsRow = this.showCollectionsRow
-          ? (data.collections || []).slice().sort(() => Math.random() - 0.5).slice(0, 20).map(c => ({
-              id:          c.id,
-              title:       c.name,
-              cover:       c.cover_url,
-              is_complete: false,
-              progress:    0,
-            }))
-          : [];
+        return (data.collections || []).slice().sort(() => Math.random() - 0.5).slice(0, 20).map(c => ({
+          id:          c.id,
+          title:       c.name,
+          cover:       c.cover_url,
+          is_complete: false,
+          progress:    0,
+        }));
       } catch (e) {
         console.error('Failed to load collections row:', e);
-        this.collectionsRow = [];
+        return [];
       }
-      await this.loadCollectionMembership();
     },
 
     async loadCollectionMembership() {
@@ -378,7 +392,12 @@ const app = createApp({
     },
 
     openCollection(id) { window.location.href = `/collection/${id}`; },
-    goToCollections()  { window.location.href = '/collections'; },
+    // "View more" on the Collections row is reached from a specific tab,
+    // so the resulting page should show what's relevant to that tab, same
+    // as the row itself does -- see collections_list.js for how the lib=
+    // param gets read back out and threaded into its own /api/collections
+    // call.
+    goToCollections()  { window.location.href = `/collections?lib=${this.activeTab}`; },
 
     // ── LOAD MANGAS FOR A TAB, CACHE IT, APPLY IT IF IT'S THE ACTIVE ONE ──
     // Called both for the active tab (mounted()/switchTab()'s cache-miss
@@ -497,9 +516,10 @@ const app = createApp({
 
         // Last Updated page 1, separately (sorted + paginated), reusing history
         const lu = await this.fetchLastUpdatedPage(libraryId, 1, historyByMangaId);
+        const collectionsRow = await this.fetchCollectionsRow(libraryId);
 
         return {
-          lastRead, random, favourites,
+          lastRead, random, favourites, collectionsRow,
           bgLayerStyle, bgIsRaster, bgUrlToLock,
           lastUpdated:        lu ? lu.mangas  : [],
           lastUpdatedPage:    lu ? lu.page    : 1,
@@ -519,6 +539,7 @@ const app = createApp({
       this.lastRead          = state.lastRead;
       this.random             = state.random;
       this.favourites         = state.favourites;
+      this.collectionsRow     = state.collectionsRow;
       this.bgLayerStyle       = state.bgLayerStyle;
       this.bgIsRaster         = state.bgIsRaster;
       this.lastUpdated        = state.lastUpdated;
