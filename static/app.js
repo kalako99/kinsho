@@ -135,22 +135,80 @@ function pickStableRow(rowName, libraryId, mangas) {
 // through browser history later.
 const MANGA_LIST_SCROLL_KEY = 'kinsho_manga_list_scroll';
 
+// ── FULL PAGE-STATE CACHE (sessionStorage) ──
+// tabCache (see the data() field of the same name) already held each
+// library's fully-built display state in plain JS memory -- but memory
+// doesn't survive a full page reload, and every "back" navigation to this
+// page IS one (traditional multi-page app, no SPA routing). Persisting
+// the same state to sessionStorage lets data() below read it back
+// synchronously, before the component ever renders for the first time --
+// so a back-navigation shows the real content and the restored scroll
+// position immediately, instead of an empty page that fills in (covers
+// popping in) and only THEN jumps to the remembered scroll position.
+// Same "until you start reading" invalidation as MANGA_LIST_SCROLL_KEY --
+// chapter_reader.html clears every kinsho_tab_cache_* key on load, same
+// reasoning: a snapshot from before you started reading isn't something
+// to keep instantly resuming into once you actually have.
+function tabCacheStorageKey(libraryId) {
+  return `kinsho_tab_cache_${libraryId}`;
+}
+
+function loadPersistedTabState(libraryId) {
+  try {
+    const raw = sessionStorage.getItem(tabCacheStorageKey(libraryId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function persistTabState(libraryId, state) {
+  try {
+    sessionStorage.setItem(tabCacheStorageKey(libraryId), JSON.stringify(state));
+  } catch (e) {
+    // sessionStorage unavailable/full -- fine to skip persisting, the
+    // in-memory tabCache (this session's own background prefetch) still
+    // makes tab switches instant; only the "instant on a fresh page load"
+    // half of this feature is lost.
+  }
+}
+
 // ── MAIN APP ──
 const app = createApp({
   components: { MangaThumb },
   directives: { dragScroll: vDragScroll },
 
   data() {
+    const tabs = window.__LIBRARIES__ || [];
+    const activeTab = (() => {
+      if (tabs.length === 0) return null;
+      const last = window.__LAST_TAB__;
+      const found = tabs.find(l => l.id === last);
+      return found ? found.id : tabs[0].id;
+    })();
+
+    // ── PER-LIBRARY TAB CACHE, SEEDED SYNCHRONOUSLY FROM sessionStorage ──
+    // library_id -> the full computed display state buildTabState() (see
+    // methods below) returns for it. Read here, before this component ever
+    // renders for the first time, so a back-navigation to this page shows
+    // real content (rows, grid, backdrop) and the correct scroll position
+    // on the very first paint -- no empty page filling in while covers
+    // load, then jumping to the remembered scroll position after the
+    // fact. loadMangas() still runs its normal fetch afterward regardless
+    // (mounted()), to reconcile against anything that's changed since this
+    // snapshot was taken -- this is a stale-while-revalidate seed, not a
+    // replacement for ever fetching fresh data.
+    const tabCache = {};
+    for (const tab of tabs) {
+      const persisted = loadPersistedTabState(tab.id);
+      if (persisted) tabCache[tab.id] = persisted;
+    }
+    const activeState = activeTab !== null ? tabCache[activeTab] : null;
+
     return {
       // ── TABS — loaded from backend via window.__LIBRARIES__ ──
-      tabs: window.__LIBRARIES__ || [],
-      activeTab: (() => {
-        const libs = window.__LIBRARIES__ || [];
-        if (libs.length === 0) return null;
-        const last = window.__LAST_TAB__;
-        const found = libs.find(l => l.id === last);
-        return found ? found.id : libs[0].id;
-      })(),
+      tabs,
+      activeTab,
 
       // ── TRACKS WHETHER EACH ROW IS SCROLLED TO THE END ──
       atEnd: { lastRead: false, random: false, favourites: false, collections: false },
@@ -160,33 +218,33 @@ const app = createApp({
       integrityIssueCount: 0,
 
       // ── ROW DATA ──
-      lastRead:    [],
-      random:      [],
-      favourites:  [],
+      lastRead:    activeState ? activeState.lastRead   : [],
+      random:      activeState ? activeState.random     : [],
+      favourites:  activeState ? activeState.favourites : [],
       collectionsRow:       [],
       showCollectionsRow:   true,
       collectionMembership: {},
 
       // ── GRID DATA + PAGINATION ──
-      lastUpdated:      [],
-      lastUpdatedPage:  1,
-      lastUpdatedTotal: 0,
+      lastUpdated:      activeState ? activeState.lastUpdated      : [],
+      lastUpdatedPage:  activeState ? activeState.lastUpdatedPage  : 1,
+      lastUpdatedTotal: activeState ? activeState.lastUpdatedTotal : 0,
       // Column count the most recent loadLastUpdated() fetch was aligned
       // to -- lastUpdatedTotalPages needs the same value the server used
       // to compute per-page counts, or its page-button count would drift
       // from what's actually being served.
-      lastUpdatedColumns: 1,
+      lastUpdatedColumns: activeState ? activeState.lastUpdatedColumns : 1,
       activeTheme: null,
-      bgLayerStyle: null,
-      bgIsRaster: false,
+      bgLayerStyle: activeState ? activeState.bgLayerStyle : null,
+      bgIsRaster:   activeState ? activeState.bgIsRaster   : false,
 
       // ── PER-LIBRARY TAB CACHE ──
-      // library_id -> the full computed display state buildTabState()
-      // returns for it (lastRead/random/favourites/lastUpdated/backdrop).
-      // Populated for the active tab on mount, then for every OTHER
-      // library in the background (see mounted()) so switching tabs is an
-      // instant local read instead of a fresh round-trip each time.
-      tabCache: {},
+      // Populated above from sessionStorage for an instant first paint,
+      // then kept current in-memory for the rest of this page's lifetime:
+      // for the active tab on mount, then for every OTHER library in the
+      // background (see mounted()) so switching tabs is an instant local
+      // read instead of a fresh round-trip each time.
+      tabCache,
     };
   },
 
@@ -201,7 +259,48 @@ const app = createApp({
 
   async mounted() {
     await this.loadTheme();
+
+    // Restore the scroll position from before navigating away, if the
+    // chapter reader hasn't been visited since (see MANGA_LIST_SCROLL_KEY).
+    // Deliberately done BEFORE the loadMangas()/loadCollectionsRow() calls
+    // below, not after: data() already seeded this component's rows/grid
+    // synchronously from the persisted tab-state cache (loadPersistedTabState),
+    // so on a cache hit the real content is already on screen the instant
+    // this runs -- only $nextTick (letting that already-seeded data finish
+    // its first paint) stands between mount and an immediate restore,
+    // instead of waiting on a fresh network round-trip first. On a cache
+    // miss there's normally no saved position to restore anyway (both are
+    // always written together and cleared together), so scrolling early
+    // against a still-short page is harmless -- it just clamps near zero.
+    const savedY = sessionStorage.getItem(MANGA_LIST_SCROLL_KEY);
+    if (savedY !== null) {
+      await this.$nextTick();
+      window.scrollTo(0, parseInt(savedY, 10) || 0);
+    }
+
+    // Keeps the saved position continuously up to date while scrolling,
+    // so whatever the very last position was before navigating away (a
+    // manga tile click, the back button, anything) is already captured --
+    // no reliance on a single beforeunload/pagehide event firing reliably
+    // right at the moment of navigation, which is inconsistent across
+    // mobile WebViews in particular. Registered early (before the fetches
+    // below) so a scroll during that window is never missed.
+    let scrollSaveScheduled = false;
+    window.addEventListener('scroll', () => {
+      if (scrollSaveScheduled) return;
+      scrollSaveScheduled = true;
+      requestAnimationFrame(() => {
+        sessionStorage.setItem(MANGA_LIST_SCROLL_KEY, String(window.scrollY));
+        scrollSaveScheduled = false;
+      });
+    }, { passive: true });
+
     if (this.activeTab !== null) {
+      // Reconciles the (possibly cache-seeded, possibly empty) current
+      // state against a fresh fetch regardless -- a stale-while-revalidate
+      // follow-up, not a replacement for the seed above. Vue only touches
+      // the DOM nodes that actually differ, so when the seed already
+      // matched current server state this is invisible.
       await this.loadMangas(this.activeTab);
       // Warm every other library's tab cache in the background, whether
       // the user ever visits it this session or not, so switching tabs
@@ -217,33 +316,6 @@ const app = createApp({
     }
     await this.loadCollectionsRow();
     await this.loadIntegrityBadge();
-
-    // Restore the scroll position from before navigating away, if the
-    // chapter reader hasn't been visited since (see MANGA_LIST_SCROLL_KEY).
-    // After $nextTick so the just-loaded rows/grid have actually flushed
-    // to the DOM -- restoring against the page's pre-content height would
-    // just clamp to whatever's currently the max scroll, usually near zero.
-    const savedY = sessionStorage.getItem(MANGA_LIST_SCROLL_KEY);
-    if (savedY !== null) {
-      await this.$nextTick();
-      window.scrollTo(0, parseInt(savedY, 10) || 0);
-    }
-
-    // Keeps the saved position continuously up to date while scrolling,
-    // so whatever the very last position was before navigating away (a
-    // manga tile click, the back button, anything) is already captured --
-    // no reliance on a single beforeunload/pagehide event firing reliably
-    // right at the moment of navigation, which is inconsistent across
-    // mobile WebViews in particular.
-    let scrollSaveScheduled = false;
-    window.addEventListener('scroll', () => {
-      if (scrollSaveScheduled) return;
-      scrollSaveScheduled = true;
-      requestAnimationFrame(() => {
-        sessionStorage.setItem(MANGA_LIST_SCROLL_KEY, String(window.scrollY));
-        scrollSaveScheduled = false;
-      });
-    }, { passive: true });
 
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && this.activeTab !== null) {
@@ -318,6 +390,12 @@ const app = createApp({
       const state = await this.buildTabState(libraryId);
       if (!state) return;
       this.tabCache[libraryId] = state;
+      // Also persisted to sessionStorage (not just kept in memory) so the
+      // NEXT full page load -- a back-navigation, since this is a
+      // traditional multi-page app -- can seed data() with it synchronously
+      // instead of starting from an empty page. See loadPersistedTabState/
+      // persistTabState's own comment for the full reasoning.
+      persistTabState(libraryId, state);
       if (libraryId === this.activeTab) {
         this.applyTabState(state);
         if (state.bgUrlToLock) {
