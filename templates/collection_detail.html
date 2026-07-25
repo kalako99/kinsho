@@ -1555,7 +1555,22 @@ createApp({
     },
 
     onGenreClick(genre) {
-      if (!this.genreDeleteMode) return;
+      if (!this.genreDeleteMode) {
+        // A collection has no single libraryId of its own (it can span
+        // multiple libraries) -- search is inherently single-library
+        // scoped (see search_page.html, which just stops loading without
+        // a lib= param), so this uses the same "first member wins" rule
+        // already applied elsewhere on this page (derived description,
+        // etc.) rather than guessing. Matches manga_detail.html/
+        // volume_detail.html's own tag/genre-click-to-search behavior,
+        // which this page never actually inherited despite being copied
+        // from volume_detail.html.
+        const libId = (this.collection.members[0] || {}).library_id;
+        if (libId != null) {
+          window.location.href = `/search?lib=${libId}&genre=${encodeURIComponent(genre)}`;
+        }
+        return;
+      }
       if (this.selectedGenres.includes(genre)) {
         this.selectedGenres = this.selectedGenres.filter(g => g !== genre);
       } else {
@@ -1626,7 +1641,15 @@ createApp({
     },
 
     onTagClick(tag) {
-      if (!this.deleteMode) return;
+      if (!this.deleteMode) {
+        // See onGenreClick's comment above -- same "first member's
+        // library" reasoning, same missing feature being restored.
+        const libId = (this.collection.members[0] || {}).library_id;
+        if (libId != null) {
+          window.location.href = `/search?lib=${libId}&tag=${encodeURIComponent(tag)}`;
+        }
+        return;
+      }
       if (this.selectedTags.includes(tag)) {
         this.selectedTags = this.selectedTags.filter(t => t !== tag);
       } else {
