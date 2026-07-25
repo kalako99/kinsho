@@ -1756,61 +1756,112 @@
   }
 
   // Assign a URL to a manifest entry (populates entry.url, sets img src via slot if assigned)
-  function loadEntry(entry) {
+  function loadEntry(entry, retriesLeft = 2) {
     if (entry.loaded) return;
     if (entry.url) {
-      _applyUrlToSlot(entry);
+      _applyUrlToSlot(entry, retriesLeft);
       return;
     }
     ensureChapterUrls(entry.chapterId).then(urls => {
       entry.url = urls[entry.localIdx] || '';
-      _applyUrlToSlot(entry);
+      _applyUrlToSlot(entry, retriesLeft);
     });
   }
 
-  function _applyUrlToSlot(entry) {
+  // entry.loaded is only set once the browser confirms the image actually
+  // finished loading (onload), not the moment .src is assigned -- previously
+  // set unconditionally right there, so a stalled/dropped request (more
+  // likely during fast scrolling, which fires many concurrent slot loads at
+  // once and can exceed the browser's per-origin connection cap) left that
+  // page permanently stuck at whatever partial state it reached: every
+  // loader early-returns on entry.loaded, so nothing ever retried it. The
+  // only "fix" was the accidental side effect of a manual page jump's
+  // _rebuildConveyorWindow resetting loaded=false for the whole window.
+  // onerror now retries a couple of times (short flat delay, not exponential
+  // -- default retriesLeft=2 already bounds this to 3 attempts total) before
+  // giving up; if retries are exhausted, entry.loaded simply stays false so
+  // a later pass (scrolling back over it, a fresh conveyor rebuild) can
+  // still pick it up naturally instead of being marked done-but-broken.
+  function _applyUrlToSlot(entry, retriesLeft = 2) {
+    if (!entry.url) return;
     const globalIdx = manifest.indexOf(entry);
     const si = assignedSlot[globalIdx];
-    if (si !== -1) {
-      slotPool[si].img.src = entry.url;
-      entry.loaded = true;
-    }
+    if (si === -1) return;
+    const imgEl = slotPool[si].img;
+    imgEl.onload = () => { entry.loaded = true; };
+    imgEl.onerror = () => {
+      if (retriesLeft > 0) {
+        setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
+      }
+    };
+    imgEl.src = entry.url;
   }
 
   // Tier 1: full-res + forced decode, then paint into slot
-  function loadEntryTier1(entry, signal) {
+  function loadEntryTier1(entry, signal, retriesLeft = 2) {
     if (entry.loaded) return;
+    // Captured now (synchronously, when this load is scheduled) rather than
+    // read fresh inside _upgradeSpImage below -- a slow tier1 prefetch
+    // (queued during a fast-reading burst, or just a slower link) can
+    // resolve well after the user has since flipped past it again in
+    // single-page mode. Cancelling a *pending* prefetch
+    // (_spSchedulePrefetch's own AbortController) only stops requests not
+    // yet dispatched, never one already in flight, so
+    // spManifest[spCurrentIdx] === entry alone wasn't enough to guard
+    // against this -- it only checks WHICH page is current, not WHETHER a
+    // newer flip has happened since this specific load was scheduled, so a
+    // stale load could still win the moment the user's own reading pace
+    // organically caught back up to that same page index (needing several
+    // back-and-forth flips to "fix" -- each one only cancels the *next*
+    // pending prefetch, not whatever earlier ones are already in flight).
+    const scheduledSpFrame = _spAnimFrame;
     const apply = (url) => {
       if (!url || signal?.aborted) return;
       entry.url = url;
-      entry.loaded = true;
       const _upgradeSpImage = () => {
         // spImage is a swappable reference — always read it at call time, not at definition time.
-        if (readerSettings.mode === 'single-page' && spManifest[spCurrentIdx] === entry) {
+        if (readerSettings.mode === 'single-page'
+            && spManifest[spCurrentIdx] === entry
+            && _spAnimFrame === scheduledSpFrame) {
           spImage.src = url;
         }
+      };
+      // entry.loaded is only set once success is confirmed -- see
+      // _applyUrlToSlot's comment above for the full reasoning (same
+      // underlying bug, same fix shape). onFail retries a couple of times
+      // before giving up and leaving entry.loaded false for a later pass.
+      const globalIdx = manifest.indexOf(entry);
+      const si = assignedSlot[globalIdx];
+      const onSuccess = () => {
+        if (signal?.aborted) return;
+        entry.loaded = true;
+        _upgradeSpImage();
+      };
+      const onFail = () => {
+        if (signal?.aborted || retriesLeft <= 0) return;
+        setTimeout(() => loadEntryTier1(entry, signal, retriesLeft - 1), 500);
       };
       if (isCompressed) {
         const img = new Image();
         img.src = url;
         img.decode().then(() => {
-          if (signal?.aborted) return;
-          const globalIdx = manifest.indexOf(entry);
-          const si = assignedSlot[globalIdx];
           if (si !== -1) slotPool[si].img.src = url;
-          _upgradeSpImage();
-        }).catch(() => {
-          if (signal?.aborted) return;
-          const globalIdx = manifest.indexOf(entry);
-          const si = assignedSlot[globalIdx];
-          if (si !== -1) slotPool[si].img.src = url;
-          _upgradeSpImage();
-        });
+          onSuccess();
+        }).catch(onFail);
+      } else if (si !== -1) {
+        const imgEl = slotPool[si].img;
+        imgEl.onload = onSuccess;
+        imgEl.onerror = onFail;
+        imgEl.src = url;
       } else {
-        const globalIdx = manifest.indexOf(entry);
-        const si = assignedSlot[globalIdx];
-        if (si !== -1) slotPool[si].img.src = url;
-        _upgradeSpImage();
+        // No slot currently assigned -- nothing to paint into yet, but
+        // still worth confirming the fetch actually succeeds: a resolved
+        // detached Image() lands in the browser's own HTTP cache, so
+        // whenever this entry does get a slot later it paints instantly.
+        const probe = new Image();
+        probe.onload = onSuccess;
+        probe.onerror = onFail;
+        probe.src = url;
       }
     };
     if (entry.url) { apply(entry.url); return; }

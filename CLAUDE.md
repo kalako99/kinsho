@@ -1520,3 +1520,116 @@ Full analysis, the SumatraPDF/PDF.js comparison, and the staged plan this
 was implemented from are preserved in the `kinsho-android` repo's CLAUDE.md
 bug-list entry and the session's plan file, for anyone who wants the full
 reasoning rather than just this summary.
+
+## Reader bugs from live testing (2026-07-25)
+
+Three bugs reported after ~1 hour of live testing in both long-strip and single-page
+mode, on loose-image chapters, via both the `tm_tm` and `kinsho-android` apps. Root-caused
+via a forked investigation (multiple passes — the first pass's theories didn't survive
+contact with follow-up details the user provided) rather than guessed at.
+
+### Bug 1 — visible seams between images in long-strip mode — STILL OPEN, not yet fixed
+
+Reported: reading with padding off and zoom at 60% (max zoom-out), entered via jumping to
+chapter 107 through the in-reader chapter dropdown rather than starting from page 1. Fast
+scrolling (~1-1.5 pages/sec) eventually produced visible dividing lines between images that
+should render flush. Not tied to one specific timing (happened both on arrival and appearing
+later mid-scroll) and not tied to broken/low-res pages specifically (also seen on normally,
+fully-loaded pages) — ruling out bug 2's mechanism (below) as the cause of this one.
+
+Two theories were investigated and ruled out with certainty, not just "didn't find it":
+- **The app's own geometry math** (`globalY`/`scaledH` in `buildManifest`/`recomputeGeometry`)
+  is provably exact — each page's start position and its own height are derived from the
+  same running variable in the same statement (`entry.globalY = cursorY; cursorY +=
+  scaledH...`), so `globalY[i+1] - globalY[i] === scaledH[i]` always holds by construction.
+  No floating-point drift is possible at this scale in JS either (IEEE-754 doubles are exact
+  integers up to 2^53). Confirmed no stray CSS margin/border could add a gap independent of
+  the JS math either.
+- **The chapter-jump entry point isn't a special code path.** Every chapter-navigation call
+  site (dropdown, next/prev, bookmark jump, single-page chapter-boundary crossing) goes
+  through `goToChapter()` — a full `window.location.replace()`, i.e. a fresh page boot
+  identical to opening any chapter directly. The only thing that differs is *where* you
+  start (`startGlobalIdx`/`virtualY`), not *how* geometry gets computed.
+
+Current leading theory (medium confidence, unconfirmed): a **browser-level rendering-precision
+artifact**, not an app bug. Jumping deep into a long-running webtoon means `cursorY`/`virtualY`
+starts at a cumulative sum of everything before it — plausibly multi-million-pixel for a
+100+-chapter series, versus near-zero starting fresh from page 1. At that magnitude,
+Chromium/WebView2's own layout engine (finite-precision internally) can introduce its own
+1-2px positioning error between two adjacent, individually-correctly-computed elements —
+external to this app's own (exact) JS math entirely. Against the reader's solid black
+background, even a 1-2px gap reads as a stark seam. Zoom level looks incidental to this
+theory, not causal: lower zoom produces *smaller* cumulative heights (narrower pages ⇒
+shorter pages at the same aspect ratio), which argues against zoom being the driver.
+
+**Not yet fixed** — no code changed for this bug. If the depth theory holds, the real fix
+is architectural (periodically rebasing the coordinate system so the browser is never asked
+to position elements at multi-million-pixel offsets, rather than one ever-growing absolute
+position for the whole manga) — a bigger undertaking than 2/3 below, deliberately deferred
+until confirmed. Suggested confirmation test for whoever picks this up: read a webtoon from
+page 1 all the way down to a comparable cumulative depth to chapter 107, at any zoom, and
+check whether seams start appearing there too, independent of entry method — that would
+directly confirm depth (not chapter-jump, not zoom) as the real variable.
+
+### Bug 2 — long-strip page stuck at low resolution, never finishes loading — fixed
+
+Rare: a page would load partially/low-res and never upgrade to full quality, even though
+later pages (scrolled past it) loaded fine. Workaround was tapping that exact page number
+on the segmented progress bar, which happened to force a reload as an accidental side effect.
+
+Root cause: `entry.loaded` was set to `true` the moment a page's image *fetch was dispatched*
+(`.src = url` assigned), not when the browser actually finished loading it — and there was
+no `onerror`/timeout/retry handling anywhere in the file. Every load path (`loadEntry`,
+`loadEntryTier1`) early-returns once `entry.loaded` is true, so a fetch that stalled or got
+dropped (more likely during fast scrolling, which fires many concurrent slot loads at once
+and can exceed the browser's ~6-connections-per-origin cap) was never retried — stuck in
+whatever partial state it reached, forever. The workaround "worked" purely because
+`_rebuildConveyorWindow` (triggered by jumping to a specific page via the progress bar)
+resets `loaded = false` for the entire visible window and creates fresh `<img>` elements —
+a full nuke-and-reload, not a designed retry path.
+
+Fixed in `_applyUrlToSlot`/`loadEntry` and `loadEntryTier1` (`templates/chapter_reader.html`):
+`entry.loaded` is now only set inside the image's own `onload` handler, and `onerror` retries
+(a couple of times, flat 500ms delay, then gives up and leaves `loaded` false rather than
+stuck-but-marked-done) instead of being set unconditionally at dispatch time. Applied to both
+the simple long-strip loader (`_applyUrlToSlot`, used during conveyor-window shifts) and the
+tiered loader (`loadEntryTier1`, shared by long-strip tier-1 and single-page mode) — same
+underlying bug, same fix shape in both places. Verified nothing else in the file assumes
+`entry.loaded` becomes true *synchronously* right after these functions are called (every
+other read site is just an `if (entry.loaded) return` guard or a reset to `false`), so making
+completion genuinely asynchronous doesn't regress anything.
+
+### Bug 3 — single-page mode: a different page loads on top unprompted — fixed
+
+After a while of normal reading (~15 minutes), advancing to a new page would show it
+correctly, then — before the user started reading it — a *different* page would load and
+display on top, with no corresponding tap. A single navigation cycle didn't stop it; it took
+several back-and-forth flips before the symptom stopped reproducing.
+
+Root cause: `loadEntryTier1`'s single-page "upgrade" path (`_upgradeSpImage`, which writes
+straight to `spImage.src` once a prefetched page's load resolves) only guarded against
+staleness by checking `spManifest[spCurrentIdx] === entry` — i.e. "is this still the current
+page," with no relationship to *when* the load was scheduled. Single-page mode prefetches up
+to 15 pages ahead during a fast-reading burst, rescheduling on every flip; the existing
+cancellation (`_spSchedulePrefetch`'s `AbortController`) only stops the *next pending* timer,
+never a request already in flight. Over several minutes with any faster stretches (normal
+even in careful reading), multiple independent prefetch batches can be resolving in the
+background at once, each capable of firing the moment the user's own pace organically catches
+up to that same page index later — explaining why it took several navigation cycles to stop:
+each cycle only cancels its own newly-superseded pending timer, not whatever earlier batches
+were already dispatched and still resolving.
+
+Fixed by capturing `_spAnimFrame` (the existing monotonic token every *other* async
+single-page callback already uses to detect a superseded flip — see `spGotoIdx`) at the
+moment `loadEntryTier1` is scheduled, and checking it alongside the existing
+`spCurrentIdx`/`entry` identity check before writing to `spImage.src`. A stale load can now
+never win regardless of how large a backlog accumulates or how long it takes to resolve,
+since its captured token can never match `_spAnimFrame` again once a newer flip has happened.
+
+Investigation note for future reference: this took two passes to land on the right theory
+for bug 3. The first pass concluded a single stale callback was the whole story; the user's
+follow-up detail (needed several back-and-forth cycles, not just one, to stop reproducing)
+revealed the cancellation gap was actually a *backlog* problem (multiple independently-
+resolving stale loads), not a single race — worth remembering that "it took a few tries to
+fix itself" is a meaningfully different signal from "it happened once and went away," and
+points at accumulation/backlog bugs rather than single-race ones.
