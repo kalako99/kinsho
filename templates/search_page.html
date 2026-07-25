@@ -75,12 +75,45 @@
       margin-bottom: 10px;
       margin-top: 18px;
     }
+    /* Wraps .filter-label + the expand toggle for the Genres/Tags sections
+       specifically -- Collection's plain .filter-label (a dropdown, not a
+       pills-row) is untouched, so its own margin stays as-is. */
+    .filter-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 18px;
+      margin-bottom: 10px;
+    }
+    .filter-label-row .filter-label {
+      margin: 0;
+    }
+    .expand-btn {
+      background: none;
+      border: none;
+      color: var(--color-primary, #e94560);
+      font-size: 0.68rem;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 2px 0;
+      text-transform: none;
+      letter-spacing: normal;
+    }
+    .expand-btn:hover {
+      text-decoration: underline;
+    }
     .pills-row {
       display: flex;
       flex-wrap: wrap;
       gap: 7px;
       margin-bottom: 20px;
       min-height: 28px;
+    }
+    /* One row's worth of pill height -- matches min-height above (the pill
+       itself, without the row-to-row gap that only applies once wrapped). */
+    .pills-row.collapsed {
+      max-height: 28px;
+      overflow: hidden;
     }
     .pill {
       font-size: 0.72rem;
@@ -286,9 +319,16 @@
   </div>
 
   <div class="filters">
-    <div class="filter-label">Genres</div>
+    <div class="filter-label-row">
+      <div class="filter-label">Genres</div>
+      <button
+        v-if="allGenres.length > 0"
+        class="expand-btn"
+        @click="genresExpanded = !genresExpanded"
+      >{{ genresExpanded ? 'Show less' : 'Show all' }}</button>
+    </div>
     <input class="filter-search" type="text" v-model="genreSearch" placeholder="Filter genres…">
-    <div class="pills-row">
+    <div class="pills-row" :class="{ collapsed: !genresExpanded }">
       <span v-if="allGenres.length === 0" class="no-filters">No genres yet.</span>
       <span
         v-for="genre in filteredGenres"
@@ -299,9 +339,16 @@
       >{{ genre }}</span>
     </div>
 
-    <div class="filter-label">Tags</div>
+    <div class="filter-label-row">
+      <div class="filter-label">Tags</div>
+      <button
+        v-if="allTags.length > 0"
+        class="expand-btn"
+        @click="tagsExpanded = !tagsExpanded"
+      >{{ tagsExpanded ? 'Show less' : 'Show all' }}</button>
+    </div>
     <input class="filter-search" type="text" v-model="tagSearch" placeholder="Filter tags…">
-    <div class="pills-row">
+    <div class="pills-row" :class="{ collapsed: !tagsExpanded }">
       <span v-if="allTags.length === 0" class="no-filters">No tags yet.</span>
       <span
         v-for="tag in filteredTagList"
@@ -391,6 +438,12 @@ createApp({
       allTags:        [],
       selectedGenres: preGenre ? [preGenre] : [],
       selectedTags:   preTag   ? [preTag]   : [],
+      // Collapsed to one row by default (see .pills-row.collapsed) --
+      // starts expanded when arriving with a specific genre/tag already
+      // selected (from a manga/collection page's click-to-search link) so
+      // that selection is never hidden behind the collapse on arrival.
+      genresExpanded: !!preGenre,
+      tagsExpanded:   !!preTag,
       genreSearch:    '',
       tagSearch:      '',
       onlyCompleted:  false,
