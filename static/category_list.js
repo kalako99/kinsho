@@ -70,7 +70,20 @@ const app = createApp({
     if (this.category === 'random') {
       this.seed = this.getOrCreateSeed();
     }
-    await this.loadPage(1);
+    // One-shot handoff from the home page's row (see app.js's goMore()) --
+    // removed immediately after reading so it only ever applies to this
+    // one arrival, not a later manual refresh/back-forward on this page.
+    let pinnedIds = null;
+    const pinnedKey = `kinsho_category_pinned_${this.libraryId}_${this.category}`;
+    try {
+      const raw = sessionStorage.getItem(pinnedKey);
+      if (raw) pinnedIds = JSON.parse(raw);
+    } catch (e) {
+      pinnedIds = null;
+    }
+    sessionStorage.removeItem(pinnedKey);
+
+    await this.loadPage(1, pinnedIds);
     await this.loadCollectionMembership();
   },
 
@@ -99,11 +112,14 @@ const app = createApp({
       this.loadPage(1);
     },
 
-    async loadPage(page) {
+    async loadPage(page, pinnedIds) {
       try {
         let url = `/api/category-list/${this.libraryId}/${this.category}?page=${page}`;
         if (this.category === 'random' && this.seed !== null) {
           url += `&seed=${this.seed}`;
+        }
+        if (pinnedIds && pinnedIds.length > 0) {
+          url += `&pinned=${pinnedIds.map(encodeURIComponent).join(',')}`;
         }
         const res = await fetch(url);
         const data = await res.json();

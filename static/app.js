@@ -437,6 +437,22 @@ const app = createApp({
       };
       const category = map[section];
       if (!category) return;
+
+      // Hands the category page the exact row it was opened from, in the
+      // same order, so the items you land on top of are the ones you
+      // just saw -- not a second, independently-computed selection (the
+      // category page's own random seed/favourites shuffle previously had
+      // no relationship to what this row happened to be showing).
+      // sessionStorage, not a URL param, since it's a one-shot handoff
+      // between two page loads, not app state worth bookmarking/sharing.
+      const rowByCategory = { 'last-read': this.lastRead, 'random': this.random, 'favourites': this.favourites };
+      const rowIds = (rowByCategory[category] || []).map(m => m.id);
+      try {
+        sessionStorage.setItem(`kinsho_category_pinned_${this.activeTab}_${category}`, JSON.stringify(rowIds));
+      } catch (e) {
+        // sessionStorage unavailable -- the category page just falls back
+        // to its own normal ordering, same as before this feature existed.
+      }
       window.location.href = `/manga/${this.activeTab}/category/${category}`;
     },
 

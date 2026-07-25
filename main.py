@@ -4386,6 +4386,12 @@ def get_category_list(
     category: str,
     page: int = Query(default=1, ge=1),
     seed: Optional[int] = Query(default=None),
+    # Comma-separated manga ids, in order -- the home page's row this
+    # request was opened from (see app.js's goMore()), so the top of page
+    # 1 matches exactly what was just visible there instead of a second,
+    # independently-shuffled selection. Only ever sent on the initial
+    # load from "View more"; manual pagination/reshuffle omit it.
+    pinned: Optional[str] = Query(default=None),
 ):
     if category not in ("favourites", "last-read", "random"):
         return JSONResponse({"error": "Invalid category"}, status_code=400)
@@ -4440,6 +4446,18 @@ def get_category_list(
         rng = random.Random(seed) if seed is not None else random
         rng.shuffle(all_ids)
         ordered_ids = all_ids
+
+    if pinned:
+        ordered_id_set = set(ordered_ids)
+        # Only ids that are still actually in this category (a favourite
+        # removed, a manga deleted by a rescan, since the row was drawn)
+        # get pinned -- anything else is silently dropped rather than
+        # surfacing a manga that shouldn't be in this list at all.
+        pinned_ids = [pid for pid in pinned.split(",") if pid in ordered_id_set]
+        if pinned_ids:
+            pinned_set = set(pinned_ids)
+            rest_ids = [oid for oid in ordered_ids if oid not in pinned_set]
+            ordered_ids = pinned_ids + rest_ids
 
     total = len(ordered_ids)
     per_page = 50
