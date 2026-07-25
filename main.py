@@ -136,12 +136,29 @@ async def default_no_store(request: Request, call_next):
     cached the logged-out "/" redirect + login page and served them forever,
     making login impossible no matter what the server did. Routes that WANT
     caching (page images, dims, thumbnails) already send explicit
-    Cache-Control headers, which this leaves untouched; /static is skipped
-    so its ETag/Last-Modified revalidation keeps working for JS/CSS.
+    Cache-Control headers, which this leaves untouched.
     """
     response = await call_next(request)
-    if "cache-control" not in response.headers and not request.url.path.startswith("/static"):
-        response.headers["Cache-Control"] = "no-store"
+    if "cache-control" in response.headers:
+        return response
+    if request.url.path.startswith("/static"):
+        # StaticFiles already sets ETag/Last-Modified and handles conditional
+        # requests -- but with no Cache-Control at all, a client is free to
+        # trust its OWN heuristic freshness window instead of ever asking the
+        # server, which (per RFC 7234) commonly grows as a fraction of the
+        # file's age: the longer a deploy goes untouched, the longer a client
+        # can silently keep serving a stale copy of app.js/category_list.js
+        # without a single revalidation request, no matter how many deploys
+        # happen in between. This was a real bug, not just theoretical --
+        # traced live via a byte-identical deployed-vs-committed diff that
+        # ruled out a bad deploy, leaving stale client-side JS as the only
+        # explanation for a shipped feature silently not running.
+        # "no-cache" (not "no-store") forces a conditional request on every
+        # single load -- a match is still a cheap bodyless 304 off the
+        # existing ETag, so this costs nothing when the file is unchanged.
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 def is_idle(threshold_seconds: int = 1200) -> bool:
