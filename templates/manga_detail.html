@@ -1118,7 +1118,7 @@
               </div>
             </div>
             </div>
-            <button class="btn btn-soft" v-if="canEditDescription || canEditTags || canEditGenres" @click="openMetadataSearch">
+            <button class="btn btn-soft" v-if="canFetchMetadata" @click="openMetadataSearch">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
               </svg>
@@ -1478,6 +1478,7 @@ createApp({
       canEditTags:          false,
       canEditGenres:        false,
       canEditDescription:   false,
+      canFetchMetadata:     false,
       // description
       editingDesc:          false,
       descInput:            '',
@@ -1807,12 +1808,14 @@ createApp({
           this.canEditTags        = this.isAdmin || p.tags        === true;
           this.canEditGenres      = this.isAdmin || p.genres      === true;
           this.canEditDescription = this.isAdmin || p.description === true;
+          this.canFetchMetadata   = this.isAdmin || p.metadata_fetch === true;
         }
       } catch (e) {
         this.isAdmin            = false;
         this.canEditTags        = false;
         this.canEditGenres      = false;
         this.canEditDescription = false;
+        this.canFetchMetadata   = false;
       }
     },
 

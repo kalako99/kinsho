@@ -654,6 +654,151 @@
     }
     .btn-pencil:hover { color: var(--color-primary, #e94560); }
 
+    /* ── FETCH METADATA POPUP ── */
+    .meta-popup {
+      max-width: 620px;
+      width: 95%;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .meta-search-row {
+      display: flex;
+      gap: 8px;
+      padding-bottom: 14px;
+    }
+    .meta-search-input {
+      flex: 1;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .meta-search-input:focus { border-color: var(--color-primary, #e94560); }
+    .meta-candidates {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 2px 2px 12px;
+    }
+    .meta-candidate {
+      display: flex;
+      gap: 12px;
+      padding: 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      border: 1.5px solid transparent;
+      background: rgba(255,255,255,0.04);
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .meta-candidate:hover { background: rgba(255,255,255,0.07); }
+    .meta-candidate.selected { border-color: var(--color-primary, #e94560); background: rgba(255,255,255,0.07); }
+    .meta-cover {
+      width: 65px;
+      height: 92px;
+      object-fit: cover;
+      border-radius: 4px;
+      flex-shrink: 0;
+      background: var(--color-secondary, #1a1a1a);
+    }
+    .meta-cover-ph {
+      width: 65px;
+      height: 92px;
+      border-radius: 4px;
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.06);
+    }
+    .meta-info {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .meta-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--color-text, #f0f0f0);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .meta-subtitle {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.42);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .meta-badges {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .meta-badge-sm {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.1);
+      color: rgba(255,255,255,0.55);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .meta-score-badge {
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      color: #fff;
+      letter-spacing: 0.2px;
+    }
+    .meta-genres-preview {
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.38);
+      margin-top: 2px;
+    }
+    .meta-empty {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      color: #555;
+      padding: 28px 0;
+    }
+    .meta-fields-row {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 10px 0;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      font-size: 0.8rem;
+      color: var(--color-text, #f0f0f0);
+      flex-wrap: wrap;
+    }
+    .meta-fields-row label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+    }
+    .meta-status {
+      font-size: 0.78rem;
+      text-align: center;
+      padding: 6px 0 0;
+    }
+    .meta-status.ok  { color: #4ade80; }
+    .meta-status.err { color: #f87171; }
+
     /* ── COVER PICKER POPUP ── */
     .cover-picker-overlay {
       position: fixed;
@@ -1042,6 +1187,12 @@
               </div>
             </div>
           </div>
+          <button class="btn btn-soft" v-if="canFetchMetadata" style="margin-top:10px;" @click="openMetadataSearch">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            Fetch Metadata
+          </button>
 
           <!-- STATUS / LAST UPDATED -->
           <div class="status-row">
@@ -1278,6 +1429,75 @@
     </div>
   </div>
 
+  <!-- FETCH METADATA POPUP -->
+  <div class="popup-overlay" v-if="showMetadataPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showMetadataPopup = false)">
+    <div class="popup meta-popup">
+      <div class="popup-title">Fetch Metadata from AniList</div>
+      <div class="meta-search-row">
+        <input
+          class="meta-search-input"
+          type="text"
+          v-model="metaSearch"
+          placeholder="Search title…"
+          @keyup.enter="searchMetadata"
+        >
+        <button class="popup-btn primary" @click="searchMetadata" :disabled="metaSearching || !metaSearch.trim()">
+          {{ metaSearching ? 'Searching…' : 'Search' }}
+        </button>
+      </div>
+      <div class="meta-candidates" v-if="displayMetaCandidates.length > 0">
+        <div
+          v-for="(c, i) in displayMetaCandidates"
+          :key="c.anilist_id || 'local'"
+          class="meta-candidate"
+          :class="{ selected: i === metaSelectedIdx }"
+          @click="metaSelectedIdx = i"
+        >
+          <img v-if="c.cover_url_medium" :src="c.cover_url_medium" class="meta-cover">
+          <div v-else class="meta-cover-ph"></div>
+          <div class="meta-info">
+            <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
+            <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
+            <div class="meta-badges">
+              <template v-if="c.source === 'local'">
+                <span class="meta-badge-sm">LOCAL FILE</span>
+              </template>
+              <template v-else>
+                <span class="meta-badge-sm" v-if="c.format">{{ c.format }}</span>
+                <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
+                <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
+                  {{ Math.round(c.match_score * 100) }}% match
+                </span>
+              </template>
+            </div>
+            <div class="meta-genres-preview" v-if="(c.genres || []).length">
+              {{ (c.genres || []).slice(0, 5).join(' · ') }}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="meta-empty" v-else>{{ metaStatus.msg || 'Search for a title above.' }}</div>
+      <div class="meta-fields-row" v-if="displayMetaCandidates.length > 0">
+        <span style="font-size:0.72rem;color:#777;">Import:</span>
+        <label><input type="checkbox" v-model="metaFields.description"> Description</label>
+        <label><input type="checkbox" v-model="metaFields.genres"> Genres</label>
+        <label><input type="checkbox" v-model="metaFields.tags"> Tags</label>
+        <label><input type="checkbox" v-model="metaFields.cover"> Cover</label>
+      </div>
+      <div class="popup-actions" style="margin-top:12px;">
+        <button class="popup-btn soft" @click="showMetadataPopup = false">Cancel</button>
+        <button
+          class="popup-btn primary"
+          :disabled="metaSelectedIdx === null || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags && !metaFields.cover)"
+          @click="applyMetadata"
+        >{{ metaApplying ? 'Applying…' : 'Apply' }}</button>
+      </div>
+      <div v-if="metaStatus.msg && displayMetaCandidates.length > 0" class="meta-status" :class="metaStatus.type">
+        {{ metaStatus.msg }}
+      </div>
+    </div>
+  </div>
+
   <!-- COVER PICKER POPUP -->
   <div class="cover-picker-overlay" v-if="showCoverPicker" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showCoverPicker = false)">
     <div class="cover-picker-box" @click.stop>
@@ -1326,6 +1546,7 @@ createApp({
       canEditTags:          false,
       canEditGenres:        false,
       canEditDescription:   false,
+      canFetchMetadata:     false,
       // description
       editingDesc:          false,
       descInput:            '',
@@ -1351,6 +1572,16 @@ createApp({
       allCollections:       [],
       showCollectionDropdown: false,
       collectionSearch:     '',
+      // fetch metadata popup
+      showMetadataPopup:    false,
+      metaSearch:           '',
+      metaSearching:        false,
+      metaCandidates:       [],
+      localMetaCandidate:   null,
+      metaSelectedIdx:      null,
+      metaFields:           { description: true, genres: true, tags: true, cover: true },
+      metaApplying:         false,
+      metaStatus:           { msg: '', type: '' },
       // reading progress
       lastVolumeId:         null,
       lastPage:             0,
@@ -1386,6 +1617,10 @@ createApp({
 
     inAnyCollection() {
       return this.allCollections.some(c => c.has_manga);
+    },
+
+    displayMetaCandidates() {
+      return this.localMetaCandidate ? [this.localMetaCandidate, ...this.metaCandidates] : this.metaCandidates;
     },
   },
 
@@ -1648,13 +1883,81 @@ createApp({
           this.canEditTags        = this.isAdmin || p.tags        === true;
           this.canEditGenres      = this.isAdmin || p.genres      === true;
           this.canEditDescription = this.isAdmin || p.description === true;
+          this.canFetchMetadata   = this.isAdmin || p.metadata_fetch === true;
         }
       } catch (e) {
         this.isAdmin            = false;
         this.canEditTags        = false;
         this.canEditGenres      = false;
         this.canEditDescription = false;
+        this.canFetchMetadata   = false;
       }
+    },
+
+    async openMetadataSearch() {
+      this.metaSearch     = this.manga ? this.manga.name : '';
+      this.metaCandidates = [];
+      this.localMetaCandidate = null;
+      this.metaSelectedIdx = null;
+      this.metaStatus     = { msg: '', type: '' };
+      this.showMetadataPopup = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/local-metadata`));
+        const data = await res.json();
+        this.localMetaCandidate = data.candidate || null;
+        if (this.localMetaCandidate) this.metaSelectedIdx = 0;
+      } catch (e) {
+        this.localMetaCandidate = null;
+      }
+    },
+
+    async searchMetadata() {
+      if (!this.metaSearch.trim()) return;
+      this.metaSearching   = true;
+      this.metaCandidates  = [];
+      this.metaSelectedIdx = null;
+      this.metaStatus      = { msg: '', type: '' };
+      try {
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}`));
+        const data = await res.json();
+        this.metaCandidates = data.candidates || [];
+        if (this.metaCandidates.length > 0) this.metaSelectedIdx = this.localMetaCandidate ? 1 : 0;
+        else this.metaStatus = { msg: 'No results found.', type: '' };
+      } catch (e) {
+        this.metaStatus = { msg: 'Search failed.', type: 'err' };
+      }
+      this.metaSearching = false;
+    },
+
+    async applyMetadata() {
+      if (this.metaSelectedIdx === null) return;
+      const fields = Object.entries(this.metaFields).filter(([, v]) => v).map(([k]) => k);
+      if (fields.length === 0) return;
+      this.metaApplying = true;
+      this.metaStatus   = { msg: '', type: '' };
+      try {
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/apply-metadata`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidate: this.displayMetaCandidates[this.metaSelectedIdx], fields }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          this.metaStatus = { msg: 'Applied! Reloading…', type: 'ok' };
+          setTimeout(() => window.location.reload(), 900);
+        } else {
+          this.metaStatus = { msg: data.error || 'Apply failed.', type: 'err' };
+        }
+      } catch (e) {
+        this.metaStatus = { msg: 'Apply failed.', type: 'err' };
+      }
+      this.metaApplying = false;
+    },
+
+    scoreColor(score) {
+      if (score >= 0.85) return '#4ade80';
+      if (score >= 0.60) return '#f59e0b';
+      return '#888';
     },
 
     async loadReadingTime() {

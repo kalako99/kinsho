@@ -366,9 +366,14 @@ def save_permissions(data: dict):
 
 
 _DEFAULT_PERMISSIONS: dict = {
-    "tags":         True,
-    "genres":       True,
-    "description":  True,
+    "tags":            True,
+    "genres":          True,
+    "description":     True,
+    # Separate from tags/genres/description on purpose -- lets an admin
+    # allow manual tag/genre/description edits while still blocking the
+    # AniList/MangaDex Fetch Metadata popup (or the reverse), rather than
+    # that popup's access being an implicit side effect of the other three.
+    "metadata_fetch":  True,
     "libraries":    {},
     "blocked_tags": [],
 }
@@ -384,14 +389,14 @@ def resolve_permissions(username: str) -> dict:
     user = _find_user(username)
     if user and user.get("role") == "admin":
         return {
-            "tags": True, "genres": True, "description": True,
+            "tags": True, "genres": True, "description": True, "metadata_fetch": True,
             "libraries": {}, "is_admin": True,
         }
     try:
         data = load_permissions()
     except Exception:
         return {
-            "tags": False, "genres": False, "description": False,
+            "tags": False, "genres": False, "description": False, "metadata_fetch": False,
             "libraries": {}, "is_admin": False,
         }
     default    = data.get("_default", _DEFAULT_PERMISSIONS.copy())
@@ -399,6 +404,13 @@ def resolve_permissions(username: str) -> dict:
     perms      = (default if user_entry is None else user_entry).copy()
     perms.setdefault("libraries", {})
     perms.setdefault("blocked_tags", [])
+    # True, not False, if missing -- an existing permissions.json saved
+    # before this key existed had Fetch Metadata implicitly available
+    # (gated only by tags/genres/description), same opt-out convention as
+    # can_access_library ("only an explicit False denies"). Only the
+    # unreadable-file branch above fails closed, matching how tags/genres/
+    # description already behave there.
+    perms.setdefault("metadata_fetch", True)
     perms["is_admin"] = False
     return perms
 
@@ -719,7 +731,7 @@ async def route_set_user_permissions(request: Request, username: str):
         return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
     body  = await request.json()
     perms = body.get("permissions", {})
-    allowed_keys = {"tags", "genres", "description", "libraries", "blocked_tags"}
+    allowed_keys = {"tags", "genres", "description", "metadata_fetch", "libraries", "blocked_tags"}
     perms = {k: v for k, v in perms.items() if k in allowed_keys}
     perms.setdefault("libraries", {})
     perms_data          = load_permissions()

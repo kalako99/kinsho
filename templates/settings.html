@@ -1078,6 +1078,9 @@
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions['_default'].description"> Description (edit)
           </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions['_default'].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
+          </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label
             v-for="lib in libraries"
@@ -1168,6 +1171,9 @@
           </label>
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions[user.username].description"> Description (edit)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions[user.username].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
           </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label

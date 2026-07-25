@@ -3970,6 +3970,9 @@ def get_local_metadata(request: Request, library_id: int, manga_id: str):
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
+    perms = auth.resolve_permissions(username)
+    if not (perms.get("is_admin") or perms.get("metadata_fetch")):
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -4000,7 +4003,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
     perms = auth.resolve_permissions(username)
-    if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
+    if not (perms.get("is_admin") or perms.get("metadata_fetch")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     query = q.strip() or manga_id
     try:
@@ -4016,7 +4019,7 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
     perms = auth.resolve_permissions(username)
-    if not (perms.get("is_admin") or perms.get("tags") or perms.get("genres") or perms.get("description")):
+    if not (perms.get("is_admin") or perms.get("metadata_fetch")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     body = await request.json()
     candidate = body.get("candidate", {})
