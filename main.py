@@ -421,6 +421,25 @@ def manga_content_counts(dims: dict) -> tuple[int, int, int]:
     pages    = sum(len(v.get("pages", [])) for v in buckets.values())
     return pages, len(chapters), len(volumes)
 
+def manga_pages_read(dims: dict, history_entry: dict, is_volume_manga: bool) -> int:
+    """Pages read so far for one manga, given its dims.json and the user's
+    reading_history entry for it (furthest_chapter/furthest_volume) -- sums
+    the page counts of every chapter/volume up to and including the
+    furthest one read, in the same natural-sort order used everywhere else
+    (chapter list, get_category_list's progress %, etc.). Deliberately a
+    real page sum, not a chapter-count ratio -- chapters vary a lot in
+    length, so "read 3 of 10 chapters" and "read 3 of 10 chapters' worth of
+    pages" can differ substantially."""
+    buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
+    if not buckets:
+        return 0
+    ordered_ids = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
+    furthest_id = history_entry.get("furthest_volume" if is_volume_manga else "furthest_chapter")
+    if not furthest_id or furthest_id not in ordered_ids:
+        return 0
+    furthest_idx = ordered_ids.index(furthest_id) + 1
+    return sum(len(buckets[k].get("pages", [])) for k in ordered_ids[:furthest_idx])
+
 def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
     """
     A ComicInfo.xml sitting directly in the manga's own folder (next to the
@@ -2607,15 +2626,17 @@ def get_library_page_counts(request: Request):
     data = load_app_data()
     perms = auth.resolve_permissions(username)
     blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
+    user_data = auth.load_user_data(username)
 
     libraries = []
-    grand_pages = grand_chapters = grand_volumes = 0
+    grand_pages = grand_chapters = grand_volumes = grand_pages_read = 0
     for lib in data.get("libraries", []):
         lib_id = lib["id"]
         if not auth.can_access_library(username, lib_id):
             continue
         manga_data = data.get("manga_data", {}).get(str(lib_id), {})
-        pages = chapters = volumes = 0
+        lib_history = user_data.get("reading_history", {}).get(str(lib_id), {})
+        pages = chapters = volumes = pages_read = 0
         for manga in manga_data.get("mangas", []):
             dims = load_manga_dims(lib_id, manga["name"])
             if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
@@ -2624,22 +2645,29 @@ def get_library_page_counts(request: Request):
             pages += p
             chapters += c
             volumes += v
+            history_entry = lib_history.get(manga["id"])
+            if history_entry:
+                is_volume_manga = manga.get("manga_type") == "case2"
+                pages_read += manga_pages_read(dims, history_entry, is_volume_manga)
         libraries.append({
             "library_id":      lib_id,
             "library_name":    lib.get("name", ""),
             "total_pages":     pages,
             "total_chapters":  chapters,
             "total_volumes":   volumes,
+            "pages_read":      pages_read,
         })
         grand_pages += pages
         grand_chapters += chapters
         grand_volumes += volumes
+        grand_pages_read += pages_read
 
     return JSONResponse({
         "libraries":             libraries,
         "grand_total_pages":     grand_pages,
         "grand_total_chapters":  grand_chapters,
         "grand_total_volumes":   grand_volumes,
+        "grand_pages_read":      grand_pages_read,
     })
 
 @app.post("/api/settings/data-path")

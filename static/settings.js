@@ -345,17 +345,25 @@ createApp({
         const data = await res.json();
         const byLib = {};
         for (const lib of (data.libraries || [])) {
+          const pagesRead = lib.pages_read ?? 0;
           byLib[String(lib.library_id)] = {
-            pages:    lib.total_pages,
-            chapters: lib.total_chapters,
-            volumes:  lib.total_volumes,
+            pages:     lib.total_pages,
+            chapters:  lib.total_chapters,
+            volumes:   lib.total_volumes,
+            pagesRead,
+            // Diminishes as more chapters are added than the user has read
+            // yet -- expected, not a bug (see settings.html's Libraries tab).
+            readPct:   lib.total_pages ? Math.round(pagesRead / lib.total_pages * 100) : 0,
           };
         }
         this.pageCounts = byLib;
+        const grandPagesRead = data.grand_pages_read ?? 0;
         this.pageCountsGrand = {
-          pages:    data.grand_total_pages    ?? 0,
-          chapters: data.grand_total_chapters ?? 0,
-          volumes:  data.grand_total_volumes  ?? 0,
+          pages:     data.grand_total_pages    ?? 0,
+          chapters:  data.grand_total_chapters ?? 0,
+          volumes:   data.grand_total_volumes  ?? 0,
+          pagesRead: grandPagesRead,
+          readPct:   data.grand_total_pages ? Math.round(grandPagesRead / data.grand_total_pages * 100) : 0,
         };
       } catch (e) {
         console.error('Failed to load page counts:', e);

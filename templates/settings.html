@@ -645,6 +645,7 @@
       <span v-text="pageCountsGrand.pages.toLocaleString()"></span> pages available to you across all libraries
       <template v-if="pageCountsGrand.chapters"> · <span v-text="pageCountsGrand.chapters.toLocaleString()"></span> chapters</template>
       <template v-if="pageCountsGrand.volumes"> · <span v-text="pageCountsGrand.volumes.toLocaleString()"></span> volumes</template>
+      · <span v-text="pageCountsGrand.pagesRead.toLocaleString()"></span> read (<span v-text="pageCountsGrand.readPct"></span>%)
     </div>
     <!-- ── ADMIN VIEW: full library controls ── -->
     <template v-if="isAdmin">
@@ -681,6 +682,7 @@
         <span v-text="pageCounts[String(lib.id)].pages.toLocaleString()"></span> pages
         <template v-if="pageCounts[String(lib.id)].chapters"> · <span v-text="pageCounts[String(lib.id)].chapters.toLocaleString()"></span> chapters</template>
         <template v-if="pageCounts[String(lib.id)].volumes"> · <span v-text="pageCounts[String(lib.id)].volumes.toLocaleString()"></span> volumes</template>
+        · <span v-text="pageCounts[String(lib.id)].pagesRead.toLocaleString()"></span> read (<span v-text="pageCounts[String(lib.id)].readPct"></span>%)
       </div>
       <div class="field-label">Folder path</div>
       <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
@@ -775,6 +777,7 @@
           <span v-text="pageCounts[String(lib.id)].pages.toLocaleString()"></span> pages
           <template v-if="pageCounts[String(lib.id)].chapters"> · <span v-text="pageCounts[String(lib.id)].chapters.toLocaleString()"></span> chapters</template>
           <template v-if="pageCounts[String(lib.id)].volumes"> · <span v-text="pageCounts[String(lib.id)].volumes.toLocaleString()"></span> volumes</template>
+          · <span v-text="pageCounts[String(lib.id)].pagesRead.toLocaleString()"></span> read (<span v-text="pageCounts[String(lib.id)].readPct"></span>%)
         </div>
         <div style="display:flex; align-items:center; gap:10px; margin-top:6px; flex-wrap:wrap;">
           <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
