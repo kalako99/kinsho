@@ -126,6 +126,15 @@ function pickStableRow(rowName, libraryId, mangas) {
   return picked;
 }
 
+// ── MANGA LIST SCROLL MEMORY ──
+// Remembered across a normal "click into a manga, hit back" round trip,
+// but only until the chapter reader is actually opened -- chapter_reader.html
+// clears this same key on its own load (see its comment there), since a
+// scroll position from before you started reading isn't meaningful to
+// restore anymore once you have, even after navigating all the way back
+// through browser history later.
+const MANGA_LIST_SCROLL_KEY = 'kinsho_manga_list_scroll';
+
 // ── MAIN APP ──
 const app = createApp({
   components: { MangaThumb },
@@ -208,6 +217,34 @@ const app = createApp({
     }
     await this.loadCollectionsRow();
     await this.loadIntegrityBadge();
+
+    // Restore the scroll position from before navigating away, if the
+    // chapter reader hasn't been visited since (see MANGA_LIST_SCROLL_KEY).
+    // After $nextTick so the just-loaded rows/grid have actually flushed
+    // to the DOM -- restoring against the page's pre-content height would
+    // just clamp to whatever's currently the max scroll, usually near zero.
+    const savedY = sessionStorage.getItem(MANGA_LIST_SCROLL_KEY);
+    if (savedY !== null) {
+      await this.$nextTick();
+      window.scrollTo(0, parseInt(savedY, 10) || 0);
+    }
+
+    // Keeps the saved position continuously up to date while scrolling,
+    // so whatever the very last position was before navigating away (a
+    // manga tile click, the back button, anything) is already captured --
+    // no reliance on a single beforeunload/pagehide event firing reliably
+    // right at the moment of navigation, which is inconsistent across
+    // mobile WebViews in particular.
+    let scrollSaveScheduled = false;
+    window.addEventListener('scroll', () => {
+      if (scrollSaveScheduled) return;
+      scrollSaveScheduled = true;
+      requestAnimationFrame(() => {
+        sessionStorage.setItem(MANGA_LIST_SCROLL_KEY, String(window.scrollY));
+        scrollSaveScheduled = false;
+      });
+    }, { passive: true });
+
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && this.activeTab !== null) {
         this.loadMangas(this.activeTab);
