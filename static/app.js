@@ -105,7 +105,24 @@ function pickStableRow(rowName, libraryId, mangas) {
   } catch (e) {
     cached = null;
   }
-  const isFresh = cached && (Date.now() - cached.ts) < STABLE_ROW_CACHE_MS;
+
+  // Favourites is a user-curated set, not an ambient pool like random's
+  // "every manga in the library" -- adding/removing one is a deliberate
+  // action that must show up on the very next load, not sit hidden for up
+  // to an hour just because the old picked ids still happen to resolve.
+  // Fingerprinting the candidate pool (sorted id list) and invalidating the
+  // cache the moment it changes gets that without giving up stability
+  // between unrelated reloads. Deliberately not applied to 'random': its
+  // pool changes on essentially every scan, so fingerprinting it too would
+  // reshuffle constantly and defeat the whole point of this cache.
+  let poolFingerprint = null;
+  let poolChanged = false;
+  if (rowName === 'favourites') {
+    poolFingerprint = mangas.map(m => m.id).sort().join(',');
+    poolChanged = !!cached && cached.pool !== poolFingerprint;
+  }
+
+  const isFresh = cached && !poolChanged && (Date.now() - cached.ts) < STABLE_ROW_CACHE_MS;
   const mangaById = new Map(mangas.map(m => [m.id, m]));
   const rehydrated = isFresh ? cached.ids.map(id => mangaById.get(id)).filter(Boolean) : [];
   // Re-picks immediately if none of the cached ids still resolve (a
@@ -118,7 +135,9 @@ function pickStableRow(rowName, libraryId, mangas) {
 
   const picked = [...mangas].sort(() => Math.random() - 0.5).slice(0, 20);
   try {
-    localStorage.setItem(key, JSON.stringify({ ids: picked.map(m => m.id), ts: Date.now() }));
+    const toStore = { ids: picked.map(m => m.id), ts: Date.now() };
+    if (rowName === 'favourites') toStore.pool = poolFingerprint;
+    localStorage.setItem(key, JSON.stringify(toStore));
   } catch (e) {
     // localStorage unavailable/full -- fine to skip persisting, the row
     // still renders from `picked` for this one load.
