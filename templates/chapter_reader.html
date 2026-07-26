@@ -1755,6 +1755,16 @@
   let TIER1_RADIUS = readerSettings.preloadRadius ?? 7;
   let TIER2_RADIUS = TIER1_RADIUS * 2;
 
+  // Declared here (not down with the rest of the single-page-mode _sp* state)
+  // because loadEntryTier1 below reads it synchronously the moment it's first
+  // called -- which happens during the initial tier-1 preload, long before
+  // script execution reaches the single-page-mode section further down. Left
+  // declared there too as the TDZ meant every tier-1 load threw a
+  // ReferenceError, which in turn aborted the rest of the top-level script
+  // (including the tap-to-toggle-UI listener's own state setup further down),
+  // breaking the show/hide-UI tap in every reading mode.
+  let _spAnimFrame = 0;
+
   function sourceIsCompressed() {
     const firstCh = chapterList[0];
     if (!firstCh) return false;
@@ -3339,7 +3349,8 @@
   }
 
   let _spAnimTimer   = null;
-  let _spAnimFrame   = 0;      // increments on every flip; lets async callbacks detect staleness
+  // _spAnimFrame itself is declared earlier, near loadEntryTier1 — see the
+  // comment there for why.
   let _spPrefAbort   = null;
   let _spPrefTimer   = null;
   let _spVelLastIdx  = 0;
