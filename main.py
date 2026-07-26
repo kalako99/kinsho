@@ -4920,8 +4920,8 @@ def get_volume_pages(request: Request, library_id: int, manga_id: str, volume_id
 
     return JSONResponse({"pages": pages, "count": len(pages)})
 
-@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{page_index:int}")
-def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, page_index: int, scale: float = 1.5):
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{filename_or_index}")
+def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, filename_or_index: str, scale: float = 1.5):
     username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
@@ -4940,6 +4940,43 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         return JSONResponse({"error": "Volume not found"}, status_code=404)
 
     vol_type = volume.get("source", "archive")
+
+    if vol_type == "loose":
+        try:
+            files = sorted(
+                [f for f in os.listdir(volume["path"])
+                 if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
+                key=natural_sort_key
+            )
+        except Exception:
+            return JSONResponse({"error": "Cannot list volume folder"}, status_code=500)
+        if filename_or_index.isdigit():
+            page_index = int(filename_or_index)
+            if page_index >= len(files):
+                return JSONResponse({"error": "Page not found"}, status_code=404)
+            fname = files[page_index]
+        else:
+            fname = filename_or_index
+            if fname not in files:
+                return JSONResponse({"error": "Page not found"}, status_code=404)
+        file_path = os.path.join(volume["path"], fname)
+        ext = os.path.splitext(fname)[1].lower().lstrip('.')
+        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                      "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+        try:
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+        except Exception:
+            return JSONResponse({"error": "Failed to read page"}, status_code=500)
+        return StreamingResponse(
+            io.BytesIO(img_bytes), media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
+
+    try:
+        page_index = int(filename_or_index)
+    except ValueError:
+        return JSONResponse({"error": "Invalid page index"}, status_code=400)
 
     if vol_type == "archive":
         images = _cached_archive_image_list(volume["path"])
@@ -5001,31 +5038,6 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             return JSONResponse({"error": "Failed to read epub page"}, status_code=500)
         ext = os.path.splitext(image_list[page_index])[1].lower().lstrip('.')
         media_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
-        return StreamingResponse(
-            io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
-        )
-
-    elif vol_type == "loose":
-        try:
-            files = sorted(
-                [f for f in os.listdir(volume["path"])
-                 if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
-                key=natural_sort_key
-            )
-        except Exception:
-            return JSONResponse({"error": "Cannot list volume folder"}, status_code=500)
-        if page_index >= len(files):
-            return JSONResponse({"error": "Page not found"}, status_code=404)
-        file_path = os.path.join(volume["path"], files[page_index])
-        ext = os.path.splitext(files[page_index])[1].lower().lstrip('.')
-        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                      "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
-        try:
-            with open(file_path, "rb") as f:
-                img_bytes = f.read()
-        except Exception:
-            return JSONResponse({"error": "Failed to read page"}, status_code=500)
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
