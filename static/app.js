@@ -106,21 +106,16 @@ function pickStableRow(rowName, libraryId, mangas) {
     cached = null;
   }
 
-  // Favourites is a user-curated set, not an ambient pool like random's
-  // "every manga in the library" -- adding/removing one is a deliberate
-  // action that must show up on the very next load, not sit hidden for up
-  // to an hour just because the old picked ids still happen to resolve.
-  // Fingerprinting the candidate pool (sorted id list) and invalidating the
-  // cache the moment it changes gets that without giving up stability
-  // between unrelated reloads. Deliberately not applied to 'random': its
-  // pool changes on essentially every scan, so fingerprinting it too would
-  // reshuffle constantly and defeat the whole point of this cache.
-  let poolFingerprint = null;
-  let poolChanged = false;
-  if (rowName === 'favourites') {
-    poolFingerprint = mangas.map(m => m.id).sort().join(',');
-    poolChanged = !!cached && cached.pool !== poolFingerprint;
-  }
+  // Fingerprint the candidate pool (sorted id list) and invalidate the
+  // cache the instant it changes -- e.g. a scan adding/removing manga --
+  // rather than sitting on a stale pick for up to an hour just because the
+  // old picked ids still happen to resolve. Manga ids are a stable hash of
+  // the manga's name (see make_id() in main.py), not regenerated per scan,
+  // so an unchanged library re-fingerprints identically on every routine
+  // rescan -- this doesn't reshuffle 'random' constantly, only when the
+  // pool actually changed.
+  const poolFingerprint = mangas.map(m => m.id).sort().join(',');
+  const poolChanged = !!cached && cached.pool !== poolFingerprint;
 
   const isFresh = cached && !poolChanged && (Date.now() - cached.ts) < STABLE_ROW_CACHE_MS;
   const mangaById = new Map(mangas.map(m => [m.id, m]));
@@ -135,8 +130,7 @@ function pickStableRow(rowName, libraryId, mangas) {
 
   const picked = [...mangas].sort(() => Math.random() - 0.5).slice(0, 20);
   try {
-    const toStore = { ids: picked.map(m => m.id), ts: Date.now() };
-    if (rowName === 'favourites') toStore.pool = poolFingerprint;
+    const toStore = { ids: picked.map(m => m.id), ts: Date.now(), pool: poolFingerprint };
     localStorage.setItem(key, JSON.stringify(toStore));
   } catch (e) {
     // localStorage unavailable/full -- fine to skip persisting, the row
@@ -345,6 +339,21 @@ const app = createApp({
         this.loadMangas(this.activeTab);
       }
     });
+
+    // ── PICK UP A SCAN THAT FINISHES WHILE THIS PAGE IS SITTING OPEN ──
+    // visibilitychange (above) only catches a scan that ran while this page
+    // was hidden/backgrounded. A scan triggered from Settings in another
+    // tab/device, or the 12-hour periodic auto-rescan, can just as easily
+    // finish while the user is sitting on this exact page the whole time --
+    // there's nothing in that case to make mounted() ever run again, so the
+    // grid/rows would otherwise stay frozen at pre-scan content until the
+    // user happens to navigate away and back (or force a hard reload,
+    // which a browser can do but this app's own UI has no equivalent for).
+    // Polling the same lightweight status endpoint Settings' own scan
+    // button already uses, and comparing last_scanned against what this
+    // page's current content was actually built from, catches that case too.
+    this._knownLastScanned = {};
+    setInterval(() => this.pollScanForChanges(), 20000);
   },
 
   methods: {
@@ -359,6 +368,33 @@ const app = createApp({
         this.integrityIssueCount = data.count || 0;
       } catch (e) {
         this.isAdmin = false;
+      }
+    },
+
+    // Compares the active tab's library against its own last_scanned
+    // timestamp (same field Settings' pollScanStatus watches). The first
+    // check after a tab becomes active just records the baseline -- that
+    // manga list was, by definition, already loaded fresh moments ago --
+    // only a LATER change against that recorded baseline means a scan
+    // completed since, and is worth reloading for.
+    async pollScanForChanges() {
+      if (this.activeTab === null) return;
+      const libraryId = this.activeTab;
+      try {
+        const res  = await fetch(apiUrl(`/api/scan/${libraryId}/status`));
+        const data = await res.json();
+        if (data.running) return;
+        const known = this._knownLastScanned[libraryId];
+        if (known === undefined) {
+          this._knownLastScanned[libraryId] = data.last_scanned || null;
+          return;
+        }
+        if (data.last_scanned && data.last_scanned !== known) {
+          this._knownLastScanned[libraryId] = data.last_scanned;
+          this.loadMangas(libraryId);
+        }
+      } catch (e) {
+        // Network hiccup -- next tick tries again.
       }
     },
 
