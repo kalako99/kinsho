@@ -1929,3 +1929,69 @@ Live-tested feedback on the v1 above, all addressed same day:
 - Font-size changes and window resizes both go through the same `renderChapterContent()`
   path with `land: 'clamp'` (recompute page breaks for the new dimensions, reposition at
   the same page index, clamped to the new total) — no separate code path for either.
+
+### EPUB reader second follow-up: revert the fixed page, scroll+swipe instead of tap-paginated (2026-07-26)
+
+More live feedback, same day, on the two points above:
+
+- **The fixed A4 page box "may have been a bad idea"** — looked bad on a tablet. Reverted
+  outright: `#epubViewport`/`#epubFrame` are back to plain full-bleed (`position: fixed;
+  inset: 0`), no page-box wrapper, no `aspect-ratio`/`min()` sizing. Simplest possible
+  fix, no replacement layout scheme requested.
+- **Reworked the whole reading-interaction model, replacing tap-only pagination with
+  scroll + swipe**, per explicit spec: horizontal scroll/swipe flips pages "like the
+  original" (single-page mode's swipe-to-flip), vertical scroll reveals lines that don't
+  fit the screen, and tap is repurposed to scroll the current page — reaching the actual
+  end of it is what changes the page, same as before. This also **eliminates the previous
+  round's line-boundary pagination machinery entirely** (`computePageBreaks`/
+  `Range.getClientRects()`/the `#pg-outer`+`#pg-inner` translateY split) — no longer
+  needed, since a chapter now just scrolls normally instead of being sliced into discrete
+  same-height screens:
+  - `#pg-outer` (the book's own retagged `<div>`, still wrapped once for consistent
+    reading-margin padding) is simply `overflow-y: auto` at 100% width/height of the
+    iframe — ordinary native browser scrolling, no JS driving it, so it's immune to the
+    CSS-multi-column clipping bug from the previous round by construction (there's no
+    multi-column layout left at all).
+  - Interaction is attached directly to `#pg-outer` inside the iframe's own document, via
+    listeners the *parent* script adds to that DOM (allowed under
+    `sandbox="allow-same-origin"` even with no `allow-scripts` — that flag only blocks
+    script tags embedded in the srcdoc itself, not a parent script reaching in to call
+    `.addEventListener()` on nodes it already has permitted access to). This was the
+    deciding reason it's structured this way instead of an overlay div in the parent
+    (tried in the very first version): an overlay sitting on top of the iframe to catch
+    taps would also have blocked the native wheel/touch scrolling this round now depends
+    on.
+  - A tap (mousedown+up / touchstart+end with under ~8px of total movement) in the
+    left/right third scrolls the current chapter by one screen up/down, or crosses into
+    the prev/next chapter once already at that scroll boundary; a tap in the middle third
+    toggles the chrome, matching `chapter_reader.html`'s single-page-mode zone split
+    (30/40/30) without needing actual overlay `.sp-zone` divs to get it — the split is
+    just an x-position check inside one shared handler.
+  - A clear horizontal drag (axis determined by whichever of dx/dy exceeds ~10px first)
+    beyond a 60px commit threshold flips directly to the prev/next chapter regardless of
+    current scroll position, independent of the tap-vs-scroll logic above.
+  - Font-size changes now restore scroll position by **fraction** (`scrollTop / (scrollHeight
+    - clientHeight)`) rather than a page index, since there's no discrete page index left
+    to restore.
+- **Found and fixed a real race while testing this**: the font-size `<input type="range">`
+  fires `'input'` continuously while being dragged, and the handler rebuilt the whole
+  srcdoc on every firing with no debounce — overlapping in-flight rebuilds could race,
+  observed live as the restored scroll fraction landing at 0 instead of the pre-drag
+  position (a later rebuild reading its "restore fraction" from a still-mid-rebuild
+  document rather than the settled one). Fixed with a 200ms debounce on the font-size
+  handler; verified a simulated rapid-fire slider drag (5 values in quick succession)
+  now preserves the scroll fraction to within rounding (0.3198 → 0.3197) instead of
+  collapsing to 0.
+- **Testing note for whoever touches this next**: simulating the horizontal swipe via
+  Playwright's real `page.mouse.move()` while a button is held down **hangs indefinitely**
+  once the drag path crosses into the iframe's content area — reproduced in isolation
+  (a plain non-iframe page with the identical move-sequence completes instantly, so
+  it's specific to iframes, not the drag API in general), and is a known-shape category
+  of Playwright/CDP flakiness with synthetic pointer input over iframes, not a bug in
+  this code. Verified the actual gesture-handling logic instead by dispatching synthetic
+  `MouseEvent`s directly at the `#pg-outer` element via `element.dispatchEvent(...)` in
+  `page.evaluate()`, which exercises the same listeners without going through Playwright's
+  OS-level input simulation — confirmed both drag directions correctly flip
+  forward/backward. A real user's actual touch/mouse drag doesn't go through this
+  synthetic-input pathway at all, so this is a test-authoring note, not a shipped
+  limitation.

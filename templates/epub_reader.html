@@ -61,54 +61,21 @@
       text-overflow: ellipsis;
     }
 
-    /* ── EPUB PAGE (fixed A4-like proportions, independent of window/container
-       shape -- responsive via CSS min()/aspect-ratio, not stretched full-bleed) ── */
+    /* ── EPUB CONTENT AREA (full-bleed -- the fixed A4-page-box look tried
+       first didn't work well on tablets, reverted at the user's request) ── */
     #epubViewport {
       position: fixed;
       inset: 0;
       background: #000;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    #epubPageBox {
-      position: relative;
-      aspect-ratio: 1 / 1.4142; /* A4 portrait */
-      width: min(90vw, 900px, 63.6vh);
-      max-height: 90vh;
-      background: #fff;
-      box-shadow: 0 8px 44px rgba(0,0,0,0.55);
-      overflow: hidden;
     }
     #epubFrame {
-      position: absolute;
+      position: fixed;
       inset: 0;
       width: 100%;
       height: 100%;
       border: none;
       background: #fff;
     }
-
-    /* Tap zones (same 30/40/30 split + interaction model as chapter_reader.html's
-       single-page mode): left/right flip pages, center toggles the chrome. These
-       live permanently in the parent document -- never inside the iframe -- so a
-       tap always reaches them regardless of chrome visibility; text inside the
-       iframe is not meant to be selectable in this reader (see .sp-zone below),
-       so there's no competing interaction to preserve. */
-    .sp-zone {
-      position: absolute;
-      top: 0;
-      height: 100%;
-      width: 30%;
-      z-index: 10;
-      cursor: pointer;
-      outline: none;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-    }
-    .sp-zone-left   { left: 0; }
-    .sp-zone-right  { right: 0; }
-    .sp-zone-center { left: 30%; width: 40%; cursor: default; }
 
     /* ── BOTTOM CONTAINER / BAR (copied conventions from chapter_reader.html) ── */
     #bottom-container {
@@ -328,12 +295,7 @@
 </div>
 
 <div id="epubViewport">
-  <div id="epubPageBox">
-    <iframe id="epubFrame" sandbox="allow-same-origin"></iframe>
-  </div>
-  <div class="sp-zone sp-zone-left" id="spZoneLeft"></div>
-  <div class="sp-zone sp-zone-center" id="spZoneCenter"></div>
-  <div class="sp-zone sp-zone-right" id="spZoneRight"></div>
+  <iframe id="epubFrame" sandbox="allow-same-origin"></iframe>
 </div>
 
 <div id="bottom-container">
@@ -372,11 +334,7 @@
   const topbar        = document.getElementById('topbar');
   const topbarTitle    = document.getElementById('topbarTitle');
   const bottombar     = document.getElementById('bottombar');
-  const epubPageBox   = document.getElementById('epubPageBox');
   const epubFrame     = document.getElementById('epubFrame');
-  const spZoneLeft    = document.getElementById('spZoneLeft');
-  const spZoneCenter  = document.getElementById('spZoneCenter');
-  const spZoneRight   = document.getElementById('spZoneRight');
   const bbPrevVol     = document.getElementById('bbPrevVol');
   const bbNextVol     = document.getElementById('bbNextVol');
   const bbChapBtn     = document.getElementById('bbChapBtn');
@@ -401,11 +359,6 @@
   let volumesList   = [];
   let lastHtml      = '';
   let lastCss       = '';
-  let pageW         = 0;
-  let pageH         = 0;
-  let textPageIdx   = 0;
-  let totalTextPages = 1;
-  let pageBreaks    = [0];
 
   function exitFullscreen() {
     if      (document.exitFullscreen)       document.exitFullscreen().catch(() => {});
@@ -419,10 +372,12 @@
 
   // ── TOP/BOTTOM BAR VISIBILITY ──
   // Mirrors chapter_reader.html's showAll()/hideAll() (tap-anywhere-to-toggle,
-  // auto-hide after 3s of no chrome interaction). Unlike the first version of
-  // this reader, the tap target is the permanent #spZoneCenter div living in
-  // the parent document (see below) -- not a toggled overlay reaching into the
-  // iframe -- so this works regardless of the iframe's own state.
+  // auto-hide after 3s of no chrome interaction). The tap itself is detected
+  // by listeners attached directly to the iframe's own document (see
+  // attachContentGestures() below), not an overlay in the parent -- an
+  // overlay would have to sit on top of the iframe to catch taps, which
+  // would also block the native wheel/touch scrolling this reader now relies
+  // on for reading content taller than one screen.
   let barVisible = false;
   let barTimer   = null;
 
@@ -456,23 +411,39 @@
     return parseInt(localStorage.getItem('kinshoEpubFontSize') || '100', 10);
   }
 
-  // Text is deliberately non-selectable in this reader (tap zones double as
-  // page-flip controls, same as chapter_reader.html's single-page mode) --
-  // applied via the iframe's own stylesheet since user-select can't be forced
-  // from outside a same-origin-but-separate document.
+  // Reading model: each chapter is one naturally-flowing, ordinarily-tall
+  // document inside #pg-outer, which scrolls normally (native wheel/touch --
+  // no JS drives it) so lines that don't fit the screen are reached exactly
+  // like any scrollable page. #pg-outer is the book's own content div
+  // (retagged server-side from <body> to <div> so it can be nested) wrapped
+  // once for consistent reading margins.
   //
-  // Pagination is a fixed-height "picture frame" (#pg-outer, padded, clipped)
-  // around a naturally-tall, single-column flow of the chapter's content
-  // (#pg-inner, the book's own <div> -- retagged server-side from <body> so
-  // it can be nested -- at its normal width). A "page" is a vertical slice of
-  // that flow, shown by translateY-ing #pg-inner so the slice's own top lines
-  // up with the frame's top. This -- not CSS multi-column pagination, tried
-  // first -- is the reliable approach: multi-column overflow was found (via
-  // direct testing) to not be clippable by any combination of overflow/clip/
-  // contain in this rendering engine, visibly bleeding a sliver of the next
-  // column past the intended page edge even inside a same-sized iframe.
-  // Plain block-flow overflow clipping, used here, has none of that history.
-  function buildSrcdoc(html, css, w, h) {
+  // (An earlier version tried CSS multi-column pagination -- one on-screen
+  // "page" per column, flipped via translateX -- but direct, isolated
+  // testing found this rendering engine doesn't reliably clip multi-column
+  // overflow: a sliver of the next column bled past the page edge regardless
+  // of overflow/clip/contain, even inside a same-sized iframe. Ordinary
+  // block-flow scrolling, used here, has none of that history.)
+  //
+  // Interaction, attached directly to the iframe's own document (allowed via
+  // sandbox="allow-same-origin" even though the iframe has no allow-scripts
+  // of its own -- that only blocks script tags embedded in the srcdoc, not
+  // listeners the parent attaches to that DOM):
+  //  - a plain tap in the left/right third scrolls one screen up/down within
+  //    the current chapter, or crosses into the prev/next chapter once
+  //    already at that end (mirrors flipPrev/flipNext's old chapter-boundary
+  //    logic, just triggered by scroll position now instead of a computed
+  //    page index) -- a tap in the middle toggles the chrome, matching
+  //    chapter_reader.html's single-page-mode zone split.
+  //  - a clear horizontal drag/swipe (its own axis, independent of tap
+  //    position) flips directly to the prev/next chapter, mirroring
+  //    single-page mode's swipe-to-flip gesture.
+  // Nothing here uses pointer-events tricks or an overlay, so native
+  // vertical scrolling is never intercepted.
+  const TAP_MOVE_THRESHOLD   = 8;  // px total movement below which a release counts as a tap
+  const SWIPE_COMMIT_THRESHOLD = 60; // px horizontal movement to commit a chapter flip
+
+  function buildSrcdoc(html, css) {
     const rewrittenHtml = html.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
     const rewrittenCss  = css.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
     // Single narrow, deliberate override -- not a general !important
@@ -481,25 +452,22 @@
     // reflow; an acceptable known v1 limitation.
     const fontSizeCss = `html { font-size: ${fontSizePctValue()}% !important; }`;
     const layoutCss = `
-      html, body { margin: 0 !important; padding: 0 !important; overflow: hidden !important; }
+      html, body { margin: 0 !important; padding: 0 !important; height: 100% !important; overflow: hidden !important; }
       #pg-outer {
-        width: ${w}px; height: ${h}px;
+        width: 100%; height: 100%;
         padding: 34px 30px;
         box-sizing: border-box;
-        overflow: hidden;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
         background: #fff;
+        user-select: none;
       }
-      #pg-inner { width: 100%; transition: transform 0.22s ease; user-select: none; }
-      #pg-inner * { -webkit-user-select: none; user-select: none; }
+      #pg-outer * { -webkit-user-select: none; user-select: none; }
     `;
     return `<!doctype html><html><head><meta charset="utf-8">` +
       `<style>${rewrittenCss}</style><style>${fontSizeCss}</style><style>${layoutCss}</style>` +
-      `</head><body><div id="pg-outer"><div id="pg-inner">${rewrittenHtml}</div></div></body></html>`;
-  }
-
-  function measurePageBox() {
-    const rect = epubPageBox.getBoundingClientRect();
-    return { w: Math.max(1, Math.round(rect.width)), h: Math.max(1, Math.round(rect.height)) };
+      `</head><body><div id="pg-outer">${rewrittenHtml}</div></body></html>`;
   }
 
   function waitForFrameReady() {
@@ -519,82 +487,85 @@
     });
   }
 
-  // Page-break Y-offsets that never fall inside a line of text: walks every
-  // text node's line boxes (via Range.getClientRects(), one rect per
-  // wrapped line) plus every image's own top/bottom, so a candidate break is
-  // always between two lines (or a line and an image), never through one.
-  // Greedily takes the furthest candidate that still fits within one frame
-  // height from the current break, same idea as real reflow-based paginators.
-  function computePageBreaks(doc, inner, availH) {
-    const originTop = inner.getBoundingClientRect().top;
-    const breakYs = new Set([0]);
-    const walker = doc.createTreeWalker(inner, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
-      if (!node.textContent.trim()) continue;
-      const range = doc.createRange();
-      range.selectNodeContents(node);
-      for (const r of range.getClientRects()) {
-        const y = Math.round(r.top - originTop);
-        if (y > 0) breakYs.add(y);
+  function attachContentGestures(doc) {
+    const el = doc.getElementById('pg-outer');
+    let startX = 0, startY = 0, tracking = false, horizontal = null;
+
+    function onStart(x, y) {
+      startX = x; startY = y; tracking = true; horizontal = null;
+    }
+    function onMove(x, y, ev) {
+      if (!tracking) return;
+      const dx = x - startX, dy = y - startY;
+      if (horizontal === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+        horizontal = Math.abs(dx) > Math.abs(dy);
+      }
+      if (horizontal && ev) ev.preventDefault(); // only suppress native scroll for a clearly horizontal drag
+    }
+    function onEnd(x, y) {
+      if (!tracking) return;
+      tracking = false;
+      const dx = x - startX, dy = y - startY;
+      if (horizontal && Math.abs(dx) >= SWIPE_COMMIT_THRESHOLD) {
+        if (dx > 0) flipPrev(); else flipNext();
+      } else if (!horizontal && Math.abs(dx) < TAP_MOVE_THRESHOLD && Math.abs(dy) < TAP_MOVE_THRESHOLD) {
+        handleTap(x, doc, el);
       }
     }
-    inner.querySelectorAll('img, hr, figure').forEach((el) => {
-      const r = el.getBoundingClientRect();
-      breakYs.add(Math.max(0, Math.round(r.top - originTop)));
-      breakYs.add(Math.round(r.bottom - originTop));
-    });
-    const sorted = Array.from(breakYs).sort((a, b) => a - b);
-    const maxY = inner.scrollHeight;
-    const pageStarts = [0];
-    let current = 0;
-    while (current < maxY - 2) {
-      const target = current + availH;
-      let next = null;
-      for (const y of sorted) {
-        if (y > current && y <= target) next = y;
-        if (y > target) break;
-      }
-      if (next === null) next = current + availH; // no clean boundary found -- rare, hard cut
-      pageStarts.push(next);
-      current = next;
-    }
-    return pageStarts;
+
+    el.addEventListener('touchstart', (e) => { const t = e.touches[0]; onStart(t.clientX, t.clientY); }, { passive: true });
+    el.addEventListener('touchmove',  (e) => { const t = e.touches[0]; onMove(t.clientX, t.clientY, e); }, { passive: false });
+    el.addEventListener('touchend',   (e) => { const t = e.changedTouches[0]; onEnd(t.clientX, t.clientY); });
+
+    el.addEventListener('mousedown', (e) => onStart(e.clientX, e.clientY));
+    el.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY, null));
+    el.addEventListener('mouseup',   (e) => onEnd(e.clientX, e.clientY));
   }
 
-  function showTextPage(idx, animate = true) {
-    textPageIdx = Math.min(Math.max(0, idx), totalTextPages - 1);
-    const inner = epubFrame.contentDocument.getElementById('pg-inner');
-    if (!animate) inner.style.transition = 'none';
-    inner.style.transform = `translateY(-${pageBreaks[textPageIdx]}px)`;
-    if (!animate) {
-      void inner.offsetHeight; // force reflow before re-enabling the transition
-      inner.style.transition = '';
+  function handleTap(x, doc, el) {
+    const frac = x / doc.documentElement.clientWidth;
+    if (frac < 0.3) scrollWithinOrFlip(-1);
+    else if (frac > 0.7) scrollWithinOrFlip(1);
+    else { barVisible ? hideAll() : showAll(); }
+  }
+
+  function scrollWithinOrFlip(dir) {
+    const el = epubFrame.contentDocument.getElementById('pg-outer');
+    const viewH = el.clientHeight;
+    const maxScroll = el.scrollHeight - el.clientHeight;
+    if (dir > 0) {
+      if (el.scrollTop >= maxScroll - 2) { flipNext(); return; }
+      el.scrollTo({ top: Math.min(maxScroll, el.scrollTop + viewH), behavior: 'smooth' });
+    } else {
+      if (el.scrollTop <= 2) { flipPrev(); return; }
+      el.scrollTo({ top: Math.max(0, el.scrollTop - viewH), behavior: 'smooth' });
     }
   }
 
-  // land: 'start' | 'end' | 'clamp' -- where to position within the newly
-  // rendered content (chapter start, chapter end for a backward chapter
-  // crossing, or the same text-page index as before for a resize/font-size
-  // change, clamped to the new page count).
+  // land: 'start' | 'end' | 'clampFraction' -- where to scroll to in the
+  // newly rendered content (chapter start, chapter end for a backward
+  // chapter crossing, or the same scroll fraction as before for a
+  // resize/font-size change).
   async function renderChapterContent(html, css, { land = 'start' } = {}) {
+    const prevFraction = land === 'clampFraction' ? currentScrollFraction() : 0;
     lastHtml = html;
     lastCss  = css;
-    const box = measurePageBox();
-    pageW = box.w;
-    pageH = box.h;
-    epubFrame.srcdoc = buildSrcdoc(html, css, pageW, pageH);
+    epubFrame.srcdoc = buildSrcdoc(html, css);
     await waitForFrameReady();
-    const doc   = epubFrame.contentDocument;
-    const outer = doc.getElementById('pg-outer');
-    const inner = doc.getElementById('pg-inner');
-    const availH = outer.clientHeight; // content-box height, padding already excluded
-    pageBreaks = computePageBreaks(doc, inner, availH);
-    totalTextPages = pageBreaks.length;
-    let idx = 0;
-    if (land === 'end') idx = totalTextPages - 1;
-    else if (land === 'clamp') idx = textPageIdx;
-    showTextPage(idx, false);
+    const doc = epubFrame.contentDocument;
+    attachContentGestures(doc);
+    const el = doc.getElementById('pg-outer');
+    if (land === 'end') el.scrollTop = el.scrollHeight - el.clientHeight;
+    else if (land === 'clampFraction') el.scrollTop = prevFraction * (el.scrollHeight - el.clientHeight);
+    else el.scrollTop = 0;
+  }
+
+  function currentScrollFraction() {
+    const doc = epubFrame.contentDocument;
+    const el = doc && doc.getElementById('pg-outer');
+    if (!el) return 0;
+    const max = el.scrollHeight - el.clientHeight;
+    return max > 0 ? el.scrollTop / max : 0;
   }
 
   async function loadSpineChapter(index, { land = 'start', saveProgress = true } = {}) {
@@ -607,27 +578,15 @@
   }
 
   async function flipNext() {
-    if (textPageIdx < totalTextPages - 1) {
-      showTextPage(textPageIdx + 1);
-    } else if (currentIndex < spineCount - 1) {
-      await loadSpineChapter(currentIndex + 1, { land: 'start' });
-    }
+    if (currentIndex < spineCount - 1) await loadSpineChapter(currentIndex + 1, { land: 'start' });
   }
   async function flipPrev() {
-    if (textPageIdx > 0) {
-      showTextPage(textPageIdx - 1);
-    } else if (currentIndex > 0) {
-      await loadSpineChapter(currentIndex - 1, { land: 'end' });
-    }
+    if (currentIndex > 0) await loadSpineChapter(currentIndex - 1, { land: 'end' });
   }
 
-  spZoneCenter.addEventListener('click', () => { barVisible ? hideAll() : showAll(); });
-  spZoneLeft.addEventListener('click', () => flipPrev());
-  spZoneRight.addEventListener('click', () => flipNext());
-
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); flipNext(); }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); flipPrev(); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); scrollWithinOrFlip(1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); scrollWithinOrFlip(-1); }
   });
 
   async function saveReadingProgress(completedVolumeId) {
@@ -714,10 +673,18 @@
   // ── SETTINGS PANEL (font size) ──
   fontSizeRange.value = fontSizePctValue();
   fontSizeValue.textContent = fontSizeRange.value + '%';
+  // Debounced: a slider fires 'input' continuously while being dragged, and
+  // each firing rebuilds the whole srcdoc -- without this, overlapping
+  // in-flight rebuilds could race (a later one reading its "restore scroll
+  // fraction" from a still-mid-rebuild document instead of the settled one).
+  let fontSizeDebounce = null;
   fontSizeRange.addEventListener('input', () => {
     fontSizeValue.textContent = fontSizeRange.value + '%';
     localStorage.setItem('kinshoEpubFontSize', fontSizeRange.value);
-    if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clamp' });
+    clearTimeout(fontSizeDebounce);
+    fontSizeDebounce = setTimeout(() => {
+      if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clampFraction' });
+    }, 200);
   });
 
   bbSettingsBtn.addEventListener('click', (e) => {
@@ -727,15 +694,9 @@
   settingsPanel.addEventListener('click', (e) => e.stopPropagation());
   document.addEventListener('click', () => settingsPanel.classList.remove('open'));
 
-  // ── RESIZE (page box's rendered pixel size can change responsively even
-  // though its aspect ratio doesn't -- rebuild pagination for the new size) ──
-  let resizeTimer = null;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clamp' });
-    }, 250);
-  });
+  // No resize handling needed: #pg-outer is sized in percentages, not baked-in
+  // pixels, so the iframe/content simply reflows with the window like any
+  // ordinary scrollable page.
 
   // ── INIT ──
   (async () => {
