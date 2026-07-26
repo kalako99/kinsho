@@ -1330,11 +1330,17 @@ createApp({
 
     // ── BLOCKED TAG SEARCH ──
     onBlockedTagInput(username) {
-      const q = this.blockedTagInput.trim().toLowerCase();
+      const raw = this.blockedTagInput;
+      const q = raw.trim().toLowerCase();
       if (!q) { this.blockedTagSuggestions = []; return; }
       const already = this.userPermissions[username]?.blocked_tags || [];
+      // A trailing space right after the typed word is an explicit "exact
+      // tag" request -- without it, a one-letter tag like "A" is buried
+      // under every tag that merely CONTAINS an "a" (nearly all of them).
+      const exactOnly = /\s$/.test(raw);
       this.blockedTagSuggestions = this.allTagsList
-        .filter(t => t.toLowerCase().includes(q) && !already.includes(t))
+        .filter(t => exactOnly ? t.toLowerCase() === q : t.toLowerCase().includes(q))
+        .filter(t => !already.includes(t))
         .slice(0, 8);
     },
 
