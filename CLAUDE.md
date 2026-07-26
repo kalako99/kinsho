@@ -1699,3 +1699,168 @@ Separately, the original cover file was `.jfif`, which isn't in `IMAGE_EXTENSION
 extension at all, so even in the right folder it would never have been picked up as a cover
 candidate. Converting/renaming it to `.jpg` and pointing at the correct path resolved it. No
 code change was needed or made for this half of the report.
+
+## Fix loose-image volumes serving broken pages in the reader (2026-07-26)
+
+Reported: opening a case2 volume whose pages are raw loose image files (not an archive)
+showed a corrupted/broken-image icon in place of every page.
+
+Root cause: `templates/chapter_reader.html` builds loose-volume page URLs straight from
+`dims.json`'s stored `filenames` array (`.../volume/{id}/page/{actual filename}`) — the
+same convention already used for loose *chapters*. But `get_volume_page`'s route was
+declared `@app.get(".../volume/{volume_id}/page/{page_index:int}")` — the `:int` path
+converter rejects any non-integer segment before the request even reaches the handler, so
+a filename like `page 01.png` 404'd at the routing layer itself, never reaching the
+handler's own (otherwise-correct) loose-file-serving logic. Confirmed via git blame this
+bug existed since the very first commit — loose-image volumes had never worked. Archive/
+PDF/EPUB-type volumes were unaffected, since their page URLs were always plain sequential
+integers, which the `:int` route already handled fine.
+
+Fixed by changing the route to accept a plain string (`{filename_or_index}`, mirroring
+the equivalent chapter route `get_chapter_page` already does) and branching inside the
+handler: the loose-volume case now accepts either a literal filename or a numeric index
+(kept for the `/pages` listing endpoint and any other integer-index caller), while
+archive/pdf/epub still parse the segment as an int. Verified end-to-end with `TestClient`
+against a throwaway data path (never the real configured library): a loose volume with a
+filename containing an apostrophe now serves correctly by filename and by numeric index, a
+genuinely missing filename still 404s cleanly, and an existing CBZ-type volume's page
+serving is unchanged (regression check).
+
+## Fix tap-to-toggle-UI not working in the reader (2026-07-26)
+
+Reported immediately after the fix above, once loose-image volumes could actually be read
+for the first time: tapping the reader screen no longer showed/hid the topbar and
+bottombar, in every reading mode and every source type — not specific to volumes.
+
+Root cause: `loadEntryTier1` (`chapter_reader.html`) reads `_spAnimFrame` synchronously the
+moment it's first invoked — which happens during the very first tier-1 image preload,
+immediately after any chapter/volume opens. But `_spAnimFrame`'s `let` declaration lived
+much further down the file, in the single-page-mode state block (added as part of the
+2026-07-25/26 stale-single-page-load fix — see "Reader bugs from live testing" above,
+bug 3). Accessing a `let` binding before its own declaration line executes throws a
+temporal-dead-zone `ReferenceError`, which aborted the rest of that top-level script pass
+— including the line that initializes `touchMoved`, the flag the tap-to-toggle click
+listener reads. The listener itself had already been registered earlier in the file, so
+every tap still fired it, but it then threw the same class of TDZ error trying to read
+`touchMoved`, silently swallowing the tap instead of toggling the UI. Confirmed live via
+Playwright: the exact `Cannot access '_spAnimFrame'/'touchMoved' before initialization`
+errors reproduced pre-fix and disappeared post-fix.
+
+Fixed by moving `let _spAnimFrame = 0;` up next to `loadEntryTier1`'s own definition,
+before it can ever be invoked, removing the now-duplicate declaration from its original
+spot. Verified repeated tap-toggle cycles and scrolling produce no further errors, with a
+screenshot confirming the topbar/bottombar/progress bar all correctly appear on tap.
+
+## EPUB text reader — real chapter text instead of image-only pages (2026-07-26)
+
+Kinsho's EPUB support had always treated an EPUB exactly like a CBZ/PDF:
+`get_epub_image_list()` (main.py) extracts every embedded *image* and serves each as a
+reader "page" via the existing image-strip reader. For a real prose novel this meant the
+reader showed only a handful of embedded illustrations and none of the actual chapter
+text — confirmed against a real user file (a 364-spine-item Italian novel, "Il Trono di
+Vetro" / *Throne of Glass* vol. 1) that had genuine XHTML chapter content and only 8
+embedded images total.
+
+Added as a **new, separate reader page** rather than extending the existing image-based
+reader (`templates/chapter_reader.html`, ~4600 lines of image-virtualization/conveyor-belt/
+BLE-scroller/PDF-scale logic that doesn't apply to flowing text) — deliberate, at the
+user's own request, to guarantee zero regression risk to existing manga/comic/PDF/
+loose-image reading. `chapter_reader.html` was not touched at all.
+
+- **Routing** — `volume_reader()` (`GET /manga/{library_id}/{manga_id}/volume/{volume_id}`,
+  main.py) now loads the volume's dims record and, if `source == "epub"` and the file
+  actually parses (`epub_reader.is_parseable()`), renders the new `templates/epub_reader.html`
+  instead of `chapter_reader.html`. Any failure (ebooklib not installed, corrupt file)
+  falls straight through to the old image-based reader, unchanged — purely additive,
+  never a hard requirement. No client-side routing changes were needed anywhere:
+  `volume_detail.html`'s `startReading()`/`openVolume()` were already the only code
+  building this URL, and they just navigate there unconditionally regardless of source.
+- **`epub_reader.py`** (new, pure-logic module, mirrors `opds.py`/`comicinfo.py`'s
+  no-auth/no-data-access convention) — `build_reading_spine()` walks the book's raw
+  `book.spine` order (not filtered to `linear="yes"`; front matter is almost always
+  `linear="yes"` too, so filtering wouldn't remove the "boring front matter" noise anyway,
+  and would complicate mapping TOC entries to spine indices). `build_toc()` maps the
+  book's real chapter titles (`book.toc`) down to spine indices for chapter-jump
+  navigation — with a basename-only fallback match for EPUB2 NCX-sourced hrefs, which
+  (unlike EPUB3 nav.xhtml hrefs) aren't zip-root-normalized by ebooklib and can otherwise
+  silently fail an exact-path lookup. `render_chapter()` parses a chapter's body with
+  `lxml.html` — deliberately **not** `xml.etree.ElementTree` despite that being this
+  project's convention elsewhere (`opds.py`/`comicinfo.py`), because that convention is
+  about serializing app-controlled data into new XML, a different problem from parsing
+  untrusted, producer-varied third-party markup; ebooklib itself already depends on lxml
+  and uses its lenient HTML parser internally for exactly this reason. Rewrites every
+  `<img src>`/SVG `<image xlink:href>` to an absolute internal asset URL (resolved
+  relative to *that chapter document's own location* in the zip, not the zip root — e.g.
+  `../cover.jpeg` inside `OEBPS/p000_cover.xhtml` resolves to `cover.jpeg` at zip root),
+  strips `<script>` tags/`on*` attributes/all anchor `href`s (footnote/external links keep
+  their text, just become non-clickable), and attaches every one of the book's own
+  `ITEM_STYLE` CSS manifest items — always all of them, never per-document detection,
+  since real chapter documents were confirmed to have a genuinely empty `<head/>` with no
+  per-document `<link rel="stylesheet">` at all. A small in-memory `EpubBook` cache
+  (`_book_cache`, unlocked plain dict, same convention as `_epub_page_cache`) avoids
+  re-parsing the whole file on every chapter turn/asset fetch; wired into
+  `_invalidate_stale_source_caches()` via `epub_reader.invalidate()` so a rescan-detected
+  file change doesn't keep serving stale parsed content indefinitely (the exact bug class
+  fixed once already for the other per-path caches — see the "deleted/edited pages still
+  showing broken" entry above).
+- **New API endpoints** (main.py): `GET .../volume/{volume_id}/epub/toc`,
+  `GET .../volume/{volume_id}/epub/chapter/{spine_index:int}`,
+  `GET .../volume/{volume_id}/epub/asset/{path:path}` — each gated by the same
+  `can_access_library`/`is_manga_blocked` checks as every other content route.
+  `resolve_asset()` validates the requested internal path against the manifest
+  **restricted to image/style/font/cover/vector item types** — excludes `ITEM_DOCUMENT`
+  (whole chapters go through the chapter endpoint, not "asset") and script/audio/video/smil
+  — on top of the exact-manifest-match check that already prevents path traversal.
+- **`templates/epub_reader.html`** (new) — topbar/bottombar chrome styled to match
+  `chapter_reader.html`'s visual conventions (same CSS class shapes, not shared/copied
+  code) for product consistency: back button, a TOC dropdown (nested, matching the book's
+  real chapter structure) with prev/next spine-position buttons, and a settings panel with
+  a single font-size control. Chapter content renders inside a sandboxed
+  `<iframe sandbox="allow-same-origin">` with **no** `allow-scripts` — this is the actual
+  containment boundary that makes applying the book's own arbitrary CSS safe (chosen
+  deliberately over Kinsho's own typography, at the user's request): the CSS is fully
+  scoped inside the iframe's own document and can never leak out to break the reader's own
+  chrome, and no embedded script can execute even if something slipped past the
+  server-side sanitization above. Font-size is applied as one narrow, deliberate
+  `html { font-size: N% !important; }` override appended as the last stylesheet, not a
+  general `!important` free-for-all, so `em`/`rem`/`%`-based sizing in the book's own CSS
+  scales proportionally (absolute-pixel decorative front matter won't reflow — an accepted
+  v1 limitation). Reading progress reuses the existing generic `POST /api/reading/progress`
+  unchanged (`chapter_id = volume_id`, `page = spine index`) — no backend schema changes.
+  **Tap-to-toggle-UI vs. text selection**: a click inside a cross-document iframe never
+  bubbles to the parent page, so `chapter_reader.html`'s single
+  `document.addEventListener('click', ...)` pattern can't see taps inside chapter content.
+  Solved with a transparent overlay `<div>` stacked on the iframe that's only
+  `pointer-events: auto` while the chrome is hidden — tapping it shows the chrome and
+  immediately flips itself to `pointer-events: none`, so normal click-and-drag text
+  selection works whenever the chrome is visible; hiding again reuses the existing
+  auto-hide-after-3s-of-inactivity pattern, so selection is only ever unavailable during
+  the narrow window right after a chapter opens or right after the chrome auto-hides, not
+  permanently. Bookmarks and mid-chapter scroll-position resume (resume is chapter-start
+  only) are explicitly out of scope for this v1.
+- **Real-world parsing bug found and fixed during implementation**: `lxml.html`'s HTML
+  parser doesn't treat `xlink:href` as a namespaced attribute the way strict XML parsing
+  would — it's the literal attribute-name string `"xlink:href"`, not Clark-notation
+  `{http://www.w3.org/1999/xlink}href`. The first implementation looked up the namespaced
+  form and silently failed to rewrite an SVG-wrapped cover image's source (found live,
+  against the real test file's actual title page, which is exactly an
+  `<svg><image xlink:href="cover.jpeg"/></svg>` wrapper with no separate `<h1>`/text at
+  all) — fixed by checking the literal `"xlink:href"` string (with a bare `"href"`
+  fallback for newer SVG2-style markup).
+- **`ebooklib` (+ its `lxml`/`six` dependencies) added to `requirements.txt`**, at the
+  user's request, so this feature is active out of the box on a fresh install rather than
+  needing a manual `pip install ebooklib` first — same treatment `PyMuPDF` already gets
+  for PDF support. The code still degrades gracefully if it's somehow missing (an
+  `ImportError`-guarded `EPUB_SUPPORT` flag, same as `rarfile`/`pymupdf`): `is_parseable()`
+  returns `False` and every epub volume falls through to the old image-only reader exactly
+  as before, so a custom/stripped install without this dependency doesn't break, it just
+  loses text rendering for EPUBs.
+- **Verified** end-to-end against the real test file (over the network share, via a
+  throwaway `data_path`/temporary local server, real `bootstrap.json` backed up and
+  restored after — same pattern as the two fixes above): TOC/chapter/asset endpoints via
+  `TestClient`, a non-epub volume in the same library still routing to the untouched
+  `chapter_reader.html` (regression check), and a full Playwright pass — real chapter
+  text and an embedded illustration both render correctly with the book's own CSS applied,
+  TOC navigation jumps to the right chapter, font-size control visibly resizes text,
+  repeated taps reliably show/hide the chrome, and double-clicking real paragraph text
+  selects a word once the chrome is visible.

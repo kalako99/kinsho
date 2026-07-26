@@ -26,6 +26,7 @@ import metadata_fetch
 import opds
 import comicinfo
 import integrity
+import epub_reader
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -858,6 +859,8 @@ def _invalidate_stale_source_caches(path: str):
 
     for key in [k for k in _epub_page_cache if k[0] == path]:
         _epub_page_cache.pop(key, None)
+
+    epub_reader.invalidate(path)
 
 THUMB_WIDTH = 100
 
@@ -4855,7 +4858,21 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
         return RedirectResponse("/", status_code=302)
     if _is_manga_id_blocked(username, library_id, manga_id):
         return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(request, "chapter_reader.html", {
+
+    template_name = "chapter_reader.html"
+    manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
+    if manga:
+        dims = load_manga_dims(library_id, manga["name"])
+        volume = dims.get("volumes", {}).get(volume_id)
+        # Real text rendering only for EPUBs that actually parse -- anything
+        # else (ebooklib not installed, a corrupt file) falls straight
+        # through to the existing image-based reader unchanged, since this
+        # feature is purely additive, never a hard requirement.
+        if volume and volume.get("source") == "epub" and epub_reader.is_parseable(volume["path"]):
+            template_name = "epub_reader.html"
+
+    return templates.TemplateResponse(request, template_name, {
         "library_id": library_id,
         "manga_id":   manga_id,
         "volume_id":  volume_id,
@@ -5044,6 +5061,81 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         )
 
     return JSONResponse({"error": "Unknown volume type"}, status_code=500)
+
+# ── EPUB TEXT READER ROUTES ──
+# Real chapter-text rendering for epub_reader.html, as opposed to the
+# image-only page routes above (still used by the old image-strip reader,
+# OPDS, and thumbnails). See epub_reader.py for the parsing/sanitization.
+
+def _load_epub_volume(username: str, library_id: int, manga_id: str, volume_id: str):
+    """Shared lookup for the three epub/* routes below. Returns (manga, volume)
+    or a JSONResponse error to return directly."""
+    if not auth.can_access_library(username, library_id):
+        return None, None, JSONResponse({"error": "Library not found"}, status_code=404)
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id))
+    if not manga_data:
+        return None, None, JSONResponse({"error": "Library not found"}, status_code=404)
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return None, None, JSONResponse({"error": "Manga not found"}, status_code=404)
+    dims = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims.get("tags", [])):
+        return None, None, JSONResponse({"error": "Manga not found"}, status_code=404)
+    volume = dims.get("volumes", {}).get(volume_id)
+    if not volume or volume.get("source") != "epub":
+        return None, None, JSONResponse({"error": "Volume not found"}, status_code=404)
+    return manga, volume, None
+
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/toc")
+def get_epub_toc(request: Request, library_id: int, manga_id: str, volume_id: str):
+    username = auth.get_opds_user(request)
+    manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
+    if err:
+        return err
+    book = epub_reader.get_book(volume["path"])
+    if book is None:
+        return JSONResponse({"error": "Cannot open epub"}, status_code=500)
+    spine_docs = epub_reader.build_reading_spine(book)
+    toc = epub_reader.build_toc(book, spine_docs)
+    return JSONResponse({"spine_count": len(spine_docs), "toc": toc})
+
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/chapter/{spine_index:int}")
+def get_epub_chapter(request: Request, library_id: int, manga_id: str, volume_id: str, spine_index: int):
+    username = auth.get_opds_user(request)
+    manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
+    if err:
+        return err
+    book = epub_reader.get_book(volume["path"])
+    if book is None:
+        return JSONResponse({"error": "Cannot open epub"}, status_code=500)
+    spine_docs = epub_reader.build_reading_spine(book)
+    asset_base_url = f"/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/asset"
+    chapter = epub_reader.render_chapter(book, spine_docs, spine_index, asset_base_url)
+    if chapter is None:
+        return JSONResponse({"error": "Page not found"}, status_code=404)
+    return JSONResponse({
+        "html": chapter["html"], "css": chapter["css"], "title": chapter["title"],
+        "spine_index": spine_index, "spine_count": len(spine_docs),
+    })
+
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/asset/{path:path}")
+def get_epub_asset(request: Request, library_id: int, manga_id: str, volume_id: str, path: str):
+    username = auth.get_opds_user(request)
+    manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
+    if err:
+        return err
+    book = epub_reader.get_book(volume["path"])
+    if book is None:
+        return JSONResponse({"error": "Cannot open epub"}, status_code=500)
+    result = epub_reader.resolve_asset(book, path)
+    if result is None:
+        return JSONResponse({"error": "Asset not found"}, status_code=404)
+    content, media_type = result
+    return Response(
+        content=content, media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 # ── ARCHIVE CHAPTER PAGE ROUTE (Case 1 & Case 3) ──
 

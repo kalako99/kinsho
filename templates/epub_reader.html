@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="/static/api.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {{ theme_css | safe }}
+  <title>Reader — KINSHO</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      background: #000;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    /* ── TOP BAR (visual/interaction conventions copied from chapter_reader.html) ── */
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 150;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      background: color-mix(in srgb, var(--color-secondary, #1a1a1a) 70%, transparent);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.3);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+    .topbar.visible { opacity: 1; pointer-events: all; }
+
+    .back-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 6px;
+      border-radius: 8px;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+    .back-btn:hover { background: rgba(255,255,255,0.1); }
+
+    .topbar-title {
+      flex: 1;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 1rem;
+      font-weight: 600;
+      color: #f0f0f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ── EPUB CONTENT AREA ── */
+    #epubViewport {
+      position: fixed;
+      inset: 0;
+      background: #000;
+    }
+    #epubFrame {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: #fff;
+    }
+    /* Only intercepts taps while the chrome is hidden -- see showAll()/hideAll().
+       While visible, this stays pointer-events:none so normal click-and-drag
+       text selection inside the iframe works exactly as expected; there is
+       no way to detect a tap landing inside a cross-document iframe from the
+       parent page otherwise (frame-boundary click events never bubble). */
+    #epubTapOverlay {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      pointer-events: auto;
+    }
+    #epubTapOverlay.inert { pointer-events: none; }
+
+    /* ── BOTTOM CONTAINER / BAR (copied conventions from chapter_reader.html) ── */
+    #bottom-container {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      width: calc(100vw - 48px);
+      max-width: 860px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .bottombar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      padding: 8px 14px;
+      background: rgba(0,0,0,0.82);
+      backdrop-filter: blur(6px);
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.08);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+      width: 100%;
+    }
+    .bottombar.visible { opacity: 1; pointer-events: all; }
+    .bb-row { display: flex; align-items: center; justify-content: center; gap: 16px; }
+
+    .bb-chapbtn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 5px;
+      border-radius: 7px;
+      color: #f0f0f0;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    .bb-chapbtn:hover { background: rgba(255,255,255,0.1); }
+    .bb-chapbtn:disabled { opacity: 0.25; cursor: not-allowed; }
+
+    .bb-chap-dropdown { position: relative; }
+    .bb-chap-btn {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      padding: 5px 10px;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 220px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .bb-chap-btn:hover,
+    .bb-chap-btn.open { background: rgba(255,255,255,0.12); border-color: rgba(255,255,255,0.22); }
+    .bb-chap-btn svg { flex-shrink: 0; opacity: 0.6; }
+
+    .bb-chap-menu {
+      position: absolute;
+      bottom: calc(100% + 16px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      min-width: 260px;
+      max-width: 340px;
+      max-height: 320px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+      z-index: 300;
+      padding: 4px 0;
+      display: none;
+    }
+    .bb-chap-menu.open { display: block; }
+
+    .bb-chap-menu-item {
+      display: flex;
+      align-items: center;
+      padding: 9px 14px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: #f0f0f0;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bb-chap-menu-item:hover { background: rgba(255,255,255,0.07); }
+    .bb-chap-menu-item.active { color: var(--theme-primary, #e94560); background: rgba(255,255,255,0.04); }
+    .bb-chap-menu-item.disabled { color: #555; cursor: default; font-weight: 700; }
+    .bb-chap-menu-item.disabled:hover { background: none; }
+
+    .bb-iconbtn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 5px;
+      border-radius: 7px;
+      color: #aaa;
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+      transition: background 0.2s, color 0.2s;
+    }
+    .bb-iconbtn:hover { background: rgba(255,255,255,0.1); color: #f0f0f0; }
+    .bb-iconbtn.active { color: var(--theme-primary, #e94560); }
+
+    /* ── SETTINGS PANEL (font size only, per v1 scope) ── */
+    .settings-panel {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 200;
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 16px 18px;
+      min-width: 240px;
+      display: none;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .settings-panel.open { display: flex; }
+    .settings-section-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #666;
+    }
+    .settings-fontsize-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .settings-fontsize-range {
+      -webkit-appearance: none;
+      appearance: none;
+      flex: 1;
+      height: 3px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.15);
+      outline: none;
+      cursor: pointer;
+    }
+    .settings-fontsize-range::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      cursor: pointer;
+    }
+    .settings-fontsize-range::-moz-range-thumb {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      background: var(--theme-primary, #e94560);
+      border: none;
+      cursor: pointer;
+    }
+    .settings-fontsize-value {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.75rem;
+      color: #888;
+      min-width: 34px;
+      text-align: right;
+    }
+
+    @media (max-width: 540px) {
+      #bottom-container { bottom: 12px; }
+      .bb-chap-btn { max-width: 150px; }
+    }
+  </style>
+</head>
+<body class="cursor-hidden"><!-- UI starts hidden, matching chapter_reader.html's convention -->
+
+<div class="topbar" id="topbar">
+  <button class="back-btn" id="backBtn">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="2">
+      <polyline points="15 18 9 12 15 6"/>
+    </svg>
+  </button>
+  <span class="topbar-title" id="topbarTitle">Loading…</span>
+</div>
+
+<div id="epubViewport">
+  <iframe id="epubFrame" sandbox="allow-same-origin"></iframe>
+  <div id="epubTapOverlay"></div>
+</div>
+
+<div id="bottom-container">
+  <div class="bottombar" id="bottombar">
+    <div class="bb-row">
+      <button type="button" class="bb-chapbtn" id="bbPrev" aria-label="Previous" title="Previous">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
+      <div class="bb-chap-dropdown" id="bbChapDropdown">
+        <button type="button" class="bb-chap-btn" id="bbChapBtn" aria-haspopup="listbox" aria-expanded="false">
+          <span id="bbChapLabel">Loading…</span>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="bb-chap-menu" id="bbChapMenu" role="listbox"></div>
+      </div>
+      <button type="button" class="bb-chapbtn" id="bbNext" aria-label="Next" title="Next">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <button type="button" class="bb-iconbtn" id="bbSettingsBtn" aria-label="Settings" title="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="settings-panel" id="settingsPanel">
+  <div class="settings-section-title">Font size</div>
+  <div class="settings-fontsize-row">
+    <input class="settings-fontsize-range" type="range" min="70" max="200" step="5" value="100" id="fontSizeRange">
+    <span class="settings-fontsize-value" id="fontSizeValue">100%</span>
+  </div>
+</div>
+
+<script>
+  const backBtn       = document.getElementById('backBtn');
+  const topbar        = document.getElementById('topbar');
+  const topbarTitle   = document.getElementById('topbarTitle');
+  const bottombar     = document.getElementById('bottombar');
+  const epubFrame     = document.getElementById('epubFrame');
+  const epubTapOverlay = document.getElementById('epubTapOverlay');
+  const bbPrev        = document.getElementById('bbPrev');
+  const bbNext        = document.getElementById('bbNext');
+  const bbChapBtn     = document.getElementById('bbChapBtn');
+  const bbChapLabel   = document.getElementById('bbChapLabel');
+  const bbChapMenu    = document.getElementById('bbChapMenu');
+  const bbSettingsBtn = document.getElementById('bbSettingsBtn');
+  const settingsPanel = document.getElementById('settingsPanel');
+  const fontSizeRange = document.getElementById('fontSizeRange');
+  const fontSizeValue = document.getElementById('fontSizeValue');
+
+  // ── URL PARAMS (same convention as chapter_reader.html) ──
+  const parts      = window.location.pathname.split('/');
+  const libraryId  = parts[2];
+  const mangaId    = parts[3];
+  const volumeId   = parts[5];
+  const startIndex = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
+
+  const ASSET_PREFIX = `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/asset/`;
+
+  let spineCount   = 0;
+  let currentIndex = Math.max(0, startIndex);
+  let tocFlat      = []; // flattened {title, spineIndex, depth, navigable} for the dropdown
+  let lastHtml     = '';
+  let lastCss      = '';
+
+  function exitFullscreen() {
+    if      (document.exitFullscreen)       document.exitFullscreen().catch(() => {});
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    else if (document.mozCancelFullScreen)  document.mozCancelFullScreen();
+  }
+  backBtn.addEventListener('click', () => {
+    exitFullscreen();
+    window.location.href = `/manga/${libraryId}/${mangaId}`;
+  });
+
+  // ── TOP/BOTTOM BAR VISIBILITY ──
+  // Mirrors chapter_reader.html's showAll()/hideAll() (tap-anywhere-to-toggle,
+  // auto-hide after 3s of no chrome interaction), but also flips the tap
+  // overlay's pointer-events -- see the CSS comment on #epubTapOverlay for why
+  // that's the mechanism that lets a tap reach the parent page at all despite
+  // chapter content living in a separate, sandboxed iframe document.
+  let barVisible = false;
+  let barTimer   = null;
+
+  function showAll() {
+    topbar.classList.add('visible');
+    bottombar.classList.add('visible');
+    epubTapOverlay.classList.add('inert');
+    barVisible = true;
+    document.body.classList.remove('cursor-hidden');
+    clearTimeout(barTimer);
+    barTimer = setTimeout(() => {
+      if (topbar.matches(':hover') || bottombar.matches(':hover') || settingsPanel.matches(':hover')) return;
+      hideAll();
+    }, 3000);
+  }
+
+  function hideAll() {
+    topbar.classList.remove('visible');
+    bottombar.classList.remove('visible');
+    settingsPanel.classList.remove('open');
+    epubTapOverlay.classList.remove('inert');
+    barVisible = false;
+    document.body.classList.add('cursor-hidden');
+  }
+
+  epubTapOverlay.addEventListener('click', () => {
+    if (!barVisible) showAll();
+  });
+
+  // ── FETCH HELPERS ──
+  async function apiFetch(path) {
+    const r = await fetch(apiUrl(path));
+    return r.json();
+  }
+
+  // ── TOC / CHAPTER LOADING ──
+  function flattenToc(nodes, depth, out) {
+    for (const node of nodes) {
+      out.push({ title: node.title, spineIndex: node.spine_index, depth });
+      if (node.children && node.children.length) flattenToc(node.children, depth + 1, out);
+    }
+    return out;
+  }
+
+  function buildChapMenu() {
+    bbChapMenu.innerHTML = '';
+    for (const entry of tocFlat) {
+      const item = document.createElement('div');
+      const navigable = entry.spineIndex !== null;
+      item.className = 'bb-chap-menu-item' + (!navigable ? ' disabled' : '') +
+        (navigable && entry.spineIndex === currentIndex ? ' active' : '');
+      item.style.paddingLeft = (14 + entry.depth * 14) + 'px';
+      item.setAttribute('role', 'option');
+      item.textContent = entry.title;
+      if (navigable) {
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          closeBbMenu();
+          if (entry.spineIndex !== currentIndex) goToIndex(entry.spineIndex);
+        });
+      }
+      bbChapMenu.appendChild(item);
+    }
+  }
+
+  function openBbMenu() {
+    bbChapMenu.classList.add('open');
+    bbChapBtn.classList.add('open');
+    bbChapBtn.setAttribute('aria-expanded', 'true');
+    const activeItem = bbChapMenu.querySelector('.bb-chap-menu-item.active');
+    if (activeItem) requestAnimationFrame(() => activeItem.scrollIntoView({ block: 'nearest' }));
+  }
+  function closeBbMenu() {
+    bbChapMenu.classList.remove('open');
+    bbChapBtn.classList.remove('open');
+    bbChapBtn.setAttribute('aria-expanded', 'false');
+  }
+  bbChapMenu.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+  bbChapBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    bbChapMenu.classList.contains('open') ? closeBbMenu() : openBbMenu();
+  });
+  document.addEventListener('click', () => closeBbMenu());
+
+  function updateNavButtons() {
+    bbPrev.disabled = currentIndex <= 0;
+    bbNext.disabled = currentIndex >= spineCount - 1;
+  }
+
+  function currentTocTitle() {
+    // Nearest TOC entry at or before the current spine index -- gives a
+    // sensible bottombar label even when currentIndex itself isn't a TOC
+    // entry (most spine positions aren't; only chapter starts are).
+    let label = null;
+    for (const entry of tocFlat) {
+      if (entry.spineIndex !== null && entry.spineIndex <= currentIndex) label = entry.title;
+      else if (entry.spineIndex !== null && entry.spineIndex > currentIndex) break;
+    }
+    return label;
+  }
+
+  function fontSizePctValue() {
+    return parseInt(localStorage.getItem('kinshoEpubFontSize') || '100', 10);
+  }
+
+  function buildSrcdoc(html, css) {
+    const rewrittenHtml = html.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
+    const rewrittenCss  = css.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
+    // Single narrow, deliberate override -- not a general !important
+    // free-for-all -- so em/rem/%-based sizing in the book's own CSS scales
+    // proportionally. Absolute-pixel sizing in decorative front matter won't
+    // reflow; an acceptable known v1 limitation.
+    const fontSizeCss = `html { font-size: ${fontSizePctValue()}% !important; }`;
+    return `<!doctype html><html><head><meta charset="utf-8">` +
+      `<style>${rewrittenCss}</style><style>${fontSizeCss}</style>` +
+      `</head>${rewrittenHtml}</html>`;
+  }
+
+  async function loadChapter(index, { saveProgress = true } = {}) {
+    const data = await apiFetch(
+      `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`
+    );
+    if (data.error) return;
+    currentIndex = data.spine_index;
+    spineCount   = data.spine_count;
+    lastHtml     = data.html;
+    lastCss      = data.css;
+    epubFrame.srcdoc = buildSrcdoc(lastHtml, lastCss);
+    topbarTitle.textContent = data.title || currentTocTitle() || 'KINSHO';
+    bbChapLabel.textContent = currentTocTitle() || `${currentIndex + 1} / ${spineCount}`;
+    updateNavButtons();
+    buildChapMenu();
+    if (saveProgress) saveReadingProgress(currentIndex >= spineCount - 1 ? volumeId : null);
+  }
+
+  function goToIndex(index) {
+    if (index < 0 || index >= spineCount) return;
+    loadChapter(index);
+  }
+
+  async function saveReadingProgress(completedVolumeId) {
+    await fetch(apiUrl('/api/reading/progress'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        library_id:           libraryId,
+        manga_id:             mangaId,
+        chapter_id:           volumeId,
+        page:                 currentIndex,
+        completed_chapter_id: completedVolumeId,
+      }),
+    });
+  }
+
+  bbPrev.addEventListener('click', () => goToIndex(currentIndex - 1));
+  bbNext.addEventListener('click', () => goToIndex(currentIndex + 1));
+
+  // ── SETTINGS PANEL (font size) ──
+  fontSizeRange.value = fontSizePctValue();
+  fontSizeValue.textContent = fontSizeRange.value + '%';
+  fontSizeRange.addEventListener('input', () => {
+    fontSizeValue.textContent = fontSizeRange.value + '%';
+    localStorage.setItem('kinshoEpubFontSize', fontSizeRange.value);
+    // Rebuild the whole srcdoc from the already-fetched html/css rather than
+    // refetching from the server -- no network round-trip needed just to
+    // change one CSS rule.
+    if (lastHtml) epubFrame.srcdoc = buildSrcdoc(lastHtml, lastCss);
+  });
+
+  bbSettingsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    settingsPanel.classList.toggle('open');
+  });
+  settingsPanel.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => settingsPanel.classList.remove('open'));
+
+  // ── INIT ──
+  (async () => {
+    const tocData = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/toc`);
+    spineCount = tocData.spine_count || 0;
+    tocFlat    = flattenToc(tocData.toc || [], 0, []);
+    await loadChapter(Math.min(currentIndex, Math.max(0, spineCount - 1)), { saveProgress: false });
+  })();
+</script>
+</body>
+</html>

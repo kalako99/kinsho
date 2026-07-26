@@ -1853,7 +1853,7 @@ createApp({
         if (!vol) return;
         const base = `/api/manga/${this.libraryId}/${this.mangaId}/volume/${vid}/page`;
         let urls = null;
-        if (vol.source === 'archive' || vol.source === 'epub') {
+        if (vol.source === 'archive') {
           const count = vol.page_count ?? vol.pages?.length ?? 0;
           urls = Array.from({ length: count }, (_, i) => `${base}/${i}`);
         } else if (vol.source === 'loose' && Array.isArray(vol.filenames)) {
@@ -1862,7 +1862,10 @@ createApp({
         // pdf deliberately skipped: its page URLs carry a render-scale query
         // that depends on per-library reader settings, so a guess here could
         // simply miss the cache (and PDF pages are pre-rendered server-side
-        // anyway).
+        // anyway). epub deliberately skipped too: epub_reader.html renders
+        // real chapter text via its own /epub/toc+/epub/chapter endpoints,
+        // never these page-image URLs, so prefetching them here would just
+        // be wasted bandwidth.
         if (!urls || !urls.length) return;
         const start = Math.max(0, Math.min(this.lastPage || 0, urls.length - 1) - 1);
         for (const u of urls.slice(start, start + 5)) {
