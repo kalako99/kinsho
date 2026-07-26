@@ -280,6 +280,228 @@
       #bottom-container { bottom: 12px; }
       .bb-chap-btn { max-width: 150px; }
     }
+
+    /* ── BOOKMARKS (copied verbatim from chapter_reader.html for visual
+       consistency -- pure UI chrome, nothing manga-specific in the CSS) ── */
+    .bookmark-panel {
+      position: fixed;
+      bottom: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 200;
+      background: rgba(18,18,18,0.97);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      padding: 8px;
+      display: none;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 200px;
+    }
+    .bookmark-panel.open { display: flex; }
+
+    .bm-panel-btn {
+      background: none;
+      border: none;
+      border-radius: 9px;
+      padding: 10px 14px;
+      color: #ccc;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 500;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .bm-panel-btn:hover { background: rgba(255,255,255,0.08); color: #f0f0f0; }
+
+    .bm-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 400;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .bm-modal {
+      background: rgba(18,18,18,0.98);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      padding: 20px;
+      min-width: 320px;
+      max-width: 480px;
+      width: 90vw;
+      max-height: 80vh;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .bm-modal-title {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #f0f0f0;
+      letter-spacing: 0.04em;
+    }
+    .bm-modal-body {
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 1;
+      scrollbar-width: thin;
+      scrollbar-color: #333 transparent;
+    }
+    .bm-modal-input {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 8px;
+      padding: 9px 12px;
+      color: #f0f0f0;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.85rem;
+      outline: none;
+      width: 100%;
+      transition: border-color 0.2s;
+    }
+    .bm-modal-input:focus { border-color: var(--theme-primary, #e94560); }
+    .bm-modal-hint {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.75rem;
+      color: #666;
+    }
+    .bm-modal-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .bm-btn {
+      border: none;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .bm-btn-primary { background: var(--theme-primary, #e94560); color: #fff; }
+    .bm-btn-primary:hover { filter: brightness(1.15); }
+    .bm-btn-secondary { background: rgba(255,255,255,0.08); color: #ccc; }
+    .bm-btn-secondary:hover { background: rgba(255,255,255,0.14); color: #f0f0f0; }
+    .bm-btn-danger { background: rgba(220,50,50,0.15); color: #e06060; }
+    .bm-btn-danger:hover { background: rgba(220,50,50,0.28); }
+
+    .bm-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 9px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.06);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .bm-row:hover { background: rgba(255,255,255,0.09); }
+    .bm-row-info { flex: 1; min-width: 0; }
+    .bm-row-name {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: #f0f0f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bm-row-detail {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.7rem;
+      color: #666;
+      margin-top: 2px;
+    }
+    .bm-row-tag {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.65rem;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 20px;
+      flex-shrink: 0;
+      letter-spacing: 0.04em;
+    }
+    .bm-tag-closed { background: rgba(74,222,128,0.15); color: #4ade80; border: 1px solid rgba(74,222,128,0.25); }
+    .bm-tag-open   { background: rgba(255,255,255,0.06); color: #888;  border: 1px solid rgba(255,255,255,0.1); }
+    .bm-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .bm-icon-btn {
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 6px;
+      color: #777;
+      display: flex;
+      align-items: center;
+      transition: background 0.15s, color 0.15s;
+    }
+    .bm-icon-btn:hover { background: rgba(255,255,255,0.1); color: #f0f0f0; }
+    .bm-icon-btn.danger:hover { background: rgba(220,50,50,0.2); color: #e06060; }
+
+    .bm-toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 2px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      margin-bottom: 4px;
+    }
+    .bm-toggle-label { font-family: 'Segoe UI', sans-serif; font-size: 0.78rem; color: #aaa; }
+
+    .settings-toggle { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+    .settings-toggle input { opacity: 0; width: 0; height: 0; }
+    .settings-toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(255,255,255,0.15);
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .settings-toggle-slider::before {
+      content: '';
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #f0f0f0;
+      transition: transform 0.2s;
+    }
+    .settings-toggle input:checked + .settings-toggle-slider { background: var(--theme-primary, #e94560); }
+    .settings-toggle input:checked + .settings-toggle-slider::before { transform: translateX(16px); }
+
+    .bm-toast {
+      position: fixed;
+      bottom: 100px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 500;
+      background: rgba(18,18,18,0.95);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 10px 20px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      color: #f0f0f0;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .bm-toast.show { opacity: 1; }
   </style>
 </head>
 <body class="cursor-hidden"><!-- UI starts hidden, matching chapter_reader.html's convention -->
@@ -314,6 +536,9 @@
       <button type="button" class="bb-chapbtn" id="bbNextVol" aria-label="Next volume" title="Next volume">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
       </button>
+      <button type="button" class="bb-iconbtn" id="bbBookmarkBtn" aria-label="Bookmarks" title="Bookmarks">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </button>
       <button type="button" class="bb-iconbtn" id="bbSettingsBtn" aria-label="Settings" title="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
       </button>
@@ -328,6 +553,34 @@
     <span class="settings-fontsize-value" id="fontSizeValue">100%</span>
   </div>
 </div>
+
+<!-- Bookmark panel (mini popup) -->
+<div class="bookmark-panel" id="bookmarkPanel">
+  <button class="bm-panel-btn" id="bmAddBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+    Add Bookmark
+  </button>
+  <button class="bm-panel-btn" id="bmCloseBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/><line x1="9" y1="10" x2="15" y2="10"/></svg>
+    Close Bookmark
+  </button>
+  <button class="bm-panel-btn" id="bmListBtn">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-right:8px"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    Bookmark List
+  </button>
+</div>
+
+<!-- Bookmark modal (shared overlay) -->
+<div class="bm-modal-overlay" id="bmModalOverlay" style="display:none">
+  <div class="bm-modal" id="bmModal">
+    <div class="bm-modal-title" id="bmModalTitle">Bookmarks</div>
+    <div class="bm-modal-body" id="bmModalBody"></div>
+    <div class="bm-modal-actions" id="bmModalActions"></div>
+  </div>
+</div>
+
+<!-- Bookmark toast -->
+<div class="bm-toast" id="bmToast"></div>
 
 <script>
   const backBtn       = document.getElementById('backBtn');
@@ -350,7 +603,8 @@
   const libraryId  = parts[2];
   const mangaId    = parts[3];
   const volumeId   = parts[5];
-  const startIndex = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
+  const startIndex    = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
+  const startFraction = parseFloat(new URLSearchParams(window.location.search).get('frac') || '0') || 0;
 
   const ASSET_PREFIX = `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/asset/`;
 
@@ -397,6 +651,7 @@
     topbar.classList.remove('visible');
     bottombar.classList.remove('visible');
     settingsPanel.classList.remove('open');
+    closeBookmarkPanel();
     barVisible = false;
     document.body.classList.add('cursor-hidden');
   }
@@ -520,6 +775,18 @@
     el.addEventListener('mousedown', (e) => onStart(e.clientX, e.clientY));
     el.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY, null));
     el.addEventListener('mouseup',   (e) => onEnd(e.clientX, e.clientY));
+
+    // End-to-end bookmark reading (see the BOOKMARKS section) needs to know
+    // when the reader has scrolled past the active bookmark's end point --
+    // checked on a light debounce while scrolling, same idea as
+    // chapter_reader.html's scheduleProgressSave() piggy-backing the same
+    // check onto its own scroll-driven save cycle.
+    let endToEndTimer = null;
+    el.addEventListener('scroll', () => {
+      if (!bmEndToEndActive) return;
+      clearTimeout(endToEndTimer);
+      endToEndTimer = setTimeout(checkEndToEnd, 250);
+    }, { passive: true });
   }
 
   function handleTap(x, doc, el) {
@@ -542,11 +809,11 @@
     }
   }
 
-  // land: 'start' | 'end' | 'clampFraction' -- where to scroll to in the
-  // newly rendered content (chapter start, chapter end for a backward
-  // chapter crossing, or the same scroll fraction as before for a
-  // resize/font-size change).
-  async function renderChapterContent(html, css, { land = 'start' } = {}) {
+  // land: 'start' | 'end' | 'clampFraction' | 'fraction' -- where to scroll
+  // to in the newly rendered content (chapter start, chapter end for a
+  // backward chapter crossing, the same scroll fraction as before for a
+  // resize/font-size change, or an explicit fraction for a bookmark jump).
+  async function renderChapterContent(html, css, { land = 'start', fraction = 0 } = {}) {
     const prevFraction = land === 'clampFraction' ? currentScrollFraction() : 0;
     lastHtml = html;
     lastCss  = css;
@@ -557,7 +824,15 @@
     const el = doc.getElementById('pg-outer');
     if (land === 'end') el.scrollTop = el.scrollHeight - el.clientHeight;
     else if (land === 'clampFraction') el.scrollTop = prevFraction * (el.scrollHeight - el.clientHeight);
+    else if (land === 'fraction') el.scrollTop = fraction * (el.scrollHeight - el.clientHeight);
     else el.scrollTop = 0;
+    if (bmEndToEndActive) checkEndToEnd();
+  }
+
+  function scrollToFraction(fraction, smooth = true) {
+    const el = epubFrame.contentDocument.getElementById('pg-outer');
+    const top = fraction * (el.scrollHeight - el.clientHeight);
+    el.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
   }
 
   function currentScrollFraction() {
@@ -568,12 +843,12 @@
     return max > 0 ? el.scrollTop / max : 0;
   }
 
-  async function loadSpineChapter(index, { land = 'start', saveProgress = true } = {}) {
+  async function loadSpineChapter(index, { land = 'start', fraction = 0, saveProgress = true } = {}) {
     const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`);
     if (data.error) return;
     currentIndex = data.spine_index;
     spineCount   = data.spine_count;
-    await renderChapterContent(data.html, data.css, { land });
+    await renderChapterContent(data.html, data.css, { land, fraction });
     if (saveProgress) saveReadingProgress(currentIndex >= spineCount - 1 ? volumeId : null);
   }
 
@@ -689,6 +964,7 @@
 
   bbSettingsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
+    closeBookmarkPanel();
     settingsPanel.classList.toggle('open');
   });
   settingsPanel.addEventListener('click', (e) => e.stopPropagation());
@@ -698,16 +974,527 @@
   // pixels, so the iframe/content simply reflows with the window like any
   // ordinary scrollable page.
 
+  // ── BOOKMARKS ──
+  // Mirrors chapter_reader.html's bookmark system (start/end ranges,
+  // auto-numbered name groups, end-to-end chain reading) as closely as
+  // possible. The one real adaptation is the position model: manga bookmarks
+  // are {chapterId, chapterIdx, pageIdx} (a discrete page image); an EPUB
+  // position is instead {volumeId, volumeIdx, spineIndex, scrollFraction} --
+  // spine index plus a continuous scroll fraction within that chapter, since
+  // there's no discrete "page" left in this reader's scroll-based model.
+  // Storage is the same generic, opaque `/api/manga/{lib}/{id}/bookmarks`
+  // blob the manga reader already uses -- keyed by manga_id, not per-volume,
+  // exactly like the original (a manga's bookmarks are shared across all its
+  // volumes/chapters).
+
+  let bookmarks = [];
+  let bmEndToEnd       = false; // "end-to-end reading" toggle -- session-local, not persisted, matching the original
+  let bmEndToEndActive = false;
+  let bmCurrentGroup    = null;
+  let bmCurrentGroupIdx = 0;
+
+  function getCurrentPosition() {
+    return {
+      volumeId:       volumeId,
+      volumeIdx:      volumesList.findIndex((v) => v.id === volumeId),
+      spineIndex:     currentIndex,
+      scrollFraction: currentScrollFraction(),
+    };
+  }
+
+  function positionBefore(a, b) {
+    if (a.volumeIdx !== b.volumeIdx) return a.volumeIdx < b.volumeIdx;
+    if (a.spineIndex !== b.spineIndex) return a.spineIndex < b.spineIndex;
+    return a.scrollFraction < b.scrollFraction - 0.01;
+  }
+  function positionAtOrPast(a, b) {
+    return !positionBefore(a, b);
+  }
+  function positionEqual(a, b) {
+    return a.volumeIdx === b.volumeIdx && a.spineIndex === b.spineIndex &&
+      Math.abs(a.scrollFraction - b.scrollFraction) < 0.01;
+  }
+
+  function volumeNameFor(volId) {
+    const v = volumesList.find((x) => x.id === volId);
+    return v ? v.name : volId;
+  }
+  function bmPositionLabel(pos) {
+    const pct = Math.round((pos.scrollFraction || 0) * 100);
+    return `${volumeNameFor(pos.volumeId)} — Ch. ${pos.spineIndex + 1}, ${pct}%`;
+  }
+
+  async function loadBookmarks() {
+    try {
+      const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/bookmarks`);
+      bookmarks = data.bookmarks || [];
+    } catch (e) {
+      bookmarks = [];
+    }
+  }
+  async function persistBookmarks() {
+    await fetch(apiUrl(`/api/manga/${libraryId}/${mangaId}/bookmarks`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookmarks }),
+    });
+  }
+
+  function sortBookmarks() {
+    bookmarks.sort((a, b) => {
+      if (a.start.volumeIdx !== b.start.volumeIdx) return a.start.volumeIdx - b.start.volumeIdx;
+      if (a.start.spineIndex !== b.start.spineIndex) return a.start.spineIndex - b.start.spineIndex;
+      return a.start.scrollFraction - b.start.scrollFraction;
+    });
+  }
+
+  // Strip a trailing auto-number suffix, e.g. "Favorite scene 03" -> "Favorite scene"
+  function bmBaseName(name) {
+    return name.replace(/\s+\d+$/, '').trim();
+  }
+  function renumberGroup(baseName) {
+    const group = bookmarks.filter((b) => bmBaseName(b.name) === baseName);
+    if (group.length < 2) {
+      if (group.length === 1 && group[0].name !== baseName) group[0].name = baseName;
+      return;
+    }
+    group.sort((a, b) => {
+      if (a.start.volumeIdx !== b.start.volumeIdx) return a.start.volumeIdx - b.start.volumeIdx;
+      if (a.start.spineIndex !== b.start.spineIndex) return a.start.spineIndex - b.start.spineIndex;
+      return a.start.scrollFraction - b.start.scrollFraction;
+    });
+    group.forEach((b, i) => { b.name = `${baseName} ${String(i + 1).padStart(2, '0')}`; });
+  }
+
+  let bmToastTimer = null;
+  const bmToastEl = document.getElementById('bmToast');
+  function showToast(msg) {
+    bmToastEl.textContent = msg;
+    bmToastEl.classList.add('show');
+    clearTimeout(bmToastTimer);
+    bmToastTimer = setTimeout(() => bmToastEl.classList.remove('show'), 2500);
+  }
+
+  const bmModalOverlay = document.getElementById('bmModalOverlay');
+  const bmModalTitle   = document.getElementById('bmModalTitle');
+  const bmModalBody    = document.getElementById('bmModalBody');
+  const bmModalActions = document.getElementById('bmModalActions');
+
+  function openModal(title, bodyFn, actionsFn) {
+    bmModalTitle.textContent = title;
+    bmModalBody.innerHTML = '';
+    bmModalActions.innerHTML = '';
+    bodyFn(bmModalBody);
+    if (actionsFn) actionsFn(bmModalActions);
+    bmModalOverlay.style.display = 'flex';
+  }
+  function closeModal() { bmModalOverlay.style.display = 'none'; }
+  bmModalOverlay.addEventListener('click', (e) => { if (e.target === bmModalOverlay) closeModal(); });
+
+  const bookmarkPanel = document.getElementById('bookmarkPanel');
+  const bbBookmarkBtn = document.getElementById('bbBookmarkBtn');
+  const bmAddBtn      = document.getElementById('bmAddBtn');
+  const bmCloseBtn    = document.getElementById('bmCloseBtn');
+  const bmListBtn     = document.getElementById('bmListBtn');
+
+  function openBookmarkPanel() {
+    bookmarkPanel.classList.add('open');
+    bbBookmarkBtn.classList.add('active');
+    settingsPanel.classList.remove('open');
+  }
+  function closeBookmarkPanel() {
+    bookmarkPanel.classList.remove('open');
+    bbBookmarkBtn.classList.remove('active');
+  }
+  bbBookmarkBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    bookmarkPanel.classList.contains('open') ? closeBookmarkPanel() : openBookmarkPanel();
+  });
+  bookmarkPanel.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => closeBookmarkPanel());
+
+  // ── ADD BOOKMARK ──
+  bmAddBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    openModal('Add Bookmark', (body) => {
+      const hint = document.createElement('div');
+      hint.className = 'bm-modal-hint';
+      hint.textContent = `Position: ${bmPositionLabel(getCurrentPosition())}`;
+      body.appendChild(hint);
+
+      const input = document.createElement('input');
+      input.className = 'bm-modal-input';
+      input.type = 'text';
+      input.placeholder = 'Bookmark name (leave empty for auto-name)';
+      body.appendChild(input);
+      setTimeout(() => input.focus(), 50);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closeModal);
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'bm-btn bm-btn-primary';
+      saveBtn.textContent = 'Save';
+      saveBtn.addEventListener('click', () => {
+        const input = bmModalBody.querySelector('.bm-modal-input');
+        let name = input ? input.value.trim() : '';
+        const pos = getCurrentPosition();
+
+        if (!name) name = `Bookmark ${bookmarks.length + 1}`;
+
+        const baseName = bmBaseName(name);
+        const existingGroup = bookmarks.filter((b) => bmBaseName(b.name) === baseName);
+
+        bookmarks.push({ name, start: pos, end: null, id: Date.now() });
+        sortBookmarks();
+        if (existingGroup.length > 0) renumberGroup(baseName);
+
+        persistBookmarks();
+        closeModal();
+        showToast('Bookmark saved');
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+    });
+  });
+
+  // ── CLOSE BOOKMARK (set an end point on an existing bookmark) ──
+  bmCloseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    showCloseBookmarkModal();
+  });
+
+  function showCloseBookmarkModal() {
+    openModal('Close Bookmark', (body) => {
+      const pos = getCurrentPosition();
+      const hint = document.createElement('div');
+      hint.className = 'bm-modal-hint';
+      hint.textContent = `Close at: ${bmPositionLabel(pos)}`;
+      hint.style.marginBottom = '8px';
+      body.appendChild(hint);
+
+      if (bookmarks.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'bm-modal-hint';
+        empty.textContent = 'No bookmarks yet.';
+        body.appendChild(empty);
+        return;
+      }
+
+      bookmarks.forEach((bm) => {
+        const row = buildBookmarkRow(bm, {
+          showActions: false,
+          onClick: () => {
+            if (bm.end) {
+              closeModal();
+              openModal('Update Close Point', (body2) => {
+                const msg = document.createElement('div');
+                msg.className = 'bm-modal-hint';
+                msg.style.color = '#ccc';
+                msg.textContent = `"${bm.name}" is already closed. Do you want to update its end point to the current position?`;
+                body2.appendChild(msg);
+              }, (actions2) => {
+                const cancelBtn = document.createElement('button');
+                cancelBtn.className = 'bm-btn bm-btn-secondary';
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.addEventListener('click', closeModal);
+
+                const confirmBtn = document.createElement('button');
+                confirmBtn.className = 'bm-btn bm-btn-primary';
+                confirmBtn.textContent = 'Update';
+                confirmBtn.addEventListener('click', () => { applyCloseToBookmark(bm, pos); closeModal(); });
+                actions2.appendChild(cancelBtn);
+                actions2.appendChild(confirmBtn);
+              });
+            } else {
+              applyCloseToBookmark(bm, pos);
+              closeModal();
+            }
+          },
+        });
+        body.appendChild(row);
+      });
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', closeModal);
+      actions.appendChild(cancelBtn);
+    });
+  }
+
+  function applyCloseToBookmark(bm, endPos) {
+    if (positionBefore(endPos, bm.start) || positionEqual(endPos, bm.start)) {
+      const oldStart = bm.start;
+      bm.start = endPos;
+      bm.end   = oldStart;
+      sortBookmarks();
+      renumberGroup(bmBaseName(bm.name));
+    } else {
+      bm.end = endPos;
+    }
+    persistBookmarks();
+    showToast('Bookmark closed');
+  }
+
+  // ── BOOKMARK LIST ──
+  bmListBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeBookmarkPanel();
+    showBookmarkListModal();
+  });
+
+  function showBookmarkListModal() {
+    openModal('Bookmarks', (body) => {
+      const toggleRow = document.createElement('div');
+      toggleRow.className = 'bm-toggle-row';
+      const toggleLabel = document.createElement('span');
+      toggleLabel.className = 'bm-toggle-label';
+      toggleLabel.textContent = 'End-to-end reading';
+      const toggleWrap = document.createElement('label');
+      toggleWrap.className = 'settings-toggle';
+      const toggleInput = document.createElement('input');
+      toggleInput.type = 'checkbox';
+      toggleInput.checked = bmEndToEnd;
+      toggleInput.addEventListener('change', () => { bmEndToEnd = toggleInput.checked; });
+      const toggleSlider = document.createElement('span');
+      toggleSlider.className = 'settings-toggle-slider';
+      toggleWrap.appendChild(toggleInput);
+      toggleWrap.appendChild(toggleSlider);
+      toggleRow.appendChild(toggleLabel);
+      toggleRow.appendChild(toggleWrap);
+      body.appendChild(toggleRow);
+
+      if (bookmarks.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'bm-modal-hint';
+        empty.textContent = 'No bookmarks yet.';
+        body.appendChild(empty);
+        return;
+      }
+
+      bookmarks.forEach((bm) => {
+        const row = buildBookmarkRow(bm, {
+          showActions: true,
+          onClick: () => { closeModal(); navigateToBookmark(bm); },
+          onRename: () => showRenameModal(bm),
+          onDelete: () => showDeleteModal(bm),
+        });
+        body.appendChild(row);
+      });
+    }, (actions) => {
+      const closeBtn = document.createElement('button');
+      closeBtn.className = 'bm-btn bm-btn-secondary';
+      closeBtn.textContent = 'Close';
+      closeBtn.addEventListener('click', closeModal);
+      actions.appendChild(closeBtn);
+    });
+  }
+
+  function buildBookmarkRow(bm, { showActions, onClick, onRename, onDelete }) {
+    const row = document.createElement('div');
+    row.className = 'bm-row';
+
+    const info = document.createElement('div');
+    info.className = 'bm-row-info';
+    const name = document.createElement('div');
+    name.className = 'bm-row-name';
+    name.textContent = bm.name;
+    const detail = document.createElement('div');
+    detail.className = 'bm-row-detail';
+    detail.textContent = bm.end
+      ? `${bmPositionLabel(bm.start)} → ${bmPositionLabel(bm.end)}`
+      : bmPositionLabel(bm.start);
+    info.appendChild(name);
+    info.appendChild(detail);
+
+    const tag = document.createElement('span');
+    tag.className = `bm-row-tag ${bm.end ? 'bm-tag-closed' : 'bm-tag-open'}`;
+    tag.textContent = bm.end ? 'CLOSED' : 'OPEN';
+
+    row.appendChild(info);
+    row.appendChild(tag);
+
+    if (showActions) {
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'bm-row-actions';
+
+      const renameBtn = document.createElement('button');
+      renameBtn.className = 'bm-icon-btn';
+      renameBtn.title = 'Rename';
+      renameBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+      renameBtn.addEventListener('click', (e) => { e.stopPropagation(); onRename && onRename(); });
+
+      const deleteBtn = document.createElement('button');
+      deleteBtn.className = 'bm-icon-btn danger';
+      deleteBtn.title = 'Delete';
+      deleteBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
+      deleteBtn.addEventListener('click', (e) => { e.stopPropagation(); onDelete && onDelete(); });
+
+      actionsDiv.appendChild(renameBtn);
+      actionsDiv.appendChild(deleteBtn);
+      row.appendChild(actionsDiv);
+    }
+
+    row.addEventListener('click', onClick);
+    return row;
+  }
+
+  function showRenameModal(bm) {
+    openModal('Rename Bookmark', (body) => {
+      const input = document.createElement('input');
+      input.className = 'bm-modal-input';
+      input.type = 'text';
+      input.value = bm.name;
+      body.appendChild(input);
+      setTimeout(() => { input.focus(); input.select(); }, 50);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => showBookmarkListModal());
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'bm-btn bm-btn-primary';
+      saveBtn.textContent = 'Save';
+      saveBtn.addEventListener('click', () => {
+        const input = bmModalBody.querySelector('.bm-modal-input');
+        const newName = input ? input.value.trim() : '';
+        if (!newName) return;
+        const oldBase = bmBaseName(bm.name);
+        bm.name = newName;
+        const newBase = bmBaseName(newName);
+        renumberGroup(oldBase);
+        const newGroup = bookmarks.filter((b) => bmBaseName(b.name) === newBase);
+        if (newGroup.length > 1) renumberGroup(newBase);
+        persistBookmarks();
+        showBookmarkListModal();
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(saveBtn);
+    });
+  }
+
+  function showDeleteModal(bm) {
+    openModal('Delete Bookmark', (body) => {
+      const msg = document.createElement('div');
+      msg.className = 'bm-modal-hint';
+      msg.style.color = '#ccc';
+      msg.textContent = `Delete "${bm.name}"? This cannot be undone.`;
+      body.appendChild(msg);
+    }, (actions) => {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'bm-btn bm-btn-secondary';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', () => showBookmarkListModal());
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'bm-btn bm-btn-danger';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', () => {
+        const base = bmBaseName(bm.name);
+        bookmarks = bookmarks.filter((b) => b.id !== bm.id);
+        renumberGroup(base);
+        persistBookmarks();
+        showBookmarkListModal();
+      });
+
+      actions.appendChild(cancelBtn);
+      actions.appendChild(delBtn);
+    });
+  }
+
+  // ── NAVIGATE TO BOOKMARK ──
+  function navigateToBookmark(bm) {
+    if (bmEndToEnd && bm.end) {
+      bmEndToEndActive  = true;
+      bmCurrentGroup    = bmBaseName(bm.name);
+      bmCurrentGroupIdx = bookmarks
+        .filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup)
+        .findIndex((b) => b.id === bm.id);
+    } else {
+      bmEndToEndActive = false;
+    }
+    jumpToPosition(bm.start);
+  }
+
+  // pos: {volumeId, volumeIdx, spineIndex, scrollFraction}. Same volume ->
+  // handled in place (same chapter just scrolls, a different one loads
+  // fresh); a different volume needs a real page navigation, carrying the
+  // target position through as `page`/`frac` query params the same way
+  // `?page=` already resumes at a spine index on a fresh load.
+  async function jumpToPosition(pos) {
+    if (pos.volumeId === volumeId) {
+      if (pos.spineIndex === currentIndex) {
+        scrollToFraction(pos.scrollFraction);
+      } else {
+        await loadSpineChapter(pos.spineIndex, { land: 'fraction', fraction: pos.scrollFraction });
+      }
+    } else {
+      goToVolume(`/manga/${libraryId}/${mangaId}/volume/${pos.volumeId}?page=${pos.spineIndex}&frac=${pos.scrollFraction}`);
+    }
+  }
+
+  // ── END-TO-END: jump from one bookmark's end straight to the next
+  // bookmark in the same named group, then the next group, while reading ──
+  function checkEndToEnd() {
+    if (!bmEndToEndActive) return;
+    const pos = getCurrentPosition();
+    const group = bookmarks.filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup);
+    const activeBm = group[bmCurrentGroupIdx];
+    if (!activeBm || !activeBm.end) return;
+    if (positionAtOrPast(pos, activeBm.end)) advanceEndToEnd();
+  }
+
+  function advanceEndToEnd() {
+    const group = bookmarks.filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup);
+    if (bmCurrentGroupIdx + 1 < group.length) {
+      bmCurrentGroupIdx++;
+      jumpToPosition(group[bmCurrentGroupIdx].start);
+      return;
+    }
+    // Group exhausted -- find the next not-yet-visited group, by the
+    // position of its first bookmark (bookmarks are already sorted by
+    // position, so the first occurrence of each group is the one nearest
+    // the start of the book).
+    const seen = new Set([bmCurrentGroup]);
+    const remaining = [];
+    for (const bm of bookmarks) {
+      if (!bm.end) continue;
+      const base = bmBaseName(bm.name);
+      if (seen.has(base)) continue;
+      seen.add(base);
+      remaining.push({ base, firstBm: bm });
+    }
+    if (remaining.length === 0) {
+      bmEndToEndActive = false;
+      showToast('Bookmarks ended');
+      return;
+    }
+    const next = remaining[0];
+    bmCurrentGroup    = next.base;
+    bmCurrentGroupIdx = 0;
+    jumpToPosition(next.firstBm.start);
+  }
+
   // ── INIT ──
   (async () => {
     const [mangaData, volumesData] = await Promise.all([
       apiFetch(`/api/manga/${libraryId}/${mangaId}`),
       apiFetch(`/api/manga/${libraryId}/${mangaId}/volumes`),
+      loadBookmarks(),
     ]);
     topbarTitle.textContent = mangaData.name || 'KINSHO';
     volumesList = volumesData.volumes || [];
     buildVolumeMenu();
-    await loadSpineChapter(Math.max(0, startIndex), { land: 'start', saveProgress: false });
+    const land = startFraction > 0 ? 'fraction' : 'start';
+    await loadSpineChapter(Math.max(0, startIndex), { land, fraction: startFraction, saveProgress: false });
   })();
 </script>
 </body>

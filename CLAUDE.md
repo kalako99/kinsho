@@ -1995,3 +1995,58 @@ More live feedback, same day, on the two points above:
   forward/backward. A real user's actual touch/mouse drag doesn't go through this
   synthetic-input pathway at all, so this is a test-authoring note, not a shipped
   limitation.
+
+### EPUB reader bookmarks: full mirror of the manga reader's system (2026-07-26)
+
+Ported `chapter_reader.html`'s bookmark system to the EPUB reader in full, per explicit
+request — including the parts beyond plain "save my place": start/end position ranges,
+auto-numbered name groups, and "end-to-end reading" (auto-jump from one bookmark's end
+straight to the next bookmark in the same group, then the next group, while reading).
+Confirmed with the user this was wanted in full rather than a simplified version, since
+those extra layers read as manga-scene-rereading-specific and don't have an obvious
+one-to-one equivalent for a novel.
+
+- **Position model, the one real adaptation.** The manga reader's position is
+  `{chapterId, chapterIdx, pageIdx}` — a chapter/volume plus a discrete page image index.
+  This reader has no discrete "page" left in its scroll-based model (see the interaction
+  rework above), so a position is instead `{volumeId, volumeIdx, spineIndex,
+  scrollFraction}` — spine index plus a continuous scroll fraction within that chapter.
+  `positionBefore`/`positionEqual` compare in that order (volume, then spine, then
+  fraction, with a small epsilon on the fraction to avoid float-precision false
+  negatives). The bookmark-row label is `"{volume name} — Ch. {spineIndex+1}, {percent}%"`
+  — simpler than trying to resolve a nearby TOC chapter title (which would need an extra
+  per-volume async fetch just for cosmetics), while still showing the same two-axis
+  chapter+fine-position information the original's "Ch. X — Page Y" does.
+- **Storage unchanged** — same generic, opaque `POST/GET /api/manga/{library_id}/
+  {manga_id}/bookmarks` blob the manga reader already uses, keyed by `manga_id` (not per
+  volume, exactly like the original — a manga's bookmarks are shared across all its
+  volumes). No backend changes were needed at all for this feature.
+- **Cross-volume jump.** A bookmark's start/end can point at a different volume than the
+  one currently open (added while reading Volume 2, then opened from Volume 1's list, for
+  instance). Same-volume jumps are handled in place (scroll within the current chapter, or
+  load a different spine chapter and land at the saved fraction); a different volume does
+  a real page navigation, carrying the target position through as `?page=N&frac=F` query
+  params — the reader's existing `?page=` resume convention gained a `frac` sibling for
+  exactly this. Verified live: bookmarking a spot in Volume 2, then triggering the jump
+  from Volume 1, correctly lands on Volume 2 at the right spine index and scroll position
+  after the full page load.
+- **End-to-end trigger mechanism.** The manga reader piggy-backs its end-to-end check on
+  its existing scroll-driven progress-save cycle. This reader didn't have an equivalent
+  periodic hook, so one was added specifically for this: a debounced (250ms) `scroll`
+  listener on `#pg-outer`, attached in the same place the tap/swipe gesture listeners
+  already get (re-)attached after every chapter render, calling the ported
+  `checkEndToEnd()`/`advanceEndToEnd()` pair unchanged from the original's logic (group
+  membership, auto-numbering renumber-on-rename/delete, "next group by earliest position"
+  ordering once a group is exhausted).
+- **Verified end-to-end** (pun intended) against the real test file: add (custom name and
+  empty-name auto-numbering), list with correct position labels, jump, close (including
+  the swap-if-end-is-before-start correction and the "already closed, update?" confirm
+  path), auto-numbered groups forming/renumbering correctly on a second same-base add, on
+  rename (including a group correctly collapsing back to a bare name once only one member
+  is left), and on delete; a full end-to-end run correctly auto-advanced through both
+  members of a two-bookmark group and then reported "Bookmarks ended"; cross-volume jump
+  confirmed via a real full-page navigation. One real test-harness gotcha hit along the
+  way, not an app bug: reusing a bookmark name like "Chain 01" in a test collided with the
+  auto-numbering convention itself (a trailing number is always treated as an existing
+  auto-suffix, per `bmBaseName`'s regex, exactly matching the original's behavior) —
+  switching to plain non-numeric test names resolved it.
