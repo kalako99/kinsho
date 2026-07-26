@@ -1633,3 +1633,69 @@ revealed the cancellation gap was actually a *backlog* problem (multiple indepen
 resolving stale loads), not a single race — worth remembering that "it took a few tries to
 fix itself" is a meaningfully different signal from "it happened once and went away," and
 points at accumulation/backlog bugs rather than single-race ones.
+
+## Favourites row staleness fix + cover-scan false alarm (2026-07-26)
+
+### Favourites row not updating immediately — fixed
+
+Reported: adding a manga to Favourites didn't show it in the home page's Favourites row
+(or, by extension, the Favourites page reached via "View more") — favourites added the day
+before eventually appeared, just very late.
+
+Root cause: `pickStableRow()` (`static/app.js`, added 2026-07-25 as part of capping the
+Random/Favourites row reshuffle to once per hour) caches each row's picked ids in
+`localStorage` per library, and only re-picks when either the hour-long freshness window has
+expired or none of the previously-picked ids still resolve against the current manga list.
+`favouriteIds` itself is always fetched fresh on every load (`/api/settings`), but the stale
+cached id list from before the add/remove was still "fresh" and still had at least one id
+that resolved, so a newly favourited manga was silently withheld from the row — and from
+`goMore()`'s pinned-row handoff to the category page, since that reads straight from the same
+(stale) `this.favourites` — for up to an hour.
+
+Fixed by giving `pickStableRow` a second invalidation signal, applied only to the
+`'favourites'` row: a fingerprint of the current candidate pool (sorted favourite ids,
+joined) is stored alongside the picked ids, and a mismatch against the stored fingerprint
+invalidates the cache immediately regardless of the 1-hour window. Deliberately not applied
+to `'random'`: its pool is "every manga in the library," which changes on essentially every
+scan, so fingerprinting it too would reshuffle on every scan and defeat the whole point of
+the stability cache — only `'favourites'`, a user-curated set where any change is a
+deliberate action that should be reflected on the very next load, gets this treatment.
+
+Shipped 2026-07-26 (commit `710b851`). Note: this fix sat as an uncommitted local edit for a
+while after being written — a `git pull` on the NAS deploy correctly reported "Already up to
+date" because there was nothing to pull yet, which briefly looked like the fix hadn't worked.
+Worth remembering for future sessions: confirm a fix is actually committed and pushed before
+concluding a redeploy "didn't pick it up."
+
+### Cover images with apostrophe/hyphen "not picked up" during scan — investigated, not a
+### real bug in the end
+
+Reported: a case3 manga's loose cover image (sitting directly in the manga's own folder,
+filename containing an apostrophe and a hyphen) showed "No Cover" after scanning. Suspected
+the scan's cover-detection logic was rejecting the filename's characters.
+
+Investigated by reproducing the exact scenario directly against `scan_library`/
+`process_manga_covers`/`find_cover_image` (case3 manga, loose cover image, straight-ASCII
+apostrophe+hyphen, then typographic Unicode `’`/`–`, then the user's actual real cover file)
+— every attempt correctly detected and processed the cover, and per-file mtimes round-tripped
+exactly with no Unicode mangling at the Windows/Python filesystem boundary.
+
+While chasing this, found and fixed a real (but ultimately unrelated) gap: `scan_library`'s
+case2/case3/loose rescan-skip shortcuts only checked archive/volume/subfolder mtimes against
+what was stored, never a loose cover image's own mtime — so a cover added to an
+already-scanned manga, with no archive/volume change alongside it, could be silently skipped
+forever if the containing folder's own mtime didn't register as changed. **This fix
+(`_loose_cover_images_changed()`, wired into all three skip-shortcuts) was written, verified
+with a regression test, then reverted** at the user's request once the real cause below was
+found — noted here only in case the same "folder mtime didn't move" symptom resurfaces for a
+different reason later, since the underlying gap in the skip logic is real even though it
+wasn't the cause this time and no code from it is currently in the tree.
+
+Actual root cause (self-diagnosed by the user): they were looking at a backup copy of the
+manga on a different drive, not the path Kinsho was actually configured to scan — so
+rescanning never picked up a change that was never in the scanned folder to begin with.
+Separately, the original cover file was `.jfif`, which isn't in `IMAGE_EXTENSIONS`
+(`.jpg`/`.jpeg`/`.png`/`.webp`/`.gif`) — Kinsho doesn't recognize `.jfif` as an image
+extension at all, so even in the right folder it would never have been picked up as a cover
+candidate. Converting/renaming it to `.jpg` and pointing at the correct path resolved it. No
+code change was needed or made for this half of the report.
