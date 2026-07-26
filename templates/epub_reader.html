@@ -61,11 +61,24 @@
       text-overflow: ellipsis;
     }
 
-    /* ── EPUB CONTENT AREA ── */
+    /* ── EPUB PAGE (fixed A4-like proportions, independent of window/container
+       shape -- responsive via CSS min()/aspect-ratio, not stretched full-bleed) ── */
     #epubViewport {
       position: fixed;
       inset: 0;
       background: #000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #epubPageBox {
+      position: relative;
+      aspect-ratio: 1 / 1.4142; /* A4 portrait */
+      width: min(90vw, 900px, 63.6vh);
+      max-height: 90vh;
+      background: #fff;
+      box-shadow: 0 8px 44px rgba(0,0,0,0.55);
+      overflow: hidden;
     }
     #epubFrame {
       position: absolute;
@@ -75,18 +88,27 @@
       border: none;
       background: #fff;
     }
-    /* Only intercepts taps while the chrome is hidden -- see showAll()/hideAll().
-       While visible, this stays pointer-events:none so normal click-and-drag
-       text selection inside the iframe works exactly as expected; there is
-       no way to detect a tap landing inside a cross-document iframe from the
-       parent page otherwise (frame-boundary click events never bubble). */
-    #epubTapOverlay {
+
+    /* Tap zones (same 30/40/30 split + interaction model as chapter_reader.html's
+       single-page mode): left/right flip pages, center toggles the chrome. These
+       live permanently in the parent document -- never inside the iframe -- so a
+       tap always reaches them regardless of chrome visibility; text inside the
+       iframe is not meant to be selectable in this reader (see .sp-zone below),
+       so there's no competing interaction to preserve. */
+    .sp-zone {
       position: absolute;
-      inset: 0;
-      z-index: 5;
-      pointer-events: auto;
+      top: 0;
+      height: 100%;
+      width: 30%;
+      z-index: 10;
+      cursor: pointer;
+      outline: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
     }
-    #epubTapOverlay.inert { pointer-events: none; }
+    .sp-zone-left   { left: 0; }
+    .sp-zone-right  { right: 0; }
+    .sp-zone-center { left: 30%; width: 40%; cursor: default; }
 
     /* ── BOTTOM CONTAINER / BAR (copied conventions from chapter_reader.html) ── */
     #bottom-container {
@@ -184,7 +206,8 @@
     .bb-chap-menu-item {
       display: flex;
       align-items: center;
-      padding: 9px 14px;
+      justify-content: space-between;
+      padding: 10px 14px;
       font-family: 'Segoe UI', sans-serif;
       font-size: 0.82rem;
       font-weight: 500;
@@ -194,11 +217,16 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      gap: 10px;
     }
     .bb-chap-menu-item:hover { background: rgba(255,255,255,0.07); }
-    .bb-chap-menu-item.active { color: var(--theme-primary, #e94560); background: rgba(255,255,255,0.04); }
-    .bb-chap-menu-item.disabled { color: #555; cursor: default; font-weight: 700; }
-    .bb-chap-menu-item.disabled:hover { background: none; }
+    .bb-chap-menu-item.active {
+      color: var(--theme-primary, #e94560);
+      background: rgba(255,255,255,0.04);
+    }
+    .bb-chap-menu-item .bb-chap-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .bb-chap-menu-item .bb-chap-num { font-size: 0.68rem; color: #555; flex-shrink: 0; }
+    .bb-chap-menu-item.active .bb-chap-num { color: var(--theme-primary, #e94560); opacity: 0.7; }
 
     .bb-iconbtn {
       background: none;
@@ -300,14 +328,18 @@
 </div>
 
 <div id="epubViewport">
-  <iframe id="epubFrame" sandbox="allow-same-origin"></iframe>
-  <div id="epubTapOverlay"></div>
+  <div id="epubPageBox">
+    <iframe id="epubFrame" sandbox="allow-same-origin"></iframe>
+  </div>
+  <div class="sp-zone sp-zone-left" id="spZoneLeft"></div>
+  <div class="sp-zone sp-zone-center" id="spZoneCenter"></div>
+  <div class="sp-zone sp-zone-right" id="spZoneRight"></div>
 </div>
 
 <div id="bottom-container">
   <div class="bottombar" id="bottombar">
     <div class="bb-row">
-      <button type="button" class="bb-chapbtn" id="bbPrev" aria-label="Previous" title="Previous">
+      <button type="button" class="bb-chapbtn" id="bbPrevVol" aria-label="Previous volume" title="Previous volume">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
       </button>
       <div class="bb-chap-dropdown" id="bbChapDropdown">
@@ -317,7 +349,7 @@
         </button>
         <div class="bb-chap-menu" id="bbChapMenu" role="listbox"></div>
       </div>
-      <button type="button" class="bb-chapbtn" id="bbNext" aria-label="Next" title="Next">
+      <button type="button" class="bb-chapbtn" id="bbNextVol" aria-label="Next volume" title="Next volume">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
       </button>
       <button type="button" class="bb-iconbtn" id="bbSettingsBtn" aria-label="Settings" title="Settings">
@@ -338,12 +370,15 @@
 <script>
   const backBtn       = document.getElementById('backBtn');
   const topbar        = document.getElementById('topbar');
-  const topbarTitle   = document.getElementById('topbarTitle');
+  const topbarTitle    = document.getElementById('topbarTitle');
   const bottombar     = document.getElementById('bottombar');
+  const epubPageBox   = document.getElementById('epubPageBox');
   const epubFrame     = document.getElementById('epubFrame');
-  const epubTapOverlay = document.getElementById('epubTapOverlay');
-  const bbPrev        = document.getElementById('bbPrev');
-  const bbNext        = document.getElementById('bbNext');
+  const spZoneLeft    = document.getElementById('spZoneLeft');
+  const spZoneCenter  = document.getElementById('spZoneCenter');
+  const spZoneRight   = document.getElementById('spZoneRight');
+  const bbPrevVol     = document.getElementById('bbPrevVol');
+  const bbNextVol     = document.getElementById('bbNextVol');
   const bbChapBtn     = document.getElementById('bbChapBtn');
   const bbChapLabel   = document.getElementById('bbChapLabel');
   const bbChapMenu    = document.getElementById('bbChapMenu');
@@ -361,11 +396,16 @@
 
   const ASSET_PREFIX = `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/asset/`;
 
-  let spineCount   = 0;
-  let currentIndex = Math.max(0, startIndex);
-  let tocFlat      = []; // flattened {title, spineIndex, depth, navigable} for the dropdown
-  let lastHtml     = '';
-  let lastCss      = '';
+  let spineCount    = 0;
+  let currentIndex  = Math.max(0, startIndex);
+  let volumesList   = [];
+  let lastHtml      = '';
+  let lastCss       = '';
+  let pageW         = 0;
+  let pageH         = 0;
+  let textPageIdx   = 0;
+  let totalTextPages = 1;
+  let pageBreaks    = [0];
 
   function exitFullscreen() {
     if      (document.exitFullscreen)       document.exitFullscreen().catch(() => {});
@@ -379,17 +419,16 @@
 
   // ── TOP/BOTTOM BAR VISIBILITY ──
   // Mirrors chapter_reader.html's showAll()/hideAll() (tap-anywhere-to-toggle,
-  // auto-hide after 3s of no chrome interaction), but also flips the tap
-  // overlay's pointer-events -- see the CSS comment on #epubTapOverlay for why
-  // that's the mechanism that lets a tap reach the parent page at all despite
-  // chapter content living in a separate, sandboxed iframe document.
+  // auto-hide after 3s of no chrome interaction). Unlike the first version of
+  // this reader, the tap target is the permanent #spZoneCenter div living in
+  // the parent document (see below) -- not a toggled overlay reaching into the
+  // iframe -- so this works regardless of the iframe's own state.
   let barVisible = false;
   let barTimer   = null;
 
   function showAll() {
     topbar.classList.add('visible');
     bottombar.classList.add('visible');
-    epubTapOverlay.classList.add('inert');
     barVisible = true;
     document.body.classList.remove('cursor-hidden');
     clearTimeout(barTimer);
@@ -403,14 +442,9 @@
     topbar.classList.remove('visible');
     bottombar.classList.remove('visible');
     settingsPanel.classList.remove('open');
-    epubTapOverlay.classList.remove('inert');
     barVisible = false;
     document.body.classList.add('cursor-hidden');
   }
-
-  epubTapOverlay.addEventListener('click', () => {
-    if (!barVisible) showAll();
-  });
 
   // ── FETCH HELPERS ──
   async function apiFetch(path) {
@@ -418,35 +452,245 @@
     return r.json();
   }
 
-  // ── TOC / CHAPTER LOADING ──
-  function flattenToc(nodes, depth, out) {
-    for (const node of nodes) {
-      out.push({ title: node.title, spineIndex: node.spine_index, depth });
-      if (node.children && node.children.length) flattenToc(node.children, depth + 1, out);
-    }
-    return out;
+  function fontSizePctValue() {
+    return parseInt(localStorage.getItem('kinshoEpubFontSize') || '100', 10);
   }
 
-  function buildChapMenu() {
-    bbChapMenu.innerHTML = '';
-    for (const entry of tocFlat) {
-      const item = document.createElement('div');
-      const navigable = entry.spineIndex !== null;
-      item.className = 'bb-chap-menu-item' + (!navigable ? ' disabled' : '') +
-        (navigable && entry.spineIndex === currentIndex ? ' active' : '');
-      item.style.paddingLeft = (14 + entry.depth * 14) + 'px';
-      item.setAttribute('role', 'option');
-      item.textContent = entry.title;
-      if (navigable) {
-        item.addEventListener('click', (e) => {
-          e.stopPropagation();
-          closeBbMenu();
-          if (entry.spineIndex !== currentIndex) goToIndex(entry.spineIndex);
-        });
+  // Text is deliberately non-selectable in this reader (tap zones double as
+  // page-flip controls, same as chapter_reader.html's single-page mode) --
+  // applied via the iframe's own stylesheet since user-select can't be forced
+  // from outside a same-origin-but-separate document.
+  //
+  // Pagination is a fixed-height "picture frame" (#pg-outer, padded, clipped)
+  // around a naturally-tall, single-column flow of the chapter's content
+  // (#pg-inner, the book's own <div> -- retagged server-side from <body> so
+  // it can be nested -- at its normal width). A "page" is a vertical slice of
+  // that flow, shown by translateY-ing #pg-inner so the slice's own top lines
+  // up with the frame's top. This -- not CSS multi-column pagination, tried
+  // first -- is the reliable approach: multi-column overflow was found (via
+  // direct testing) to not be clippable by any combination of overflow/clip/
+  // contain in this rendering engine, visibly bleeding a sliver of the next
+  // column past the intended page edge even inside a same-sized iframe.
+  // Plain block-flow overflow clipping, used here, has none of that history.
+  function buildSrcdoc(html, css, w, h) {
+    const rewrittenHtml = html.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
+    const rewrittenCss  = css.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
+    // Single narrow, deliberate override -- not a general !important
+    // free-for-all -- so em/rem/%-based sizing in the book's own CSS scales
+    // proportionally. Absolute-pixel sizing in decorative front matter won't
+    // reflow; an acceptable known v1 limitation.
+    const fontSizeCss = `html { font-size: ${fontSizePctValue()}% !important; }`;
+    const layoutCss = `
+      html, body { margin: 0 !important; padding: 0 !important; overflow: hidden !important; }
+      #pg-outer {
+        width: ${w}px; height: ${h}px;
+        padding: 34px 30px;
+        box-sizing: border-box;
+        overflow: hidden;
+        background: #fff;
       }
-      bbChapMenu.appendChild(item);
+      #pg-inner { width: 100%; transition: transform 0.22s ease; user-select: none; }
+      #pg-inner * { -webkit-user-select: none; user-select: none; }
+    `;
+    return `<!doctype html><html><head><meta charset="utf-8">` +
+      `<style>${rewrittenCss}</style><style>${fontSizeCss}</style><style>${layoutCss}</style>` +
+      `</head><body><div id="pg-outer"><div id="pg-inner">${rewrittenHtml}</div></div></body></html>`;
+  }
+
+  function measurePageBox() {
+    const rect = epubPageBox.getBoundingClientRect();
+    return { w: Math.max(1, Math.round(rect.width)), h: Math.max(1, Math.round(rect.height)) };
+  }
+
+  function waitForFrameReady() {
+    return new Promise((resolve) => {
+      epubFrame.addEventListener('load', function onLoad() {
+        epubFrame.removeEventListener('load', onLoad);
+        const doc = epubFrame.contentDocument;
+        const imgs = doc ? Array.from(doc.images || []) : [];
+        if (imgs.length === 0) { resolve(); return; }
+        let remaining = imgs.length;
+        const done = () => { remaining -= 1; if (remaining <= 0) resolve(); };
+        imgs.forEach((img) => {
+          if (img.complete) done();
+          else { img.addEventListener('load', done, { once: true }); img.addEventListener('error', done, { once: true }); }
+        });
+      }, { once: true });
+    });
+  }
+
+  // Page-break Y-offsets that never fall inside a line of text: walks every
+  // text node's line boxes (via Range.getClientRects(), one rect per
+  // wrapped line) plus every image's own top/bottom, so a candidate break is
+  // always between two lines (or a line and an image), never through one.
+  // Greedily takes the furthest candidate that still fits within one frame
+  // height from the current break, same idea as real reflow-based paginators.
+  function computePageBreaks(doc, inner, availH) {
+    const originTop = inner.getBoundingClientRect().top;
+    const breakYs = new Set([0]);
+    const walker = doc.createTreeWalker(inner, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      if (!node.textContent.trim()) continue;
+      const range = doc.createRange();
+      range.selectNodeContents(node);
+      for (const r of range.getClientRects()) {
+        const y = Math.round(r.top - originTop);
+        if (y > 0) breakYs.add(y);
+      }
+    }
+    inner.querySelectorAll('img, hr, figure').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      breakYs.add(Math.max(0, Math.round(r.top - originTop)));
+      breakYs.add(Math.round(r.bottom - originTop));
+    });
+    const sorted = Array.from(breakYs).sort((a, b) => a - b);
+    const maxY = inner.scrollHeight;
+    const pageStarts = [0];
+    let current = 0;
+    while (current < maxY - 2) {
+      const target = current + availH;
+      let next = null;
+      for (const y of sorted) {
+        if (y > current && y <= target) next = y;
+        if (y > target) break;
+      }
+      if (next === null) next = current + availH; // no clean boundary found -- rare, hard cut
+      pageStarts.push(next);
+      current = next;
+    }
+    return pageStarts;
+  }
+
+  function showTextPage(idx, animate = true) {
+    textPageIdx = Math.min(Math.max(0, idx), totalTextPages - 1);
+    const inner = epubFrame.contentDocument.getElementById('pg-inner');
+    if (!animate) inner.style.transition = 'none';
+    inner.style.transform = `translateY(-${pageBreaks[textPageIdx]}px)`;
+    if (!animate) {
+      void inner.offsetHeight; // force reflow before re-enabling the transition
+      inner.style.transition = '';
     }
   }
+
+  // land: 'start' | 'end' | 'clamp' -- where to position within the newly
+  // rendered content (chapter start, chapter end for a backward chapter
+  // crossing, or the same text-page index as before for a resize/font-size
+  // change, clamped to the new page count).
+  async function renderChapterContent(html, css, { land = 'start' } = {}) {
+    lastHtml = html;
+    lastCss  = css;
+    const box = measurePageBox();
+    pageW = box.w;
+    pageH = box.h;
+    epubFrame.srcdoc = buildSrcdoc(html, css, pageW, pageH);
+    await waitForFrameReady();
+    const doc   = epubFrame.contentDocument;
+    const outer = doc.getElementById('pg-outer');
+    const inner = doc.getElementById('pg-inner');
+    const availH = outer.clientHeight; // content-box height, padding already excluded
+    pageBreaks = computePageBreaks(doc, inner, availH);
+    totalTextPages = pageBreaks.length;
+    let idx = 0;
+    if (land === 'end') idx = totalTextPages - 1;
+    else if (land === 'clamp') idx = textPageIdx;
+    showTextPage(idx, false);
+  }
+
+  async function loadSpineChapter(index, { land = 'start', saveProgress = true } = {}) {
+    const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`);
+    if (data.error) return;
+    currentIndex = data.spine_index;
+    spineCount   = data.spine_count;
+    await renderChapterContent(data.html, data.css, { land });
+    if (saveProgress) saveReadingProgress(currentIndex >= spineCount - 1 ? volumeId : null);
+  }
+
+  async function flipNext() {
+    if (textPageIdx < totalTextPages - 1) {
+      showTextPage(textPageIdx + 1);
+    } else if (currentIndex < spineCount - 1) {
+      await loadSpineChapter(currentIndex + 1, { land: 'start' });
+    }
+  }
+  async function flipPrev() {
+    if (textPageIdx > 0) {
+      showTextPage(textPageIdx - 1);
+    } else if (currentIndex > 0) {
+      await loadSpineChapter(currentIndex - 1, { land: 'end' });
+    }
+  }
+
+  spZoneCenter.addEventListener('click', () => { barVisible ? hideAll() : showAll(); });
+  spZoneLeft.addEventListener('click', () => flipPrev());
+  spZoneRight.addEventListener('click', () => flipNext());
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); flipNext(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); flipPrev(); }
+  });
+
+  async function saveReadingProgress(completedVolumeId) {
+    await fetch(apiUrl('/api/reading/progress'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        library_id:           libraryId,
+        manga_id:             mangaId,
+        chapter_id:           volumeId,
+        page:                 currentIndex,
+        completed_chapter_id: completedVolumeId,
+      }),
+    });
+  }
+
+  // ── VOLUME DROPDOWN (matches chapter_reader.html: the bottombar navigates
+  // between volumes of this manga, not between pages/chapters within one
+  // epub -- in-book navigation is the tap zones + page flip above only) ──
+  function buildVolumeMenu() {
+    bbChapMenu.innerHTML = '';
+    volumesList.forEach((vol, i) => {
+      const item = document.createElement('div');
+      item.className = 'bb-chap-menu-item' + (vol.id === volumeId ? ' active' : '');
+      item.setAttribute('role', 'option');
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'bb-chap-name';
+      nameSpan.textContent = vol.name;
+      const numSpan = document.createElement('span');
+      numSpan.className = 'bb-chap-num';
+      numSpan.textContent = `${i + 1} / ${volumesList.length}`;
+      item.appendChild(nameSpan);
+      item.appendChild(numSpan);
+
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeBbMenu();
+        if (vol.id !== volumeId) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${vol.id}`);
+      });
+      bbChapMenu.appendChild(item);
+    });
+
+    const current = volumesList.find((v) => v.id === volumeId);
+    bbChapLabel.textContent = current ? current.name : 'Volume';
+    const idx = volumesList.findIndex((v) => v.id === volumeId);
+    bbPrevVol.disabled = idx <= 0;
+    bbNextVol.disabled = idx < 0 || idx >= volumesList.length - 1;
+  }
+
+  function goToVolume(url) {
+    exitFullscreen();
+    window.location.replace(url);
+  }
+
+  bbPrevVol.addEventListener('click', () => {
+    const idx = volumesList.findIndex((v) => v.id === volumeId);
+    if (idx > 0) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${volumesList[idx - 1].id}`);
+  });
+  bbNextVol.addEventListener('click', () => {
+    const idx = volumesList.findIndex((v) => v.id === volumeId);
+    if (idx >= 0 && idx < volumesList.length - 1) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${volumesList[idx + 1].id}`);
+  });
 
   function openBbMenu() {
     bbChapMenu.classList.add('open');
@@ -467,89 +711,13 @@
   });
   document.addEventListener('click', () => closeBbMenu());
 
-  function updateNavButtons() {
-    bbPrev.disabled = currentIndex <= 0;
-    bbNext.disabled = currentIndex >= spineCount - 1;
-  }
-
-  function currentTocTitle() {
-    // Nearest TOC entry at or before the current spine index -- gives a
-    // sensible bottombar label even when currentIndex itself isn't a TOC
-    // entry (most spine positions aren't; only chapter starts are).
-    let label = null;
-    for (const entry of tocFlat) {
-      if (entry.spineIndex !== null && entry.spineIndex <= currentIndex) label = entry.title;
-      else if (entry.spineIndex !== null && entry.spineIndex > currentIndex) break;
-    }
-    return label;
-  }
-
-  function fontSizePctValue() {
-    return parseInt(localStorage.getItem('kinshoEpubFontSize') || '100', 10);
-  }
-
-  function buildSrcdoc(html, css) {
-    const rewrittenHtml = html.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
-    const rewrittenCss  = css.split(ASSET_PREFIX).join(apiUrl(ASSET_PREFIX));
-    // Single narrow, deliberate override -- not a general !important
-    // free-for-all -- so em/rem/%-based sizing in the book's own CSS scales
-    // proportionally. Absolute-pixel sizing in decorative front matter won't
-    // reflow; an acceptable known v1 limitation.
-    const fontSizeCss = `html { font-size: ${fontSizePctValue()}% !important; }`;
-    return `<!doctype html><html><head><meta charset="utf-8">` +
-      `<style>${rewrittenCss}</style><style>${fontSizeCss}</style>` +
-      `</head>${rewrittenHtml}</html>`;
-  }
-
-  async function loadChapter(index, { saveProgress = true } = {}) {
-    const data = await apiFetch(
-      `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`
-    );
-    if (data.error) return;
-    currentIndex = data.spine_index;
-    spineCount   = data.spine_count;
-    lastHtml     = data.html;
-    lastCss      = data.css;
-    epubFrame.srcdoc = buildSrcdoc(lastHtml, lastCss);
-    topbarTitle.textContent = data.title || currentTocTitle() || 'KINSHO';
-    bbChapLabel.textContent = currentTocTitle() || `${currentIndex + 1} / ${spineCount}`;
-    updateNavButtons();
-    buildChapMenu();
-    if (saveProgress) saveReadingProgress(currentIndex >= spineCount - 1 ? volumeId : null);
-  }
-
-  function goToIndex(index) {
-    if (index < 0 || index >= spineCount) return;
-    loadChapter(index);
-  }
-
-  async function saveReadingProgress(completedVolumeId) {
-    await fetch(apiUrl('/api/reading/progress'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        library_id:           libraryId,
-        manga_id:             mangaId,
-        chapter_id:           volumeId,
-        page:                 currentIndex,
-        completed_chapter_id: completedVolumeId,
-      }),
-    });
-  }
-
-  bbPrev.addEventListener('click', () => goToIndex(currentIndex - 1));
-  bbNext.addEventListener('click', () => goToIndex(currentIndex + 1));
-
   // ── SETTINGS PANEL (font size) ──
   fontSizeRange.value = fontSizePctValue();
   fontSizeValue.textContent = fontSizeRange.value + '%';
   fontSizeRange.addEventListener('input', () => {
     fontSizeValue.textContent = fontSizeRange.value + '%';
     localStorage.setItem('kinshoEpubFontSize', fontSizeRange.value);
-    // Rebuild the whole srcdoc from the already-fetched html/css rather than
-    // refetching from the server -- no network round-trip needed just to
-    // change one CSS rule.
-    if (lastHtml) epubFrame.srcdoc = buildSrcdoc(lastHtml, lastCss);
+    if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clamp' });
   });
 
   bbSettingsBtn.addEventListener('click', (e) => {
@@ -559,12 +727,26 @@
   settingsPanel.addEventListener('click', (e) => e.stopPropagation());
   document.addEventListener('click', () => settingsPanel.classList.remove('open'));
 
+  // ── RESIZE (page box's rendered pixel size can change responsively even
+  // though its aspect ratio doesn't -- rebuild pagination for the new size) ──
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clamp' });
+    }, 250);
+  });
+
   // ── INIT ──
   (async () => {
-    const tocData = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/toc`);
-    spineCount = tocData.spine_count || 0;
-    tocFlat    = flattenToc(tocData.toc || [], 0, []);
-    await loadChapter(Math.min(currentIndex, Math.max(0, spineCount - 1)), { saveProgress: false });
+    const [mangaData, volumesData] = await Promise.all([
+      apiFetch(`/api/manga/${libraryId}/${mangaId}`),
+      apiFetch(`/api/manga/${libraryId}/${mangaId}/volumes`),
+    ]);
+    topbarTitle.textContent = mangaData.name || 'KINSHO';
+    volumesList = volumesData.volumes || [];
+    buildVolumeMenu();
+    await loadSpineChapter(Math.max(0, startIndex), { land: 'start', saveProgress: false });
   })();
 </script>
 </body>

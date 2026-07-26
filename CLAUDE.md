@@ -1864,3 +1864,68 @@ loose-image reading. `chapter_reader.html` was not touched at all.
   TOC navigation jumps to the right chapter, font-size control visibly resizes text,
   repeated taps reliably show/hide the chrome, and double-clicking real paragraph text
   selects a word once the chrome is visible.
+
+### EPUB reader follow-up: fixed page, paginated flip, no selection (2026-07-26)
+
+Live-tested feedback on the v1 above, all addressed same day:
+
+- **Full-bleed layout looked "terrible"** on a wide monitor — text spanned the entire
+  window at an unreadable line length. Fixed with a fixed A4-portrait-ratio (`1/1.4142`)
+  page box, sized via CSS `width: min(90vw, 900px, 63.6vh)` + `aspect-ratio` (so it never
+  stretches to the window/container's own shape, just scales down proportionally on small
+  screens) instead of the iframe filling the viewport directly.
+- **Bottombar dropdown now lists volumes, not in-book chapters** — matches
+  `chapter_reader.html`'s actual navigational structure, which this v1 had gotten
+  backwards: the bottombar's dropdown + prev/next are *always* coarse chapter/volume-level
+  navigation in the existing reader (a full page load to a different volume/chapter), never
+  fine-grained page-by-page movement — that happens through a separate mechanism (the
+  page slider/scroll in the image reader; here, the tap zones below). Fetches
+  `/api/manga/{lib}/{id}/volumes` once at init; picking a different volume does a real
+  `window.location.replace()` navigation, identical in shape to `goToChapter()`. The
+  topbar was also corrected to show the constant manga name (matching
+  `chapter_reader.html`'s `titleEl.textContent = manga.name`) instead of the current
+  in-book chapter title, which this v1 had shown there instead.
+- **Text selection removed**, and **tap-to-toggle-UI + page-flip now use the same
+  three-zone model as `chapter_reader.html`'s single-page mode** (`.sp-zone-left/-center/-right`,
+  30/40/30 split) — living permanently in the parent document, not a
+  toggled overlay reaching into the iframe. This incidentally fixes v1's "click to hide UI
+  doesn't work" report too: since selection is no longer a design goal, the zones can be
+  permanent instead of conditionally `pointer-events`-gated, which sidesteps the cross-frame
+  click-bubbling limitation entirely rather than working around it. Arrow keys
+  (Left/Up = prev, Right/Down = next) do the same thing, matching the existing reader's
+  single-page-mode keyboard support.
+- **Real page-flip pagination, replacing v1's static single-screen-per-chapter view** —
+  and where an actual, reproducible rendering bug was found and fixed. First attempt used
+  the standard "CSS multi-column pagination" technique (each on-screen page = one
+  `column-width` column matching the viewport, turning a page = `translateX` by one
+  column-width) — confirmed via direct, isolated testing (a minimal non-app test page, no
+  Kinsho code involved) that **this rendering engine does not reliably clip multi-column
+  overflow** — a sliver of the next column's content visibly bled past the intended page
+  edge regardless of `overflow: hidden`, `overflow: clip`, or `contain: paint`, on the
+  column element itself or a wrapping ancestor, and reproduced even through an
+  actually-sized iframe matching the column width exactly (ruling out "just a wider test
+  viewport" as the explanation). Root-caused by testing systematically, not guessed at.
+  Replaced with **vertical DOM-slice pagination** instead: a fixed-size, padded "picture
+  frame" (`#pg-outer`, plain block element, `overflow: hidden`) around a naturally tall,
+  single-column flow of the chapter's content (`#pg-inner`) — a page is a vertical slice
+  of that flow, shown by `translateY`-ing `#pg-inner` so the slice's own top aligns with
+  the frame's top. This relies only on ordinary block-level overflow clipping (used
+  everywhere on the web, e.g. any "read more" fade box), which has none of the multi-column
+  clipping history above. Page-break Y-offsets are computed by walking every text node's
+  line boxes via `Range.getClientRects()` (one rect per wrapped line) plus every image's
+  own top/bottom, then greedily picking the furthest such boundary that still fits within
+  one frame-height of the previous break — so a break always falls between two lines (or a
+  line and an image), never through the middle of one, the same requirement any real
+  reflow-based paginator (Readium, EPUB.js in non-columns mode) has to satisfy. Reaching
+  the last page of a chapter and flipping further crosses into the next spine index
+  automatically (starting at its own page 0), and flipping backward from a chapter's own
+  first page lands on the *last* computed page of the previous one — verified across a
+  real multi-flip session, including a chapter boundary crossing with an embedded image
+  still rendering correctly on the far side of it.
+- **`epub_reader.py`'s `render_chapter()`** now retags the parsed body element from
+  `<body>` to `<div>` before serializing (attributes/classes kept as-is) — needed once the
+  returned markup had to be nested inside the frontend's own `#pg-inner` wrapper; a literal
+  second `<body>` can't be nested inside another element in a real document.
+- Font-size changes and window resizes both go through the same `renderChapterContent()`
+  path with `land: 'clamp'` (recompute page breaks for the new dimensions, reposition at
+  the same page index, clamped to the new total) — no separate code path for either.

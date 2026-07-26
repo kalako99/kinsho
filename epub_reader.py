@@ -233,6 +233,10 @@ def render_chapter(book, spine_docs: list, spine_index: int, asset_base_url: str
         return None
 
     _sanitize_and_rewrite(body_el, doc_name, asset_base_url)
+    # Retagged from body to div (attributes/classes kept as-is) so the
+    # frontend can safely nest this inside its own pagination wrapper --
+    # a literal second <body> can't be nested inside another element.
+    body_el.tag = "div"
     html = LH.tostring(body_el, encoding="unicode")
 
     css_parts = []
