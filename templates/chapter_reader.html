@@ -626,41 +626,62 @@
       background: #000;
       z-index: 1;
       overflow: hidden;
+    }
+    #singlePageView.active { display: block; }
+
+    /*
+     * #spStrip is single-page mode's own horizontal conveyor -- same
+     * pattern as #reader's vertical one (spacer-flanked sliding window of
+     * materialized slots, native scroll drives all physics), deliberately
+     * a separate/parallel implementation rather than a generalized version
+     * of #reader's, so a change here can't regress long-strip mode's own
+     * already-hardened scroll code. scroll-snap-stop:always is what
+     * actually delivers "one flick = one page" -- scroll-snap-type alone
+     * lets a fast flick sail past multiple snap points. overflow-anchor
+     * carries over from #reader for the same reason it's needed there:
+     * without it, native scroll-anchoring can apply its own extra
+     * correction on top of the spacer-based one whenever slots are
+     * added/removed, fighting the deliberately-no-manual-scrollTop-writes
+     * design of _spShiftWindow.
+     */
+    #spStrip {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scroll-snap-type: x mandatory;
+      overscroll-behavior-x: contain;
+      -webkit-overflow-scrolling: touch;
+      overflow-anchor: none;
+      scrollbar-width: none;
+    }
+    #spStrip::-webkit-scrollbar { display: none; }
+
+    .sp-spacer { flex: 0 0 auto; height: 100%; /* width set in JS */ }
+
+    .sp-slot {
+      flex: 0 0 auto;
+      width: var(--sp-slot-w);
+      height: 100%;
+      scroll-snap-align: start;
+      scroll-snap-stop: always;
+      display: flex;
       align-items: center;
       justify-content: center;
+      box-sizing: border-box;
+      /* Gap between "pages" is inner padding, not space between slot boxes
+         -- keeps every slot (materialized or virtual/spacer) exactly
+         viewport-width, so slot r's x-offset is just r * slot width with
+         no fencepost adjustment for gaps. */
+      padding: 0 calc(var(--sp-gap) / 2);
+      background: #000;
     }
-    #singlePageView.active { display: flex; }
-
-    #singlePageView img {
+    .sp-slot img {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
       display: block;
-      position: absolute;
-    }
-    /* invisible click zones */
-    .sp-zone {
-      position: absolute;
-      top: 0;
-      height: 100%;
-      width: 30%;
-      z-index: 2;
-      cursor: pointer;
-      outline: none;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-    }
-    .sp-zone-left  { left: 0; }
-    .sp-zone-right { right: 0; }
-    .sp-zone-center {
-      left: 30%;
-      width: 40%;
-      cursor: default;
-    }
-
-    /* strip padding between images */
-    #reader.padded .page-slot {
-      /* padding handled via JS gap on globalY */
     }
 
     /* ── BOOKMARK PANEL ── */
@@ -1359,10 +1380,7 @@
 
 <!-- Single page view -->
 <div id="singlePageView">
-  <img id="spImage" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;">
-  <div class="sp-zone sp-zone-left"   id="spZoneLeft"></div>
-  <div class="sp-zone sp-zone-center" id="spZoneCenter"></div>
-  <div class="sp-zone sp-zone-right"  id="spZoneRight"></div>
+  <div id="spStrip"></div>
 </div>
 
 <script>
@@ -1811,7 +1829,7 @@
   function loadEntryTier1(entry, signal, retriesLeft = 2) {
     if (entry.loaded) return;
     // Captured now (synchronously, when this load is scheduled) rather than
-    // read fresh inside _upgradeSpImage below -- a slow tier1 prefetch
+    // read fresh inside _upgradeSpSlot below -- a slow tier1 prefetch
     // (queued during a fast-reading burst, or just a slower link) can
     // resolve well after the user has since flipped past it again in
     // single-page mode. Cancelling a *pending* prefetch
@@ -1828,12 +1846,16 @@
     const apply = (url) => {
       if (!url || signal?.aborted) return;
       entry.url = url;
-      const _upgradeSpImage = () => {
-        // spImage is a swappable reference — always read it at call time, not at definition time.
+      const _upgradeSpSlot = () => {
+        // spAssignedSlot/spSlotPool are single-page mode's own slot pool,
+        // read fresh at call time (not at definition time) since which
+        // slot holds spCurrentIdx can change between when this load was
+        // scheduled and when it resolves.
         if (readerSettings.mode === 'single-page'
             && spManifest[spCurrentIdx] === entry
             && _spAnimFrame === scheduledSpFrame) {
-          spImage.src = url;
+          const spSi = spAssignedSlot[rOf(spCurrentIdx)];
+          if (spSi !== -1) spSlotPool[spSi].img.src = url;
         }
       };
       // entry.loaded is only set once success is confirmed -- see
@@ -1845,7 +1867,7 @@
       const onSuccess = () => {
         if (signal?.aborted) return;
         entry.loaded = true;
-        _upgradeSpImage();
+        _upgradeSpSlot();
       };
       const onFail = () => {
         if (signal?.aborted || retriesLeft <= 0) return;
@@ -3298,23 +3320,307 @@
   }
 
   // ── SINGLE PAGE MODE ──
+  // A horizontal conveyor -- deliberately a separate, parallel
+  // implementation from #reader's vertical one, not a generalized version
+  // of it. #reader's conveyor has a long history of hard-won, easy-to-
+  // silently-break fixes (spacer-based scroll correction instead of manual
+  // scrollTop writes so native momentum is never fought, overflow-anchor,
+  // etc.) -- touching it to make it axis-agnostic risks regressing
+  // something that already works well. Every slot here is exactly
+  // viewport-width (unlike long-strip, where each page has a different
+  // height from dims.json), which is a real simplification long-strip
+  // can't have: a slot's x-offset is trivial multiplication, not a running
+  // sum of per-page geometry.
+  //
+  // This replaced two earlier, buggier designs: first a two-element
+  // (spImageA/spImageB) CSS slide-transition swap that kept showing
+  // whatever page an element last held until its new src finished loading
+  // (stale-page flashes), then a "race a thumbnail fallback against the
+  // real image" patch on top of that which corrupted the swap state
+  // further (two independent reveal sequences fighting over the same
+  // element pair). Both were replaced with a single persistent <img> and
+  // no animation at all to fix correctness, and now with this: native CSS
+  // scroll-snap driving the actual physics/animation instead of hand-rolled
+  // JS timing, matching the "trust native scrolling" approach #reader's
+  // own conveyor already relies on successfully.
   const singlePageView = document.getElementById('singlePageView');
-  // A single persistent <img>, reassigned directly on each flip -- matches
-  // long-strip mode's own slot images. Used to be two alternating elements
-  // with a CSS slide-transition swapping which was foreground/background;
-  // that machinery went through several rounds of bugs (stale-page flashes,
-  // then a racing thumbnail fallback corrupting the swap state) without
-  // ever converging, so it was removed in favor of the same simple
-  // direct-src-assignment approach long-strip mode already uses safely.
-  const spImage = document.getElementById('spImage');
-  const spZoneLeft     = document.getElementById('spZoneLeft');
-  const spZoneCenter   = document.getElementById('spZoneCenter');
-  const spZoneRight    = document.getElementById('spZoneRight');
+  const spStrip         = document.getElementById('spStrip');
 
   // All pages flattened in order (same order as manifest)
   let spCurrentIdx = 0; // index into manifest for current chapter pages
   const spManifest = manifest.filter(e => e.chapterId === chapterId);
   let lastSeenChapterId = chapterId;
+
+  const SP_SLOT_COUNT  = 12; // materialized slots at any time -- much smaller
+                              // than #reader's SLOT_COUNT=80: scroll-snap-stop:
+                              // always structurally caps any one flick to ~1
+                              // page, so this only has to survive gesture
+                              // repetition, not one unbounded fling.
+  const SP_EDGE_MARGIN = 3;  // recenter once within this many slots of an edge
+  const SP_GAP         = 24; // px "padding" between pages -- always on, and
+                              // deliberately independent of long-strip's
+                              // PAGE_GAP/readerSettings.padding (that's a
+                              // user-toggleable setting scoped entirely to
+                              // long-strip mode, both in code and in the
+                              // settings-panel UI; this is a fixed constant
+                              // per "There will always be padding").
+
+  spStrip.style.setProperty('--sp-slot-w', viewW + 'px');
+  spStrip.style.setProperty('--sp-gap', SP_GAP + 'px');
+
+  // Permanent fixtures flanking the materialized slot pool -- mirrors
+  // #reader-inner's topSpacer/bottomSpacer. Their widths keep spStrip's
+  // real scrollWidth equal to spManifest.length * viewW at all times,
+  // regardless of how many slots are actually materialized.
+  const spLeftSpacer  = document.createElement('div');
+  const spRightSpacer = document.createElement('div');
+  spLeftSpacer.className = spRightSpacer.className = 'sp-spacer';
+  spStrip.appendChild(spLeftSpacer);
+  spStrip.appendChild(spRightSpacer);
+
+  // spSlotPool[k] corresponds to reading-order position (spWindowLo + k).
+  // Window management lives entirely in reading-order space ("r"), not
+  // manifest-index space -- r is always physically left-to-right ascending
+  // regardless of reading direction, which is what lets RTL be handled in
+  // one place (rOf(), further down) instead of threaded through every
+  // window-management formula. Because every slot is the same width,
+  // spStrip.scrollLeft IS the source of truth for current position -- no
+  // virtualY-style shadow variable needed, unlike #reader (which needs one
+  // precisely because its page heights vary).
+  const spSlotPool = [];
+  let spWindowLo = 0, spWindowHi = -1; // -1 = no window materialized yet
+  let spAssignedSlot = new Int32Array(Math.max(1, spManifest.length)).fill(-1); // r -> slot pool index
+
+  function _spMakeSlotEl() {
+    const el  = document.createElement('div');
+    el.className = 'sp-slot';
+    const img = document.createElement('img');
+    img.alt = 'Page';
+    el.appendChild(img);
+    return { el, img };
+  }
+
+  function _spCurrentR() {
+    return Math.round(spStrip.scrollLeft / viewW);
+  }
+
+  function _spSyncSpacers() {
+    if (spManifest.length === 0) {
+      spLeftSpacer.style.width = '0px';
+      spRightSpacer.style.width = '0px';
+      return;
+    }
+    spLeftSpacer.style.width  = (spWindowLo * viewW) + 'px';
+    spRightSpacer.style.width = Math.max(0, (spManifest.length - 1 - spWindowHi) * viewW) + 'px';
+  }
+
+  function _spClearSlotPool() {
+    for (const { el } of spSlotPool) el.remove();
+    spSlotPool.length = 0;
+  }
+
+  // Full window replacement -- big jumps only (bookmark, slider, mode
+  // activation). Instant, no smooth scroll: animating across dozens of
+  // unmaterialized pages would just show blanks.
+  function _spRebuildWindow(newWindowLo, targetR) {
+    for (let r = spWindowLo; r <= spWindowHi; r++) {
+      const entry = spManifest[rOf(r)];
+      if (entry) entry.loaded = false;
+      spAssignedSlot[r] = -1;
+    }
+    _spClearSlotPool();
+
+    if (spManifest.length === 0) {
+      spWindowLo = 0; spWindowHi = -1;
+      _spSyncSpacers();
+      return;
+    }
+
+    const count = Math.min(SP_SLOT_COUNT, spManifest.length);
+    spWindowLo = Math.max(0, Math.min(newWindowLo, spManifest.length - count));
+    spWindowHi = spWindowLo + count - 1;
+
+    const frag = document.createDocumentFragment();
+    for (let r = spWindowLo; r <= spWindowHi; r++) {
+      const { el, img } = _spMakeSlotEl();
+      frag.appendChild(el);
+      spSlotPool.push({ el, img });
+      spAssignedSlot[r] = r - spWindowLo;
+    }
+    spStrip.insertBefore(frag, spRightSpacer);
+
+    _spSyncSpacers();
+    spStrip.scrollLeft = targetR * viewW;
+
+    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
+    _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.max(0, Math.min(spManifest.length - 1, targetR)))]));
+  }
+
+  // Incremental add/remove at one end for ordinary flip-by-flip movement.
+  // Never writes scrollLeft -- relies entirely on _spSyncSpacers()
+  // recomputing spacer widths so removing N slots from one end while
+  // adding N to the other is a no-op on total layout. This is the single
+  // most load-bearing detail carried over from #reader's own
+  // _shiftConveyorWindow: an earlier version of that manually corrected
+  // scrollTop and it fought native scroll momentum -- relying purely on
+  // spacer bookkeeping is what let native momentum/snap drive unmodified.
+  function _spShiftWindow(delta) {
+    if (delta === 0) return;
+    if (delta > 0) {
+      const frag = document.createDocumentFragment();
+      for (let k = 0; k < delta; k++) {
+        const oldR = spWindowLo + k;
+        const oldEntry = spManifest[rOf(oldR)];
+        if (oldEntry) oldEntry.loaded = false;
+        spAssignedSlot[oldR] = -1;
+        spSlotPool[k].el.remove();
+
+        const newR = spWindowHi + 1 + k;
+        const { el } = _spMakeSlotEl();
+        frag.appendChild(el);
+        _spLoadEntry(spManifest[rOf(newR)]);
+      }
+      spStrip.insertBefore(frag, spRightSpacer);
+      spWindowLo += delta;
+      spWindowHi += delta;
+    } else {
+      const n = -delta;
+      const frag = document.createDocumentFragment();
+      for (let k = n - 1; k >= 0; k--) {
+        const newR = spWindowLo - 1 - k;
+        const { el } = _spMakeSlotEl();
+        frag.appendChild(el);
+        _spLoadEntry(spManifest[rOf(newR)]);
+      }
+      spStrip.insertBefore(frag, spLeftSpacer.nextSibling);
+      for (let k = 0; k < n; k++) {
+        const oldR = spWindowHi - k;
+        const oldEntry = spManifest[rOf(oldR)];
+        if (oldEntry) oldEntry.loaded = false;
+        spAssignedSlot[oldR] = -1;
+        spSlotPool[spSlotPool.length - 1 - k].el.remove();
+      }
+      spWindowLo -= n;
+      spWindowHi -= n;
+    }
+
+    // Rebuild spSlotPool from the live DOM, same robustness reasoning as
+    // #reader's own _shiftConveyorWindow: correct regardless of exactly
+    // how many slots were added/removed.
+    spSlotPool.length = 0;
+    let node = spLeftSpacer.nextSibling;
+    let k = 0;
+    while (node && node !== spRightSpacer) {
+      spSlotPool.push({ el: node, img: node.querySelector('img') });
+      spAssignedSlot[spWindowLo + k] = k;
+      node = node.nextSibling;
+      k++;
+    }
+    _spSyncSpacers();
+    _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.floor((spWindowLo + spWindowHi) / 2))]));
+  }
+
+  function spRecenterWindow() {
+    if (spManifest.length === 0) return;
+    const currentR = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
+    const count  = Math.min(SP_SLOT_COUNT, spManifest.length);
+    const target = Math.max(0, Math.min(currentR - Math.floor(count / 2), spManifest.length - count));
+    const delta  = target - spWindowLo;
+    if (delta === 0) return;
+    if (Math.abs(delta) >= count) _spRebuildWindow(target, currentR);
+    else _spShiftWindow(delta);
+  }
+
+  function _spSettleCurrentIdx() {
+    if (spManifest.length === 0) return;
+    const r = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
+    const idx = rOf(r); // self-inverse
+    if (idx !== spCurrentIdx) spGotoIdx(idx);
+  }
+
+  // Fallback for browsers without native scrollend: poll via rAF and
+  // require 2 consecutive stable ticks (not just 1) before considering the
+  // scroll settled -- mirrors #reader's own _settledTick fallback, since a
+  // single tick of "no change" isn't a reliable enough signal that active
+  // scrolling has actually stopped rather than just landing between frames.
+  let _spSettledRAF = null;
+  function _spScheduleSettledCheck() {
+    if (_spSettledRAF) cancelAnimationFrame(_spSettledRAF);
+    let lastLeft = spStrip.scrollLeft;
+    let stableTicks = 0;
+    const tick = () => {
+      if (spStrip.scrollLeft === lastLeft) {
+        stableTicks++;
+        if (stableTicks >= 2) {
+          _spSettledRAF = null;
+          spRecenterWindow();
+          _spSettleCurrentIdx();
+          return;
+        }
+      } else {
+        stableTicks = 0;
+        lastLeft = spStrip.scrollLeft;
+      }
+      _spSettledRAF = requestAnimationFrame(tick);
+    };
+    _spSettledRAF = requestAnimationFrame(tick);
+  }
+
+  spStrip.addEventListener('scroll', () => {
+    const r = _spCurrentR();
+    if (r - spWindowLo < SP_EDGE_MARGIN || spWindowHi - r < SP_EDGE_MARGIN) spRecenterWindow();
+    if (!supportsScrollEnd) _spScheduleSettledCheck();
+  }, { passive: true });
+  if (supportsScrollEnd) {
+    spStrip.addEventListener('scrollend', () => {
+      spRecenterWindow();
+      _spSettleCurrentIdx();
+    }, { passive: true });
+  }
+
+  // Reading-order <-> manifest-index conversion, self-inverse
+  // (rOf(rOf(x)) === x) -- the one place RTL is handled; every window-
+  // management function above operates purely in r-space and needs no
+  // direction branch of its own. The 4 existing physical-direction
+  // ternaries (tap zones, keyboard) don't need this at all -- they already
+  // only ever call spForward/spBackward in index-space.
+  const isRTL = () => readerSettings.direction === 'rtl';
+  function rOf(idx) {
+    return isRTL() ? (spManifest.length - 1 - idx) : idx;
+  }
+
+  // Assign a URL to a spManifest entry and paint it into whichever slot (if
+  // any) is currently assigned to it -- parallel to loadEntry/
+  // _applyUrlToSlot above, but targeting spAssignedSlot/spSlotPool since
+  // those write into #reader's own slot pool, not this one.
+  function _spLoadEntry(entry, retriesLeft = 2) {
+    if (!entry || entry.loaded) return;
+    if (entry.url) {
+      _spApplyUrlToSlot(entry, retriesLeft);
+      return;
+    }
+    ensureChapterUrls(entry.chapterId).then(urls => {
+      entry.url = urls[entry.localIdx] || '';
+      _spApplyUrlToSlot(entry, retriesLeft);
+    });
+  }
+
+  function _spApplyUrlToSlot(entry, retriesLeft = 2) {
+    if (!entry.url) return;
+    const idx = spManifest.indexOf(entry);
+    if (idx === -1) return;
+    const si = spAssignedSlot[rOf(idx)];
+    if (si === -1) return;
+    const imgEl = spSlotPool[si].img;
+    imgEl.onload = () => { entry.loaded = true; };
+    imgEl.onerror = () => {
+      if (retriesLeft > 0) {
+        setTimeout(() => _spApplyUrlToSlot(entry, retriesLeft - 1), 500);
+      }
+    };
+    imgEl.src = entry.url;
+  }
+
   // Guards the "reached the true end of the manga" completion save in
   // syncScrollPosition (long-strip mode) so it only fires once per page load.
   let finalChapterCompletionSaved = false;
@@ -3411,29 +3717,30 @@
 
     spCurrentIdx = idx;
     const entry  = spManifest[idx];
-    const myFrame = ++_spAnimFrame;
+    ++_spAnimFrame; // invalidates any in-flight loadEntryTier1 slot-upgrade scheduled for a previous flip
 
-    // Reassign the single persistent <img> directly -- same mechanism
-    // long-strip mode's slot images already use safely. The browser's own
-    // native behavior (keep showing the current pixels until the new src
-    // finishes loading, then swap in place, atomically, with no
-    // intermediate state) is exactly what's wanted here; there's no second
-    // element or animation timing left to coordinate, so there's nothing
-    // left that can show the wrong page's content.
-    const applyEntry = () => {
-      if (_spAnimFrame !== myFrame) return;
-      spImage.onload = () => { entry.loaded = true; };
-      spImage.src = entry.url;
-    };
-
-    if (entry.url) {
-      applyEntry();
+    // Materialize/scroll to the target -- the strip's own CSS scroll-snap
+    // drives the actual page-turn animation natively; this only has to
+    // make sure the right slot is ready and scrolled to.
+    const targetR = rOf(idx);
+    const spCount = Math.min(SP_SLOT_COUNT, spManifest.length);
+    if (spWindowHi === -1 || Math.abs(targetR - _spCurrentR()) > SP_SLOT_COUNT) {
+      // spWindowHi === -1 explicitly covers "window never materialized
+      // yet" (the very first call, from activateSinglePageMode) -- the
+      // distance check alone is wrong there: spStrip.scrollLeft starts at
+      // 0 (untouched DOM), so a small startIdx can read as a small
+      // "distance" even though there's no window to shift from yet, which
+      // would wrongly route into _spShiftWindow (nothing materialized to
+      // remove slots from).
+      const windowLo = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spManifest.length - spCount));
+      _spRebuildWindow(windowLo, targetR);
     } else {
-      ensureChapterUrls(entry.chapterId).then(urls => {
-        entry.url = urls[entry.localIdx] || '';
-        if (entry.url && _spAnimFrame === myFrame) applyEntry();
-      });
+      if (targetR < spWindowLo || targetR > spWindowHi) {
+        _spShiftWindow(targetR - Math.floor((spWindowLo + spWindowHi) / 2));
+      }
+      spStrip.scrollTo({ left: targetR * viewW, behavior: 'smooth' });
     }
+    _spLoadEntry(entry);
 
     const globalIdx = manifest.indexOf(entry);
     if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
@@ -3475,89 +3782,34 @@
   function spForward()  { spGotoIdx(spCurrentIdx + 1); }
   function spBackward() { spGotoIdx(spCurrentIdx - 1); }
   function spNext() { readerSettings.direction === 'ltr' ? spForward()  : spBackward(); }
-  // ── SINGLE PAGE DRAG / SWIPE ──
-  // Mouse drag and touch swipe to change pages in single-page mode.
-  // A move of > SP_DRAG_THRESHOLD px commits the flip; releasing before
-  // that threshold counts as a tap and is handled by the zone click listeners.
-  const SP_DRAG_THRESHOLD = 50; // px to commit a page flip
-  let _spDragActive   = false;
-  let _spDragStartX   = 0;
-  let _spDragMoved    = false;
-
-  function _spDragStart(clientX) {
-    if (readerSettings.mode !== 'single-page') return;
-    _spDragActive = true;
-    _spDragMoved  = false;
-    _spDragStartX = clientX;
-  }
-
-  function _spDragMove(clientX) {
-    if (!_spDragActive) return;
-    if (Math.abs(clientX - _spDragStartX) > 8) _spDragMoved = true;
-  }
-
-  function _spDragEnd(clientX) {
-    if (!_spDragActive) return;
-    _spDragActive = false;
-    if (!_spDragMoved) return; // treat as tap — let click listeners handle it
-    const dx = clientX - _spDragStartX;
-    if (Math.abs(dx) < SP_DRAG_THRESHOLD) return; // not enough movement
-    // Swipe left (dx < 0) → go forward in LTR, backward in RTL
-    if (dx < 0) spNext(); else spPrev();
-  }
-
-  // Mouse events on the single-page view
-  singlePageView.addEventListener('mousedown', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    _spDragStart(e.clientX);
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    _spDragMove(e.clientX);
-  });
-  window.addEventListener('mouseup', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    const wasMoved = _spDragMoved;
-    _spDragEnd(e.clientX);
-    // If it was a real drag, stop the event from firing the zone click listeners
-    if (wasMoved) e.stopImmediatePropagation();
-  });
-
-  // Touch events on the single-page view
-  singlePageView.addEventListener('touchstart', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    _spDragStart(e.touches[0].clientX);
-  }, { passive: true });
-  singlePageView.addEventListener('touchmove', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    _spDragMove(e.touches[0].clientX);
-    if (_spDragMoved) e.preventDefault(); // prevent page pan while swiping
-  }, { passive: false });
-  singlePageView.addEventListener('touchend', (e) => {
-    if (readerSettings.mode !== 'single-page') return;
-    const clientX = e.changedTouches[0].clientX;
-    const wasMoved = _spDragMoved;
-    _spDragEnd(clientX);
-    // Suppress the synthetic click that would follow if this was a real swipe
-    if (wasMoved && Math.abs(clientX - _spDragStartX) >= SP_DRAG_THRESHOLD) {
-      e.preventDefault();
-    }
-  }, { passive: false });
   function spPrev() { readerSettings.direction === 'ltr' ? spBackward() : spForward();  }
 
-  spZoneCenter.addEventListener('click', (e) => {
-    e.stopPropagation();
-    barVisible ? hideAll() : showAll();
-  });
-  spZoneLeft.addEventListener('click', (e) => {
-    e.stopPropagation();
-    // Physical left = backward in LTR, forward in RTL
-    readerSettings.direction === 'ltr' ? spBackward() : spForward();
-  });
-  spZoneRight.addEventListener('click', (e) => {
-    e.stopPropagation();
-    // Physical right = forward in LTR, backward in RTL
-    readerSettings.direction === 'ltr' ? spForward() : spBackward();
+  // ── SINGLE PAGE TAP ZONES ──
+  // One click listener with an x-position check, not overlay divs -- an
+  // overlay sitting on top of the strip to catch taps would intercept/
+  // block the native touch-scroll gestures this mode's actual page-turn
+  // mechanic now depends on (the same tension already solved this way for
+  // the EPUB text reader's tap-vs-scroll handling, templates/epub_reader.html).
+  // Unlike that reader, single-page mode's swipe and scroll are the same
+  // axis here, so there's no secondary gesture to disambiguate -- mobile
+  // browsers already suppress the synthetic click after a touch-drag that
+  // produced native scrolling, and desktop mouse-drag doesn't scroll
+  // overflow-x:auto at all, so a click is unambiguous by construction.
+  // This also replaces the old _spDragStart/_spDragMove/_spDragEnd
+  // threshold system entirely -- native scroll-snap handles the actual
+  // swipe-to-flip physics now, so there's no gesture left for JS to track.
+  spStrip.addEventListener('click', (e) => {
+    if (readerSettings.mode !== 'single-page') return;
+    const frac = e.clientX / viewW;
+    if (frac < 0.3) {
+      // Physical left = backward in LTR, forward in RTL
+      readerSettings.direction === 'ltr' ? spBackward() : spForward();
+    } else if (frac > 0.7) {
+      // Physical right = forward in LTR, backward in RTL
+      readerSettings.direction === 'ltr' ? spForward() : spBackward();
+    } else {
+      barVisible ? hideAll() : showAll();
+    }
   });
 
   // Keyboard / controller arrow navigation (works in both modes)
