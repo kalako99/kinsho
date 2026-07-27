@@ -3464,59 +3464,95 @@
 
     // Kick off the simultaneous slide: outgoing (spImage) slides out,
     // incoming (spImageBg) slides in at the same time, then they swap roles.
+    //
+    // The visible reveal of spImageBg is gated on ITS OWN decode() finishing
+    // -- not just on entry.loaded being true and not just on a fixed dur-ms
+    // timer, which is what this used to be. entry.loaded only confirms some
+    // *other* element (a prefetch probe, a different reused slot) finished
+    // decoding that URL; assigning the same URL to spImageBg can still cost
+    // this specific element a real decode (large 3200x2220+ pages, worse
+    // under memory pressure after a session's worth of reused decodes --
+    // matching reports of this starting only after several pages, not
+    // immediately). The old fixed setTimeout(dur) promoted regardless of
+    // whether spImageBg had actually finished painting the new page, so a
+    // slow decode meant the "promoted" element kept showing whatever it
+    // held before -- the stale-page flash. Now the whole transition (slide
+    // start, not just the final promotion) waits for decode, so spImageBg
+    // is never made visible before it's actually showing the right content.
     const _runSlide = (incomingUrl) => {
       if (_spAnimFrame !== myFrame) return;
 
-      if (dur <= 0) {
-        // No animation — instant swap.
-        spImage.src = incomingUrl;
-        spImageBg.style.visibility = 'hidden';
-        return;
-      }
-
-      // Place the incoming image in the background slot, off-screen.
       spImageBg.src = incomingUrl;
-      spImageBg.style.visibility = 'visible';
-      spImageBg.style.animationDuration = dur + 'ms';
-      spImageBg.classList.add('sp-anim', inClass);
+      const decodeReady = (spImageBg.decode ? spImageBg.decode() : Promise.resolve()).catch(() => {});
 
-      // Slide the current image out.
-      spImage.style.animationDuration = dur + 'ms';
-      spImage.classList.add('sp-anim', outClass);
-
-      _spAnimTimer = setTimeout(() => {
+      decodeReady.then(() => {
         if (_spAnimFrame !== myFrame) return;
-        // Swap roles: bg becomes the new foreground.
-        spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right');
-        spImage.style.animationDuration = '';
-        spImage.style.visibility = 'hidden';
-        spImageBg.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
-        spImageBg.style.animationDuration = '';
-        // Promote bg → fg
-        [spImage, spImageBg] = [spImageBg, spImage];
-        spImage.style.visibility   = 'visible';
-        spImageBg.style.visibility = 'hidden';
-      }, dur);
+
+        if (dur <= 0) {
+          // No animation — instant swap.
+          spImage.src = incomingUrl;
+          spImageBg.style.visibility = 'hidden';
+          return;
+        }
+
+        // Place the incoming image in the background slot, off-screen.
+        spImageBg.style.visibility = 'visible';
+        spImageBg.style.animationDuration = dur + 'ms';
+        spImageBg.classList.add('sp-anim', inClass);
+
+        // Slide the current image out.
+        spImage.style.animationDuration = dur + 'ms';
+        spImage.classList.add('sp-anim', outClass);
+
+        _spAnimTimer = setTimeout(() => {
+          if (_spAnimFrame !== myFrame) return;
+          // Swap roles: bg becomes the new foreground.
+          spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right');
+          spImage.style.animationDuration = '';
+          spImage.style.visibility = 'hidden';
+          spImageBg.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
+          spImageBg.style.animationDuration = '';
+          // Promote bg → fg
+          [spImage, spImageBg] = [spImageBg, spImage];
+          spImage.style.visibility   = 'visible';
+          spImageBg.style.visibility = 'hidden';
+        }, dur);
+      });
     };
 
-    // entry.url being known is NOT the same as the image actually being ready
-    // to display -- for loose/uncompressed sources especially, entry.url is
-    // computed synchronously from dims.json the moment it's askable, long
-    // before any prefetch for it has actually finished. Showing it anyway
-    // used to just assign the url straight onto spImageBg, and a browser
-    // <img> element keeps rendering whatever it last displayed until a newly
-    // assigned src finishes loading -- so whichever page that element held
-    // before (not necessarily the immediately-previous page, since these two
-    // elements get reused across the whole session) would flash first. Now
-    // gated on entry.loaded, the one signal that actually confirms the bytes
-    // finished fetching+decoding, instead of trusting entry.url alone.
-    const beginLoadAndUpgrade = () => {
+    // entry.loaded is NOT a reliable "is this already cached" signal across
+    // a chapter boundary: goToChapter does a full page reload, which
+    // constructs a brand new entry object (loaded: false) for page 1 of the
+    // new chapter regardless of whether the browser's own HTTP cache -- warmed
+    // by the eager cross-chapter prefetch further down, from *before* the
+    // reload happened -- already has the bytes. Gating the immediate-vs-thumb
+    // decision on entry.loaded meant every chapter open showed the thumbnail
+    // first even when the real image was already sitting in cache ready to
+    // go, unlike long-strip mode which has no such per-page gate.
+    //
+    // So: always attempt the full-resolution image directly first -- _runSlide
+    // already waits on its own decode() before ever revealing anything, so
+    // this is safe even on a genuine cache miss, it just won't reveal until
+    // ready. Only fall back to the (always-cheap, fast) thumbnail if the full
+    // image genuinely hasn't resolved within a short grace window, instead of
+    // unconditionally showing it first.
+    const SP_THUMB_FALLBACK_MS = 150;
+    const showWithThumbFallback = () => {
+      let settled = false;
+      const fallback = setTimeout(() => {
+        if (settled || _spAnimFrame !== myFrame) return;
+        _runSlide(thumbUrl(entry));
+      }, SP_THUMB_FALLBACK_MS);
       const img = new Image();
       img.src = entry.url;
       img.decode().then(() => {
+        settled = true;
+        clearTimeout(fallback);
         entry.loaded = true;
-        if (_spAnimFrame === myFrame) spImage.src = entry.url;
+        if (_spAnimFrame === myFrame) _runSlide(entry.url);
       }).catch(() => {
+        settled = true;
+        clearTimeout(fallback);
         // Leave entry.loaded false -- the parallel tier-1 prefetch for this
         // same entry (always scheduled right after this flip, see
         // _spSchedulePrefetch below) retries independently and will apply
@@ -3524,19 +3560,13 @@
       });
     };
 
-    if (entry.url && entry.loaded) {
-      _runSlide(entry.url);
-    } else if (entry.url) {
-      // Show the (already-correct) thumb as a placeholder instead of a
-      // possibly-stale full-res frame, then upgrade once actually ready.
-      _runSlide(thumbUrl(entry));
-      beginLoadAndUpgrade();
+    if (entry.url) {
+      showWithThumbFallback();
     } else {
-      _runSlide(thumbUrl(entry));
       ensureChapterUrls(entry.chapterId).then(urls => {
         entry.url = urls[entry.localIdx] || '';
         if (!entry.url || _spAnimFrame !== myFrame) return;
-        beginLoadAndUpgrade();
+        showWithThumbFallback();
       });
     }
 
