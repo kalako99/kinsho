@@ -3499,33 +3499,44 @@
       }, dur);
     };
 
-    if (entry.url) {
-      if (isCompressed && dur > 0) {
-        const img = new Image();
-        img.src = entry.url;
-        const capturedUrl = entry.url;
-        img.decode()
-          .then(() => _runSlide(capturedUrl))
-          .catch(() => _runSlide(capturedUrl));
-      } else {
-        _runSlide(entry.url);
-      }
+    // entry.url being known is NOT the same as the image actually being ready
+    // to display -- for loose/uncompressed sources especially, entry.url is
+    // computed synchronously from dims.json the moment it's askable, long
+    // before any prefetch for it has actually finished. Showing it anyway
+    // used to just assign the url straight onto spImageBg, and a browser
+    // <img> element keeps rendering whatever it last displayed until a newly
+    // assigned src finishes loading -- so whichever page that element held
+    // before (not necessarily the immediately-previous page, since these two
+    // elements get reused across the whole session) would flash first. Now
+    // gated on entry.loaded, the one signal that actually confirms the bytes
+    // finished fetching+decoding, instead of trusting entry.url alone.
+    const beginLoadAndUpgrade = () => {
+      const img = new Image();
+      img.src = entry.url;
+      img.decode().then(() => {
+        entry.loaded = true;
+        if (_spAnimFrame === myFrame) spImage.src = entry.url;
+      }).catch(() => {
+        // Leave entry.loaded false -- the parallel tier-1 prefetch for this
+        // same entry (always scheduled right after this flip, see
+        // _spSchedulePrefetch below) retries independently and will apply
+        // itself via loadEntryTier1's own onSuccess once it succeeds.
+      });
+    };
+
+    if (entry.url && entry.loaded) {
+      _runSlide(entry.url);
+    } else if (entry.url) {
+      // Show the (already-correct) thumb as a placeholder instead of a
+      // possibly-stale full-res frame, then upgrade once actually ready.
+      _runSlide(thumbUrl(entry));
+      beginLoadAndUpgrade();
     } else {
-      // Show thumb immediately as the incoming page while the real URL loads.
       _runSlide(thumbUrl(entry));
       ensureChapterUrls(entry.chapterId).then(urls => {
         entry.url = urls[entry.localIdx] || '';
         if (!entry.url || _spAnimFrame !== myFrame) return;
-        // Silently upgrade the now-foreground image src (no re-animation needed).
-        if (isCompressed) {
-          const img = new Image();
-          img.src = entry.url;
-          img.decode()
-            .then(() => { if (_spAnimFrame === myFrame) spImage.src = entry.url; })
-            .catch(() => { if (_spAnimFrame === myFrame) spImage.src = entry.url; });
-        } else {
-          spImage.src = entry.url;
-        }
+        beginLoadAndUpgrade();
       });
     }
 
