@@ -638,24 +638,6 @@
       display: block;
       position: absolute;
     }
-    /* ── SINGLE PAGE FLIP ANIMATION ── */
-    /* Out: the current page slides off the edge */
-    @keyframes sp-slide-out-left  { from { transform: translateX(0);            } to { transform: translateX(calc(-100% - 10px)); } }
-    @keyframes sp-slide-out-right { from { transform: translateX(0);            } to { transform: translateX(calc( 100% + 10px)); } }
-    /* In: the next page slides in from the opposite edge simultaneously */
-    @keyframes sp-slide-in-left   { from { transform: translateX(calc( 100% + 10px)); } to { transform: translateX(0); } }
-    @keyframes sp-slide-in-right  { from { transform: translateX(calc(-100% - 10px)); } to { transform: translateX(0); } }
-
-    #singlePageView img.sp-anim {
-      animation-duration: 0.22s;
-      animation-timing-function: cubic-bezier(0.25, 0.46, 0.45, 0.94);
-      animation-fill-mode: both;
-    }
-    #singlePageView img.sp-out-left  { animation-name: sp-slide-out-left;  }
-    #singlePageView img.sp-out-right { animation-name: sp-slide-out-right; }
-    #singlePageView img.sp-in-left   { animation-name: sp-slide-in-left;   }
-    #singlePageView img.sp-in-right  { animation-name: sp-slide-in-right;  }
-
     /* invisible click zones */
     .sp-zone {
       position: absolute;
@@ -1377,8 +1359,7 @@
 
 <!-- Single page view -->
 <div id="singlePageView">
-  <img id="spImageA" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;">
-  <img id="spImageB" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;visibility:hidden;">
+  <img id="spImage" src="" alt="Page" style="position:absolute;max-width:100%;max-height:100%;object-fit:contain;display:block;">
   <div class="sp-zone sp-zone-left"   id="spZoneLeft"></div>
   <div class="sp-zone sp-zone-center" id="spZoneCenter"></div>
   <div class="sp-zone sp-zone-right"  id="spZoneRight"></div>
@@ -3318,11 +3299,14 @@
 
   // ── SINGLE PAGE MODE ──
   const singlePageView = document.getElementById('singlePageView');
-  const spImageA       = document.getElementById('spImageA');
-  const spImageB       = document.getElementById('spImageB');
-  // spImage always points to the currently visible (foreground) image slot
-  let spImage    = spImageA;
-  let spImageBg  = spImageB; // the hidden slot used for the incoming page
+  // A single persistent <img>, reassigned directly on each flip -- matches
+  // long-strip mode's own slot images. Used to be two alternating elements
+  // with a CSS slide-transition swapping which was foreground/background;
+  // that machinery went through several rounds of bugs (stale-page flashes,
+  // then a racing thumbnail fallback corrupting the swap state) without
+  // ever converging, so it was removed in favor of the same simple
+  // direct-src-assignment approach long-strip mode already uses safely.
+  const spImage = document.getElementById('spImage');
   const spZoneLeft     = document.getElementById('spZoneLeft');
   const spZoneCenter   = document.getElementById('spZoneCenter');
   const spZoneRight    = document.getElementById('spZoneRight');
@@ -3348,7 +3332,6 @@
     lastPagePopupTimer = setTimeout(() => lastPagePopupEl.classList.remove('show'), 2000);
   }
 
-  let _spAnimTimer   = null;
   // _spAnimFrame itself is declared earlier, near loadEntryTier1 — see the
   // comment there for why.
   let _spPrefAbort   = null;
@@ -3404,21 +3387,6 @@
     }, delay);
   }
 
-  // Commit a URL to spImage immediately, bypassing any pending animation.
-  function _spCommitImage(url, inClass) {
-    clearTimeout(_spAnimTimer);
-    spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
-    spImageBg.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
-    spImageBg.style.visibility = 'hidden';
-    spImage.src = url;
-    if (inClass) {
-      spImage.classList.add('sp-anim', inClass);
-      _spAnimTimer = setTimeout(() => {
-        spImage.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
-      }, 220);
-    }
-  }
-
   function spGotoIdx(idx) {
     if (idx < 0) {
       if (currentChapIdx > 0) {
@@ -3439,134 +3407,31 @@
     }
 
     _spMeasureVelocity(idx);
-
-    // Duration shrinks with velocity: 220ms at rest → 40ms at ≥10 pps.
-    const dur = Math.max(40, 220 - _spVelocity * 18);
-
-    const isForward    = idx > spCurrentIdx;
-    _spLastFlipDir     = isForward ? 1 : -1;
-    const isLTR        = readerSettings.direction !== 'rtl';
-    const outClass     = (isForward === isLTR) ? 'sp-out-left'  : 'sp-out-right';
-    const inClass      = (isForward === isLTR) ? 'sp-in-left'   : 'sp-in-right';
+    _spLastFlipDir = idx > spCurrentIdx ? 1 : -1;
 
     spCurrentIdx = idx;
     const entry  = spManifest[idx];
-
-    // Cancel any prior animation.
-    clearTimeout(_spAnimTimer);
-    spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
-    spImage.style.animationDuration = '';
-    spImageBg.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right', 'sp-in-left', 'sp-in-right');
-    spImageBg.style.animationDuration = '';
-    spImageBg.style.visibility = 'hidden';
-
     const myFrame = ++_spAnimFrame;
 
-    // Kick off the simultaneous slide: outgoing (spImage) slides out,
-    // incoming (spImageBg) slides in at the same time, then they swap roles.
-    //
-    // The visible reveal of spImageBg is gated on ITS OWN decode() finishing
-    // -- not just on entry.loaded being true and not just on a fixed dur-ms
-    // timer, which is what this used to be. entry.loaded only confirms some
-    // *other* element (a prefetch probe, a different reused slot) finished
-    // decoding that URL; assigning the same URL to spImageBg can still cost
-    // this specific element a real decode (large 3200x2220+ pages, worse
-    // under memory pressure after a session's worth of reused decodes --
-    // matching reports of this starting only after several pages, not
-    // immediately). The old fixed setTimeout(dur) promoted regardless of
-    // whether spImageBg had actually finished painting the new page, so a
-    // slow decode meant the "promoted" element kept showing whatever it
-    // held before -- the stale-page flash. Now the whole transition (slide
-    // start, not just the final promotion) waits for decode, so spImageBg
-    // is never made visible before it's actually showing the right content.
-    const _runSlide = (incomingUrl) => {
+    // Reassign the single persistent <img> directly -- same mechanism
+    // long-strip mode's slot images already use safely. The browser's own
+    // native behavior (keep showing the current pixels until the new src
+    // finishes loading, then swap in place, atomically, with no
+    // intermediate state) is exactly what's wanted here; there's no second
+    // element or animation timing left to coordinate, so there's nothing
+    // left that can show the wrong page's content.
+    const applyEntry = () => {
       if (_spAnimFrame !== myFrame) return;
-
-      spImageBg.src = incomingUrl;
-      const decodeReady = (spImageBg.decode ? spImageBg.decode() : Promise.resolve()).catch(() => {});
-
-      decodeReady.then(() => {
-        if (_spAnimFrame !== myFrame) return;
-
-        if (dur <= 0) {
-          // No animation — instant swap.
-          spImage.src = incomingUrl;
-          spImageBg.style.visibility = 'hidden';
-          return;
-        }
-
-        // Place the incoming image in the background slot, off-screen.
-        spImageBg.style.visibility = 'visible';
-        spImageBg.style.animationDuration = dur + 'ms';
-        spImageBg.classList.add('sp-anim', inClass);
-
-        // Slide the current image out.
-        spImage.style.animationDuration = dur + 'ms';
-        spImage.classList.add('sp-anim', outClass);
-
-        _spAnimTimer = setTimeout(() => {
-          if (_spAnimFrame !== myFrame) return;
-          // Swap roles: bg becomes the new foreground.
-          spImage.classList.remove('sp-anim', 'sp-out-left', 'sp-out-right');
-          spImage.style.animationDuration = '';
-          spImage.style.visibility = 'hidden';
-          spImageBg.classList.remove('sp-anim', 'sp-in-left', 'sp-in-right');
-          spImageBg.style.animationDuration = '';
-          // Promote bg → fg
-          [spImage, spImageBg] = [spImageBg, spImage];
-          spImage.style.visibility   = 'visible';
-          spImageBg.style.visibility = 'hidden';
-        }, dur);
-      });
-    };
-
-    // entry.loaded is NOT a reliable "is this already cached" signal across
-    // a chapter boundary: goToChapter does a full page reload, which
-    // constructs a brand new entry object (loaded: false) for page 1 of the
-    // new chapter regardless of whether the browser's own HTTP cache -- warmed
-    // by the eager cross-chapter prefetch further down, from *before* the
-    // reload happened -- already has the bytes. Gating the immediate-vs-thumb
-    // decision on entry.loaded meant every chapter open showed the thumbnail
-    // first even when the real image was already sitting in cache ready to
-    // go, unlike long-strip mode which has no such per-page gate.
-    //
-    // So: always attempt the full-resolution image directly first -- _runSlide
-    // already waits on its own decode() before ever revealing anything, so
-    // this is safe even on a genuine cache miss, it just won't reveal until
-    // ready. Only fall back to the (always-cheap, fast) thumbnail if the full
-    // image genuinely hasn't resolved within a short grace window, instead of
-    // unconditionally showing it first.
-    const SP_THUMB_FALLBACK_MS = 150;
-    const showWithThumbFallback = () => {
-      let settled = false;
-      const fallback = setTimeout(() => {
-        if (settled || _spAnimFrame !== myFrame) return;
-        _runSlide(thumbUrl(entry));
-      }, SP_THUMB_FALLBACK_MS);
-      const img = new Image();
-      img.src = entry.url;
-      img.decode().then(() => {
-        settled = true;
-        clearTimeout(fallback);
-        entry.loaded = true;
-        if (_spAnimFrame === myFrame) _runSlide(entry.url);
-      }).catch(() => {
-        settled = true;
-        clearTimeout(fallback);
-        // Leave entry.loaded false -- the parallel tier-1 prefetch for this
-        // same entry (always scheduled right after this flip, see
-        // _spSchedulePrefetch below) retries independently and will apply
-        // itself via loadEntryTier1's own onSuccess once it succeeds.
-      });
+      spImage.onload = () => { entry.loaded = true; };
+      spImage.src = entry.url;
     };
 
     if (entry.url) {
-      showWithThumbFallback();
+      applyEntry();
     } else {
       ensureChapterUrls(entry.chapterId).then(urls => {
         entry.url = urls[entry.localIdx] || '';
-        if (!entry.url || _spAnimFrame !== myFrame) return;
-        showWithThumbFallback();
+        if (entry.url && _spAnimFrame === myFrame) applyEntry();
       });
     }
 
