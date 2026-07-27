@@ -3541,11 +3541,48 @@
     else _spShiftWindow(delta);
   }
 
+  // Set only once a pointer actually MOVES past a small threshold after
+  // going down on the strip -- not on pointerdown alone, since a plain tap
+  // (the center zone toggling chrome, a left/right zone changing page)
+  // also fires pointerdown with zero movement, and would otherwise
+  // wrongly latch this true for a settle that has nothing to do with a
+  // drag. Consumed (and reset) the next time a scroll settles.
+  // Distinguishes "this settle followed a genuine drag" (trust the
+  // resulting scroll position as the new current page) from "this settle
+  // followed programmatic navigation" (spCurrentIdx was already set
+  // correctly, synchronously, the moment spGotoIdx ran -- scroll position
+  // is cosmetic).
+  let _spUserDragging  = false;
+  let _spPointerDownX  = 0;
+  const SP_DRAG_MOVE_THRESHOLD = 8; // px
+  spStrip.addEventListener('pointerdown', (e) => {
+    _spUserDragging = false;
+    _spPointerDownX = e.clientX;
+  }, { passive: true });
+  spStrip.addEventListener('pointermove', (e) => {
+    if (Math.abs(e.clientX - _spPointerDownX) > SP_DRAG_MOVE_THRESHOLD) _spUserDragging = true;
+  }, { passive: true });
+
   function _spSettleCurrentIdx() {
     if (spManifest.length === 0) return;
-    const r = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
-    const idx = rOf(r); // self-inverse
-    if (idx !== spCurrentIdx) spGotoIdx(idx);
+    if (_spUserDragging) {
+      _spUserDragging = false;
+      const r = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
+      const idx = rOf(r); // self-inverse
+      if (idx !== spCurrentIdx) spGotoIdx(idx);
+      return;
+    }
+    // No drag since the last settle -- this scroll was purely programmatic
+    // (spGotoIdx's own scrollTo). Repeated rapid navigation (e.g. holding
+    // an arrow key) retargets that smooth scroll faster than any single
+    // animation can complete, so it can settle short of the true target --
+    // that's lag in the animation, not a sign the page actually changed.
+    // Trusting scroll position as ground truth here (the way the drag path
+    // above correctly does) would silently snap spCurrentIdx backward to
+    // wherever the animation happened to still be. spCurrentIdx is already
+    // correct; just make sure the visible position actually reaches it.
+    const r = rOf(spCurrentIdx);
+    if (Math.round(spStrip.scrollLeft / viewW) !== r) spStrip.scrollLeft = r * viewW;
   }
 
   // Fallback for browsers without native scrollend: poll via rAF and
@@ -3577,8 +3614,21 @@
   }
 
   spStrip.addEventListener('scroll', () => {
-    const r = _spCurrentR();
-    if (r - spWindowLo < SP_EDGE_MARGIN || spWindowHi - r < SP_EDGE_MARGIN) spRecenterWindow();
+    // The proactive edge-margin recenter only matters for a genuine native
+    // drag, where the window needs to keep up with a gesture spGotoIdx
+    // never saw coming. Purely programmatic navigation (spGotoIdx's own
+    // scrollTo) already shifts the window to cover its destination BEFORE
+    // starting the animation, so re-checking on every intermediate scroll
+    // frame of that same animation is redundant -- and under rapid repeated
+    // navigation (e.g. holding an arrow key), redundant meant a shift on
+    // nearly every single flip, tearing down and recreating <img> elements
+    // faster than their in-flight loads could ever complete (removing an
+    // element aborts its fetch), leaving slots permanently empty. Skipping
+    // it here for the non-drag case was the fix.
+    if (_spUserDragging) {
+      const r = _spCurrentR();
+      if (r - spWindowLo < SP_EDGE_MARGIN || spWindowHi - r < SP_EDGE_MARGIN) spRecenterWindow();
+    }
     if (!supportsScrollEnd) _spScheduleSettledCheck();
   }, { passive: true });
   if (supportsScrollEnd) {
@@ -3603,8 +3653,20 @@
   // any) is currently assigned to it -- parallel to loadEntry/
   // _applyUrlToSlot above, but targeting spAssignedSlot/spSlotPool since
   // those write into #reader's own slot pool, not this one.
+  // Deliberately NOT gated on entry.loaded -- that flag is shared with
+  // #reader's own tier1/tier2 prefetch (loadEntryTier1 sets it true the
+  // moment it fetches the bytes anywhere, e.g. into a detached probe
+  // Image() well outside this window, regardless of whether anything was
+  // ever painted into one of THIS mode's own slots). _spSchedulePrefetch
+  // reaches up to 15 pages ahead on every flip, so entry.loaded routinely
+  // goes true for entries this function has never actually painted --
+  // trusting it here meant most slots outside the very first materialized
+  // window were silently skipped forever, permanently empty. The real
+  // question for this function is narrower: does THIS SPECIFIC slot
+  // element already show this entry's image, tracked via its own
+  // dataset marker rather than the entry's shared flag.
   function _spLoadEntry(entry, retriesLeft = 2) {
-    if (!entry || entry.loaded) return;
+    if (!entry) return;
     if (entry.url) {
       _spApplyUrlToSlot(entry, retriesLeft);
       return;
@@ -3622,9 +3684,22 @@
     const si = spAssignedSlot[rOf(idx)];
     if (si === -1) return;
     const imgEl = spSlotPool[si].img;
-    imgEl.onload = () => { entry.loaded = true; };
+    if (imgEl.dataset.spUrl === entry.url) return; // already painted with this exact image
+    imgEl.dataset.spUrl = entry.url;
+    imgEl.onload = () => {
+      // Verify imgEl is STILL the element currently assigned to this entry
+      // before marking it loaded -- under rapid flipping, a slot can be
+      // shifted out (its element detached, entry reassigned to a fresh,
+      // still-empty element in a different slot) while this exact load was
+      // still in flight. A stale detached element's late onload firing
+      // must not be mistaken for the current one having finished.
+      const curIdx = spManifest.indexOf(entry);
+      const curSi  = curIdx === -1 ? -1 : spAssignedSlot[rOf(curIdx)];
+      if (curSi !== -1 && spSlotPool[curSi].img === imgEl) entry.loaded = true;
+    };
     imgEl.onerror = () => {
       if (retriesLeft > 0) {
+        imgEl.dataset.spUrl = ''; // allow a retry to re-paint, not skip as "already done"
         setTimeout(() => _spApplyUrlToSlot(entry, retriesLeft - 1), 500);
       }
     };
@@ -3734,14 +3809,22 @@
     // make sure the right slot is ready and scrolled to.
     const targetR = rOf(idx);
     const spCount = Math.min(SP_SLOT_COUNT, spManifest.length);
-    if (spWindowHi === -1 || Math.abs(targetR - _spCurrentR()) > SP_SLOT_COUNT) {
+    // Big-jump-vs-shift is decided against the LOGICAL window bounds
+    // (spWindowLo/spWindowHi), never against _spCurrentR() -- the actual
+    // scroll position can lag arbitrarily far behind spCurrentIdx during
+    // rapid repeated navigation (each new scrollTo retargets the smooth
+    // scroll before the previous one finishes, so the animation genuinely
+    // never catches up). Measuring "how big is this jump" against that
+    // lagging position meant ordinary sequential 1-at-a-time flips could
+    // spuriously read as a huge jump and trigger a full rebuild (tearing
+    // down and recreating every slot, aborting every in-flight load) when
+    // a cheap 1-step shift was all that was actually needed -- this was
+    // the real cause of slots permanently stuck with an empty src under
+    // sustained rapid flipping.
+    const windowCenter = spWindowHi === -1 ? null : Math.floor((spWindowLo + spWindowHi) / 2);
+    if (spWindowHi === -1 || Math.abs(targetR - windowCenter) > spCount) {
       // spWindowHi === -1 explicitly covers "window never materialized
-      // yet" (the very first call, from activateSinglePageMode) -- the
-      // distance check alone is wrong there: spStrip.scrollLeft starts at
-      // 0 (untouched DOM), so a small startIdx can read as a small
-      // "distance" even though there's no window to shift from yet, which
-      // would wrongly route into _spShiftWindow (nothing materialized to
-      // remove slots from).
+      // yet" (the very first call, from activateSinglePageMode).
       const windowLo = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spManifest.length - spCount));
       _spRebuildWindow(windowLo, targetR);
     } else {
