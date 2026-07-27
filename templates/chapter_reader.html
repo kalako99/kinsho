@@ -3475,10 +3475,8 @@
         spAssignedSlot[oldR] = -1;
         spSlotPool[k].el.remove();
 
-        const newR = spWindowHi + 1 + k;
         const { el } = _spMakeSlotEl();
         frag.appendChild(el);
-        _spLoadEntry(spManifest[rOf(newR)]);
       }
       spStrip.insertBefore(frag, spRightSpacer);
       spWindowLo += delta;
@@ -3487,10 +3485,8 @@
       const n = -delta;
       const frag = document.createDocumentFragment();
       for (let k = n - 1; k >= 0; k--) {
-        const newR = spWindowLo - 1 - k;
         const { el } = _spMakeSlotEl();
         frag.appendChild(el);
-        _spLoadEntry(spManifest[rOf(newR)]);
       }
       spStrip.insertBefore(frag, spLeftSpacer.nextSibling);
       for (let k = 0; k < n; k++) {
@@ -3517,6 +3513,20 @@
       k++;
     }
     _spSyncSpacers();
+
+    // Load AFTER spAssignedSlot is rebuilt above, not during the add/remove
+    // loops -- _spLoadEntry -> _spApplyUrlToSlot looks up spAssignedSlot[r]
+    // to know which slot to paint into, and every newly-materialized slot's
+    // position wasn't in spAssignedSlot yet at the point those loops ran
+    // (that mapping is only established by the rebuild-from-DOM loop just
+    // above). Calling it too early meant si was always -1, so the load
+    // silently no-op'd and the slot's <img> never got a src at all -- a
+    // permanently broken icon that nothing ever retried, since a plain
+    // wait doesn't re-trigger anything; only another shift/rebuild would
+    // touch that slot again. loadEntry itself is idempotent (entry.loaded
+    // guards it), so calling it for the whole window here, not just the
+    // new slots, is harmless for the ones already loaded.
+    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
     _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.floor((spWindowLo + spWindowHi) / 2))]));
   }
 
@@ -3800,6 +3810,15 @@
   // swipe-to-flip physics now, so there's no gesture left for JS to track.
   spStrip.addEventListener('click', (e) => {
     if (readerSettings.mode !== 'single-page') return;
+    // There's a generic document-level click handler (search barVisible)
+    // that toggles chrome on any click anywhere -- that's what "tap
+    // anywhere" in long-strip mode (no zones there) relies on. Without
+    // stopping propagation here, every click in single-page mode fires
+    // both handlers: a center tap toggles chrome here AND there (net no
+    // visible change), and a left/right tap changes the page here but
+    // still triggers an unwanted extra chrome toggle from the document
+    // handler. The old per-zone divs each did this same stopPropagation.
+    e.stopPropagation();
     const frac = e.clientX / viewW;
     if (frac < 0.3) {
       // Physical left = backward in LTR, forward in RTL
