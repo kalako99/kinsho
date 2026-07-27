@@ -5242,12 +5242,18 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
         page_index = int(filename_or_index)
         if page_index >= len(files):
             return JSONResponse({"error": "Page not found"}, status_code=404)
-        return FileResponse(os.path.join(chapter["path"], files[page_index]))
+        return FileResponse(
+            os.path.join(chapter["path"], files[page_index]),
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
     else:
         file_path = os.path.join(chapter["path"], filename_or_index)
         if not os.path.exists(file_path):
             return JSONResponse({"error": "File not found"}, status_code=404)
-        return FileResponse(file_path)
+        return FileResponse(
+            file_path,
+            headers={"Cache-Control": "public, max-age=86400, immutable"},
+        )
 
 # ── THUMBNAIL ROUTES (on-demand, in-memory) ──
 
