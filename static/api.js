@@ -42,11 +42,30 @@
   // Skipped entirely when there's no server to ask yet (the app-shell's
   // own pre-login screen, before a server URL is saved) -- window.API_BASE
   // is null only in that specific case, never for a same-origin '' base.
+  // The chapter/volume reader (image-based and EPUB) holds a page's worth of
+  // JS state that only lives in memory for that one page load -- the
+  // materialized conveyor slots and their already-loaded images in
+  // chapter_reader.html, mid-book position in epub_reader.html. A reload
+  // triggered out from under an active read throws all of that away and
+  // rebuilds from scratch, landing back at the last SAVED checkpoint rather
+  // than the user's exact position -- a real, disruptive interruption, not
+  // just a cosmetic reflow. Server-side permission/tag enforcement
+  // (can_access_library/is_manga_blocked, see the security audit notes)
+  // already applies to every actual content request regardless of what this
+  // poll does, so skipping the reload here only defers when the *UI*
+  // catches up, never what the server actually allows -- safe to defer
+  // until the next real navigation away from the reader, which gets a fresh
+  // script context (and therefore fresh auth state) for free anyway.
+  var isReaderPage = function () {
+    return /\/manga\/[^/]+\/[^/]+\/(chapter|volume)\//.test(location.pathname);
+  };
+
   if (window.API_BASE !== null) {
     var PERMISSION_POLL_MS = 20000;
     var knownAuthState = null;
 
     var checkAuthState = function () {
+      if (isReaderPage()) return;
       fetch(window.apiUrl('/api/auth/me')).then(function (res) {
         return res.json();
       }).then(function (data) {
