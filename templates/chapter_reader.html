@@ -1886,28 +1886,23 @@
         if (signal?.aborted || retriesLeft <= 0) return;
         setTimeout(() => loadEntryTier1(entry, signal, retriesLeft - 1), 500);
       };
-      if (isCompressed) {
-        const img = new Image();
-        img.src = url;
-        img.decode().then(() => {
-          if (si !== -1) slotPool[si].img.src = url;
-          onSuccess();
-        }).catch(onFail);
-      } else if (si !== -1) {
-        const imgEl = slotPool[si].img;
-        imgEl.onload = onSuccess;
-        imgEl.onerror = onFail;
-        imgEl.src = url;
-      } else {
-        // No slot currently assigned -- nothing to paint into yet, but
-        // still worth confirming the fetch actually succeeds: a resolved
-        // detached Image() lands in the browser's own HTTP cache, so
-        // whenever this entry does get a slot later it paints instantly.
-        const probe = new Image();
-        probe.onload = onSuccess;
-        probe.onerror = onFail;
-        probe.src = url;
-      }
+      // Always predecode off-DOM before painting into a slot -- not just for
+      // compressed sources (the old split here). Fetching bytes alone (the
+      // previous loose-image path) only warms the browser's HTTP cache; the
+      // slot's own <img> element -- a different element than whatever fetched
+      // the bytes -- still has to synchronously decode a multi-megapixel page
+      // the moment it's assigned that src, and a fast swipe/scroll can outrun
+      // that decode, showing the slot's plain black background underneath
+      // for a moment. img.decode() warms the browser's decoded-pixel cache,
+      // which is keyed by URL, not by element, so the later
+      // `slotPool[si].img.src = url` reuses that decode and paints
+      // immediately regardless of source type.
+      const img = new Image();
+      img.src = url;
+      img.decode().then(() => {
+        if (si !== -1) slotPool[si].img.src = url;
+        onSuccess();
+      }).catch(onFail);
     };
     if (entry.url) { apply(entry.url); return; }
     ensureChapterUrls(entry.chapterId).then(urls => apply(urls[entry.localIdx] || ''));
