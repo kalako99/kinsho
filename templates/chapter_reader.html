@@ -174,6 +174,7 @@
       width: 100%;
       background: #000;
       /* height set per-entry in JS from dims.json; normal block flow */
+      margin-bottom: var(--page-gap, 0px);
     }
 
     .page-slot img {
@@ -1575,6 +1576,17 @@
   // Gap in px between pages when padding is enabled (applied during rebuild)
   const PAGE_GAP = 16;
 
+  // Drives the actual visible gap between .page-slot elements (see its CSS
+  // rule: margin-bottom: var(--page-gap, 0px)). PAGE_GAP alone only ever
+  // fed into globalY/cursorY -- the virtual scroll-position math -- with
+  // nothing anywhere setting a matching real margin on the rendered slots,
+  // so toggling "Padding between images" recomputed geometry/scroll extent
+  // but never changed what was actually on screen. Present in the initial
+  // commit; not a regression from any later change.
+  function applyPageGapVar(usePadding) {
+    readerInner.style.setProperty('--page-gap', (usePadding ? PAGE_GAP : 0) + 'px');
+  }
+
   function buildManifest(usePadding, effectiveW) {
     const w = effectiveW ?? viewW;
     manifest.length = 0;
@@ -1647,6 +1659,7 @@
 
   // Build manifest with current padding setting
   buildManifest(readerSettings.padding);
+  applyPageGapVar(readerSettings.padding);
 
   // ── CONVEYOR WINDOW STATE ──
   // slotPool[k] corresponds to manifest[windowLo + k] and is always a DOM
@@ -3314,6 +3327,7 @@
     const anchorGlobalIdx = manifest.indexOf(anchorEntry);
 
     recomputeGeometry(readerSettings.padding);
+    applyPageGapVar(readerSettings.padding);
     applyManifestToSlots();
 
     setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
