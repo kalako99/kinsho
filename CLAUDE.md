@@ -2050,3 +2050,440 @@ one-to-one equivalent for a novel.
   auto-numbering convention itself (a trailing number is always treated as an existing
   auto-suffix, per `bmBaseName`'s regex, exactly matching the original's behavior) —
   switching to plain non-numeric test names resolved it.
+
+## Single-page mode rebuilt as a horizontal snap-scroll reader (2026-07-27)
+
+Started from a live-testing report describing single-page mode showing the wrong page on
+flip (a stale, complete-looking image from a different page, not a broken-icon/loading
+state) — on loose-image manga specifically, worsening over a reading session. Ended, the
+same day, with single-page mode's entire page-turn mechanic rebuilt from scratch as a
+horizontal analogue of `#reader`'s vertical conveyor, at the user's explicit request, after
+several smaller patches to the old two-element animated-swap design kept fixing one symptom
+and exposing another. Kept here in full because the reasoning across every attempt —
+including the ones that got superseded — explains why the current code is shaped the way it
+is, and because the *last* round of fixes was only findable by actually reproducing the bug
+live rather than by reading code, which is itself worth remembering as a lesson for next
+time something in this area misbehaves.
+
+### Current architecture (what's live now)
+
+Single-page mode is `#spStrip`, a horizontally-scrolling flex row using native CSS
+scroll-snap (`scroll-snap-type: x mandatory` + `scroll-snap-stop: always` — the second
+property is what actually guarantees "one flick = exactly one page," the first alone lets a
+fast flick sail past several snap points). It's a **separate, parallel implementation** from
+`#reader`'s vertical conveyor, deliberately not a generalized/shared version of it — touching
+`#reader`'s already-hardened conveyor code to make it axis-agnostic was judged too risky
+given how many hard-won fixes are already baked into it (see "Long-strip reader" above). The
+new code follows the same *pattern* independently: `spLeftSpacer`/`spRightSpacer` flank a
+small (`SP_SLOT_COUNT = 12`, vs. `#reader`'s 80 — a horizontal flick physically can't outrun
+a window this size the way a long vertical fling can) sliding window of materialized
+`.sp-slot` elements, sized/positioned via `_spSyncSpacers()`/`_spRebuildWindow()`/
+`_spShiftWindow()`, mirroring `_syncSpacers`/`_rebuildConveyorWindow`/`_shiftConveyorWindow`
+functionally but independently. One real simplification over `#reader`: every slot is
+exactly viewport-width (pages are shown at a fixed size, not flowed with per-page heights
+like long-strip's variable-aspect-ratio pages), so `spStrip.scrollLeft` is directly the
+source of truth for position — no `virtualY`-style shadow variable needed at all.
+
+Padding between pages is a fixed, always-on constant (`SP_GAP`, baked in as inner padding on
+each slot so slot width stays exactly `viewW` with no fencepost math) — not a user setting,
+deliberately independent of long-strip's own `readerSettings.padding`/`PAGE_GAP`, which
+stays scoped entirely to long-strip mode as before.
+
+Tap zones are a single `click` listener on `spStrip` checking `event.clientX` against a
+30/40/30 split, not overlay `<div>`s — overlay zones would have intercepted/blocked the
+native touch-scroll gestures this mode's whole page-turn mechanic now depends on, the same
+tension already solved this same way for the EPUB reader's tap-vs-scroll handling (see
+above). The old `_spDragStart/_spDragMove/_spDragEnd` 50px-threshold drag system (and the six
+listeners it needed) is gone entirely — native scroll-snap handles swipe-to-flip on its own,
+there's no gesture left for JS to track.
+
+Chapter boundaries are unchanged in behavior — still a full `goToChapter()` page reload at
+the first/last page of a chapter, never an in-place continuation into the next chapter's
+pages, exactly like before this rebuild. This was a deliberate scope boundary: long-strip's
+`manifest` already spans every chapter continuously (so long-strip scrolling *is* seamless
+across chapters within one page load), but making single-page mode match would mean
+rewiring all six functions that read `spCurrentIdx`/`spManifest` for progress-bar/bookmark
+tracking (`getCurrentGlobalPageIdx`, `updateProgressBar`, `getVisibleChapterId`,
+`getCurrentPageIdx`, `checkChapterCompletion`, `getCurrentPosition`) to scan across chapters
+— real scope nobody asked for. At the true first/last page, `overscroll-behavior-x: contain`
+plus the relevant spacer hitting width 0 gives a fully native rubber-band bounce with no
+phantom slot needed; crossing chapters stays a deliberate tap-zone/keyboard action at the
+true edge.
+
+RTL reading direction is handled by one self-inverse conversion, `rOf(idx)` (`isRTL() ?
+spManifest.length-1-idx : idx` — `rOf(rOf(x)) === x`), rather than a direction ternary
+threaded through every window-management formula. All window state (`spWindowLo`/
+`spWindowHi`/shift/recenter math) lives entirely in "reading-order" (`r`) space, which is
+always physically left-to-right regardless of direction; `rOf` is the only place direction
+gets resolved, applied at exactly three boundary points (`spGotoIdx` converting `idx→r`, the
+paint path converting `r→spManifest[idx]`, and the settle handler converting a settled `r`
+back to `idx`). The four pre-existing physical-direction ternaries (tap zones, keyboard)
+didn't need to change at all — they already only ever called `spForward`/`spBackward` in
+index space.
+
+`spGotoIdx`/`spForward`/`spBackward` are still plain top-level `function` declarations (not
+`const` arrows) — load-bearing, since two features monkeypatch-wrap them later in the file
+(chapter-completion progress save on reaching the last page, and bookmark end-to-end
+auto-advance) by reassigning the same names; switching to `const` would silently break both.
+
+### The path to get there (superseded attempts, kept for the reasoning)
+
+1. **`entry.loaded` gate** — the single-`<img>` swap design (already in place from an
+   earlier session, see the reader-bugs history above this section) trusted `entry.url`
+   alone as "safe to show," which for loose-image sources is set synchronously long before
+   any prefetch actually finishes. Gated the swap on `entry.loaded` instead, showing a
+   thumbnail placeholder in between. **Superseded** — didn't fix the report (see below), but
+   the underlying "don't trust url-known as loaded" insight carried forward.
+
+2. **Decode-gated `_runSlide` reveal** — investigated further after "nothing changed"; found
+   the actual promotion between the two swap elements ran on a fixed `setTimeout(dur)`
+   completely decoupled from whether the incoming element had actually finished decoding —
+   on a slow decode (large pages, worse after a session's worth of them, matching "starts
+   after 6-7 pages, not immediately") the promoted element kept showing whatever it held
+   before. Gated the whole transition on `spImageBg.decode()`. **Superseded** by the full
+   rebuild below, but confirmed the general principle that a fixed timer racing a real
+   decode is a recurring failure shape in this codebase.
+
+3. **"Always try full-res first, thumbnail only as a slow-path fallback"** — a follow-up
+   report clarified the thumbnail-first behavior on *every* chapter open wasn't really about
+   decode timing, it was that `entry.loaded` resets to `false` on every chapter boundary (a
+   full page reload constructs fresh entry objects) even when the browser's own HTTP cache —
+   warmed by the existing eager cross-chapter prefetch *before* the reload — already had the
+   bytes. Reworked to attempt the real image directly, racing a short (150ms) fallback timer
+   before showing a thumbnail. **This is the version that regressed** ("worse than before,"
+   sometimes loading a thumb then the *previous* page on top) — root cause: two independent
+   `_runSlide` calls (the real-image path and the fallback-thumbnail path) could both fire
+   for the same flip and race on the same pair of swap elements, corrupting the promotion
+   state. This is what prompted the full rebuild rather than another patch.
+
+4. **Missing `Cache-Control` header on loose chapter routes** — a real, independent
+   server-side bug found in the same investigation: `get_chapter_page`'s two loose-image
+   branches (`main.py`) returned a bare `FileResponse` with no `Cache-Control` at all, unlike
+   every other source type *and* unlike `get_volume_page`'s own loose branch, which already
+   set `Cache-Control: public, max-age=86400, immutable`. Without it the browser couldn't
+   trust a cached copy across a chapter-boundary reload and had to revalidate over the
+   network. **Fixed and kept** — this one wasn't superseded, it's a real, permanent, still-
+   correct fix independent of everything else in this section.
+
+5. **Simplification to one persistent `<img>`, no animation** — after the racing-fallback
+   regression, and prompted directly by the user questioning why this needed to be so
+   complicated ("check how SumatraPDF does it... we're already doing it right in long-strip
+   mode"), replaced the entire two-element slide-transition system with a single `<img>`
+   reassigned directly on each flip — the same direct-`.src`-assignment approach long-strip's
+   own slot images already used successfully, with no animation at all. This fixed
+   correctness (confirmed) but gave up the page-turn feel. **Superseded** by the horizontal
+   conveyor below, at the user's request to bring the animation back "done properly" via
+   native scroll-snap instead of hand-rolled JS timing — but this was the necessary
+   intermediate step that proved the *display* mechanism, once simplified enough, actually
+   worked, isolating the remaining bugs to the buffer/window-management layer that the
+   conveyor rebuild then addressed head-on.
+
+6. **The horizontal conveyor itself** — designed via `EnterPlanMode` (two parallel `Explore`
+   agents mapping `#reader`'s conveyor internals and single-page mode's surrounding
+   call-sites/UI in full, then one `Plan` agent validating the proposed architecture against
+   the real current code) given the size and the track record of under-planned attempts
+   causing regressions earlier in this same session. See "Current architecture" above for
+   the result. Landed cleanly except for two bugs caught immediately after deploying:
+   - **Chrome not toggling on a center tap, toggling unexpectedly on a side tap** — the new
+     single `click` listener on `spStrip` never called `e.stopPropagation()`, so every click
+     also bubbled up to the pre-existing generic `document`-level click handler that drives
+     "tap anywhere to toggle chrome" in long-strip mode (which has no zones). A center tap
+     toggled chrome twice (net no visible change); a side tap toggled it once as an unwanted
+     side effect of just changing the page. The old per-zone `<div>`s had each called
+     `stopPropagation()` for exactly this reason — lost when they were consolidated into one
+     listener. Fixed by adding it back.
+   - **Some slots permanently blank after a shift** — `_spShiftWindow` called `_spLoadEntry`
+     for newly-materialized slots *before* `spAssignedSlot` was updated to point at them
+     (that mapping was only established by the DOM-rebuild-from-live-DOM loop afterward), so
+     the load silently no-op'd (`si === -1`) and the slot's `<img>` never got a `src` at all
+     — permanently, since nothing ever retried it. Fixed by moving the load loop to after
+     the `spAssignedSlot` rebuild. **This fix turned out to be incomplete** — see below.
+
+### Deep bugs found via live reproduction (same day)
+
+The next report — "still bugged but just the broken image icon and images not loading" —
+didn't yield to further code reading; the fix above had addressed a real bug but clearly not
+the whole story, and reasoning about rapid-flip races purely from the source was no longer
+productive. Installed Playwright locally (`pip install playwright && python -m playwright
+install chromium` — not previously set up in this repo/environment) and built a throwaway
+reproduction: a synthetic 40-page test manga (`PIL`-generated loose JPEGs, each with a
+visible page number baked in, large — 1600×1100 — to actually stress decode cost) under a
+scratch `data_path`, driven by a real headless Chromium executing rapid `ArrowRight`/
+`ArrowLeft` key sequences while directly inspecting `.sp-slot img` elements' `naturalWidth`/
+`complete`/`src` after each batch. This is what actually cracked it — none of the four bugs
+below were reachable by re-reading the code again, only by watching it run.
+
+(Getting the local server running at all needed one unrelated fix first: the local Python
+env had `fastapi==0.95.0`/`starlette==0.26.1` installed, both far behind what
+`requirements.txt` actually pins — `pip install -r requirements.txt --upgrade` resolved a
+`ValueError: context must include a "request" key` on every page load, an artifact of the
+older Starlette's different `TemplateResponse` signature. Worth remembering next time a
+fresh local run of this app throws on template rendering: check installed versions against
+`requirements.txt` before assuming it's a code bug.)
+
+Four distinct, compounding bugs, all specific to rapid repeated navigation (holding an arrow
+key, fast tapping — not ordinary one-flip-at-a-time reading):
+
+1. **Tap-vs-drag misdetection.** `_spUserDragging` (added to distinguish "trust scroll
+   position as truth" settles, which should only happen after a genuine native drag, from
+   "spCurrentIdx is already correct" settles after programmatic navigation) was set on any
+   `pointerdown` — including a plain tap with zero movement, e.g. the very same center-zone
+   tap used to open the chrome bar before starting the test flip sequence. That latched it
+   `true` for the rest of the session, making every later settle wrongly trust an irrelevant
+   scroll position. Fixed by only setting it once the pointer actually moves past an 8px
+   threshold after going down, mirroring the `touchMoved` convention already used elsewhere
+   in this file.
+
+2. **`spCurrentIdx` jumping backward mid-sequence.** Confirmed directly via an instrumented
+   trace: holding an arrow key retargets `spStrip`'s smooth `scrollTo()` faster than any one
+   animation can finish, so the *actual* scroll position can lag far behind the logical
+   current page (observed: `spCurrentIdx` at 17, actual scroll position corresponding to
+   page 5). The settle handler used to trust that lagging position as ground truth and
+   "corrected" `spCurrentIdx` backward to match it — a real regression a user would see as
+   the reader suddenly jumping back several pages mid-flip. Fixed: a settle that didn't
+   follow a genuine drag (see #1) now just snaps the visible scroll position up to the
+   already-correct `spCurrentIdx`, instead of trusting position as truth.
+
+3. **Spurious full-window rebuilds.** The same lagging scroll position was *also* what
+   `spGotoIdx` used to decide "is this target close enough to shift to, or far enough to need
+   a full window rebuild" (`Math.abs(targetR - _spCurrentR()) > SP_SLOT_COUNT`). Since that
+   position can lag arbitrarily during rapid retargeting, an ordinary sequential 1-at-a-time
+   flip could spuriously read as a huge jump and trigger a full rebuild — tearing down and
+   recreating every one of the 12 materialized slots, aborting every in-flight image load in
+   the process — when a cheap 1-step shift was all that was actually needed. Fixed by
+   deciding big-jump-vs-shift against the *logical* window bounds (`spWindowLo`/`spWindowHi`,
+   which never lag) instead of the physical scroll position.
+
+4. **Slots permanently stuck blank, the deepest one.** Even after fixes 1–3 made the window
+   management itself provably correct (confirmed via trace: clean monotonic shifts, no more
+   spurious rebuilds), most slots outside the very first materialized window still never
+   loaded. Root cause: `_spLoadEntry` gated on `entry.loaded` — a flag *shared* with
+   `#reader`'s own tier1/tier2 prefetch machinery (`loadEntryTier1`, reused here unchanged for
+   wider-than-materialized lookahead, see the loading-pipeline-reuse note in "Current
+   architecture" above). `loadEntryTier1` sets `entry.loaded = true` the moment it fetches
+   bytes *anywhere* — including into a detached lookahead probe up to 15 pages ahead of
+   wherever the user actually is — with no relationship to whether anything was ever painted
+   into one of *this* mode's own slot `<img>` elements. Since `_spSchedulePrefetch` reaches
+   that far ahead on every single flip, `entry.loaded` routinely went `true` for entries
+   `_spLoadEntry` had never actually painted, and its own guard then skipped them forever.
+   Fixed by decoupling the two concerns: `_spApplyUrlToSlot` now tracks per-slot-element
+   readiness via `imgEl.dataset.spUrl` (does *this specific* `<img>` already show *this*
+   entry's URL) instead of trusting the shared `entry.loaded` flag, which stays exactly as
+   it was for `#reader`'s own purposes.
+
+Verified via the same Playwright harness: zero broken images across 30 forward + 35 backward
++ 15 more forward flips, at both a realistic ~2.5 flips/sec pace and a deliberately
+unrealistic ~8 flips/sec stress pace (holding an arrow key far faster than any real reader
+would). Pushed as `b085332`, confirmed present and running on both `kinsho`/`kinsho2`
+containers on the NAS.
+
+### Testing infrastructure now available for next time
+
+Playwright (Python) is now installed in the local dev environment (`pip install playwright`
++ `python -m playwright install chromium`) — wasn't set up before this session. For any
+future reader bug that resists diagnosis by code reading alone (rapid-interaction races,
+timing-dependent state, anything where "what actually happens across N events" matters more
+than "what does this one function do"), the pattern used here is worth repeating rather than
+reinventing: a throwaway `data_path` + synthetic test manga (loose images are cheapest to
+generate — `PIL.Image` + `ImageDraw` to bake a visible page number into each one, so failures
+are identifiable at a glance in a screenshot or via string comparison) + a headless-Chromium
+script driving real key/mouse events and reading live DOM/element state back out, rather than
+guessing from source alone. Remember the local venv needs `pip install -r requirements.txt
+--upgrade` if it's drifted from what's pinned (see the Starlette note above) before the app
+will even serve pages correctly.
+
+### Not yet verified
+
+Everything above was tested against desktop headless Chromium at a 480×900 viewport — real
+verification on the Android app / actual touch hardware (not synthetic pointer events) is
+still outstanding, along with RTL reading direction (the `rOf()` logic was reasoned through
+carefully and matches the pre-existing physical-direction ternaries, but never actually
+exercised against a real RTL manga this session). Worth checking next: real-device flick
+feel (does scroll-snap's native momentum feel right at these page dimensions), RTL swipe
+direction, and the bookmark end-to-end / chapter-completion-on-last-page features specifically
+via a *swipe* (not tap/keyboard) — both route through `spGotoIdx`'s monkeypatch chain
+correctly by construction now, but haven't been manually exercised via a real swipe gesture
+since the horizontal rebuild.
+
+## Loose-image slots showing a black flash when scrolling/swiping faster than they load (2026-07-28) — fix applied, NOT YET LIVE-TESTED
+
+Reported from a real screen recording (`Screen_Recording_20260727_231948_Kinsho.mp4`, single-page
+mode, loose-image manga): scrolling/swiping faster than pages can load shows a black
+afterimage at the edge being scrolled toward. Confirmed visually by extracting a contact
+sheet and edge slit-scans from the recording with `ffmpeg` (real solid-black regions at the
+edges, not just inter-page gaps).
+
+Root cause: every reader slot (`.sp-slot` in single-page mode, and the equivalent long-strip
+slots) is `background: #000` — that's what shows before its `<img>` paints. Prefetching
+(`_spSchedulePrefetch`/`prefetchAroundIndex`) runs ahead of the current position (up to
+15 pages, velocity-scaled), but `loadEntryTier1` (`templates/chapter_reader.html`, was around
+line 1876) only forced the browser to fully **decode** pixels ahead of time
+(`img.decode()`) for compressed sources (archive/PDF/EPUB, gated behind `isCompressed`) —
+for loose-image folders it only warmed the HTTP byte cache. So even with bytes already
+downloaded, the moment a swipe/scroll reveals a new slot the browser still has to
+synchronously decode a multi-megapixel page before painting, and a fast enough gesture
+outruns that decode — showing the slot's raw black background underneath for a moment.
+Matches this reader's established pattern of bugs specifically affecting loose-image content.
+Confirmed via `git log -S` this `isCompressed` split goes back to the initial commit, not a
+deliberate loose-vs-compressed design choice.
+
+**Fix applied**: removed the `isCompressed` branch split in `loadEntryTier1` and unified
+every source onto the same predecode-then-paint path already proven for compressed sources
+— a detached `Image()` + `img.decode()` before assigning into the real slot, regardless of
+source type. Since the browser's decoded-pixel cache is keyed by URL (not by element), the
+later `slotPool[si].img.src = url` in the real slot reuses that decode and paints
+immediately. Benefits both single-page mode (via `_upgradeSpSlot`) and long-strip mode,
+since both share `loadEntryTier1`. Syntax-checked clean with `node --check` on the extracted
+inline script — no live/browser verification performed.
+
+**Known residual limitation, not addressed by this fix**: a gesture fast enough to outrun
+the prefetch radius itself (not just the decode) — i.e. reaching a page before
+`_spSchedulePrefetch` ever dispatched a request for it at all — still hits the same
+underlying "black until decode finishes" behavior in `_spApplyUrlToSlot`/`_spLoadEntry`
+(single-page mode's own direct slot-painting path, called at swipe time, which has no
+predecode step of its own). Judged a much narrower edge case than ordinary fast reading,
+which is what the recording showed, so deliberately left as-is rather than expanding scope.
+
+**NOT YET TESTED** — the NAS is currently down (see troubleshooting notes elsewhere in this
+session; SSH stopped responding, then went to a full network dropout after two hard
+power-cycles) so this couldn't be verified live. **To test once the server is back up**:
+reproduce the original bug first if possible (fast swipe/scroll on loose-image content,
+watch for the black edge flash), then confirm it's gone/reduced after this fix, in both
+single-page mode and long-strip mode, on real loose-image manga. The Playwright setup from
+the single-page-mode rebuild session (see above) is the established way to reproduce
+timing-sensitive reader bugs like this one if manual testing doesn't clearly confirm it.
+
+## Auto-reload-on-permission-change interrupting an active read — fix applied, NOT YET TESTED (2026-07-28)
+
+Raised as a hypothetical ("should a forced refresh after a recheck exclude the reader?") but
+traced to a real gap in an already-shipped feature, not a new one. There is no existing
+"force every user to hard-reload after a recheck/rescan" mechanism — what's shipped today
+(`pollScanForChanges` in `static/app.js`) is a soft AJAX re-fetch scoped only to the
+manga-list page, which already covers "see new manga immediately" without a heavier
+broadcast, and never touches the reader at all (the reader doesn't load `app.js`).
+
+The real risk turned out to be a different, already-shipped mechanism: `static/api.js`'s
+`checkAuthState` (see "Security audit" section above — added so a changed permission/role/
+session takes effect on an already-open page, not just the next full load) polls
+`/api/auth/me` every 20s on **every** page, including the reader, and calls
+`window.location.reload()` unconditionally on any change — no exclusion for a page with
+meaningful in-memory state. A hard reload doesn't leave the conveyor's buffer *permanently*
+blank (it's a full reboot — the reader re-fetches and rebuilds from scratch via the same
+boot path as any fresh page load), but it does throw away the materialized slots/exact
+scroll position and land back at the last **saved** checkpoint instead — a real, disruptive
+interruption mid-read, not a cosmetic one.
+
+**Fix applied** (`static/api.js`): `checkAuthState` now returns immediately, before either
+the fetch or any reload, whenever `location.pathname` matches the reader's URL shape
+(`/manga/{lib}/{id}/chapter/...` or `/manga/{lib}/{id}/volume/...` — covers both the
+image-based reader and the EPUB reader, since both are served under those same two route
+patterns). Deliberately safe to defer rather than needing some catch-up mechanism: server-side
+`can_access_library`/`is_manga_blocked` enforcement already applies to every actual content
+request regardless of what this client-side poll does, so skipping it only delays when the
+*UI* catches up, never what the server actually allows — and the moment the user navigates
+away from the reader for any reason, that's a real navigation with a fresh script context,
+which picks up current auth state for free with no special resumption logic needed.
+Syntax-checked clean with `node --check`.
+
+**NOT YET TESTED** — same reason as the entry above (NAS down). **To test once the server is
+back up**: with two accounts/tabs, start reading a manga in long-strip mode as a regular
+user, then from an admin session change that user's permissions (blocked tags, library
+access, or role) and confirm the reader tab does NOT reload/interrupt — then navigate away
+and confirm the change *has* taken effect on the next page (manga list should reflect the
+new permissions). Also worth confirming the pre-existing behavior is unchanged on every
+*other* page (settings, manga list, collections, etc. should still reload promptly on a
+permission change, exactly as before this fix).
+
+## Long-strip mode: pages going low-res every 15th page, periodic across chapter boundaries — REPORTED, root cause NOT YET FOUND, no code changed
+
+Reported live-testing bug, distinct from the two entries above and from "Bug 1 — visible
+seams between images" in the 2026-07-25 write-up (that one is still open with no code
+change; this is a different symptom the user associates with the same investigation
+session, but it's a separate bug). Investigated at length via git history this session —
+**no cause identified yet, nothing reverted, no code changed for this entry.**
+
+**Symptom, in the user's own words/clarifications:**
+- Long-strip mode, on a **loose-image** manga (not archive/PDF/EPUB).
+- Happens **starting cold from page 1** — not tied to switching from single-page mode
+  mid-session, not tied to any particular scroll speed.
+- Roughly every **exactly 15 pages**, images degrade to a very low-res/incompletely-loaded
+  appearance (not a blank/broken placeholder — a real but low-quality image, as if stuck on
+  a thumbnail-tier placeholder rather than the full-res page).
+- Tapping the current page number on the segmented progress bar force-reloads that region
+  at full res — but the *same* periodicity reappears 15 pages later.
+- **The 15-page period is continuous across chapter boundaries, not reset per chapter** —
+  e.g. if the low-res state last appeared 2 pages before a chapter's end, it reappears
+  exactly on page 13 of the *next* chapter (2 + 13 = 15). This means whatever's causing it
+  is tracked against a running/global position, not anything that resets at a chapter edge.
+- Happening on a **different manga** than the one in the original 2026-07-25 bug reports —
+  rules out "one specific corrupt/unusual file" as an explanation.
+- The reader Settings' preload-radius slider is **not even shown** for loose-image content
+  (`preloadWrap.style.display = isCompressed ? '' : 'none'` in `chapter_reader.html` — only
+  archive/PDF/EPUB sources show it), so this isn't a user-adjusted setting; whatever radius
+  applies is the hardcoded default.
+- The user recalls "15" possibly matching a buffer/window size, but a direct check found
+  **no matching constant** — long-strip's own materialized-slot window (`SLOT_COUNT`) is 80,
+  not 15; the only literal `15` in the file is single-page mode's unrelated
+  velocity-scaled prefetch cap (`scaledT1 = Math.round(Math.min(15, ...))` in
+  `_spSchedulePrefetch`), which only ever applies while actively in single-page mode. Worth
+  keeping in mind as a real discrepancy, not dismissing the "15" as necessarily literal —
+  could still be a coincidence of content page-height vs. viewport (`HIGH_PRI_AHEAD` in
+  `recenterConveyor` scales with `viewH`/`avgPageH`), or a genuinely separate mechanism not
+  yet identified.
+
+**What was checked and ruled out this session** (see the two entries above for the
+unrelated fixes made in the same conversation): every commit touching `chapter_reader.html`
+or `main.py` between 2026-07-25 evening and 2026-07-27 (10 commits — the six single-page-mode
+rebuild commits, `add missing Cache-Control header to loose chapter page routes`, `fix
+loose-image volumes serving broken pages in the reader`, plus two EPUB-only commits) was
+diff-reviewed by hunk line range against long-strip's shared loading path (`loadEntry`,
+`loadEntryTier1`, `_applyUrlToSlot`, `TIER1_RADIUS`/`TIER2_RADIUS`, `prefetchAroundIndex`,
+`_shiftConveyorWindow`, `recenterConveyor`). Only one shared-code touch was found
+(`8bc2ecf` renaming `_upgradeSpImage`→`_upgradeSpSlot` inside `loadEntryTier1`) and it's
+purely a single-page-mode-target adaptation with no effect on long-strip's own behavior.
+**No revert was made — there is no confirmed single commit to point at**, and reverting
+blind risks silently undoing one of the already-verified fixes from that same window (the
+July 25 stuck-low-res fix itself, or the loose-volume serving fix).
+
+**Next step, deferred until the server is reachable again**: set up Playwright (already
+installed locally from the single-page-mode rebuild session) against a real or synthetic
+loose-image manga, read cold in long-strip mode from page 1, and confirm the exactly-15
+periodicity live — then instrument at the moment a page goes low-res (materialized window
+bounds, `entry.loaded`, `dataset` markers, `HIGH_PRI_AHEAD`/`HIGH_PRI_BEHIND` values,
+browser dev-tools network panel for per-origin connection-limit contention) to find the
+actual mechanism, since static diffing across the commit range didn't turn up a clear cause.
+
+## Long-strip mode's "Padding between images" toggle never actually did anything — fix applied, NOT YET TESTED (2026-07-28)
+
+Reported: the padding switch in long-strip mode's reader settings has no visible effect at
+all, in either direction.
+
+Root cause: `PAGE_GAP` (`templates/chapter_reader.html`, `const PAGE_GAP = 16`) was only
+ever added into the *virtual* scroll-position math — `buildManifest`/`recomputeGeometry`'s
+`cursorY += scaledH + (usePadding ? PAGE_GAP : 0)` / `y += entry.scaledH + (usePadding ?
+PAGE_GAP : 0)` — which feeds `globalY`/`cursorY`/spacer sizing/scroll-thumb math. Nothing
+anywhere ever applied a matching real gap to the actual rendered `.page-slot` elements:
+each slot's DOM height is set to exactly `scaledH` with no margin, and the `.page-slot` CSS
+rule had no spacing of its own. So toggling the setting genuinely did recompute geometry and
+rebuild the conveyor (real work, not a no-op) — it just never changed what was visually on
+screen, since consecutive slots always rendered flush against each other regardless of the
+setting. Confirmed via `git log -S "PAGE_GAP"` this has been broken since the very first
+commit, not a regression from any later change — nobody had apparently noticed until now.
+(This is a different bug from single-page mode's own `SP_GAP`, which *is* rendered
+correctly via inner slot padding — long-strip's gap and single-page's gap have always been
+deliberately independent, per the comments already in the single-page-mode rebuild code.)
+
+**Fix applied**: added a `--page-gap` CSS custom property, referenced by `.page-slot`'s
+existing rule (`margin-bottom: var(--page-gap, 0px)`), and a small `applyPageGapVar(usePadding)`
+helper that sets it on `readerInner` — called once at initial manifest build and again
+inside `applyPaddingSetting()` (the existing toggle handler), so the visible gap now tracks
+the same `usePadding` flag the geometry math already used. No change to the geometry
+functions themselves — they were already correct, just never had a rendering counterpart.
+Syntax-checked clean with `node --check`.
+
+**NOT YET TESTED** — same reason as the other entries in this session (NAS down). **To test
+once the server is back up**: toggle "Padding between images" in long-strip mode's reader
+settings and confirm a real, visible gap appears/disappears between pages immediately (the
+existing toggle handler already re-anchors scroll position via `setVirtualY`, so also
+confirm the reading position doesn't visibly jump when toggling), and confirm scrolling
+through a full chapter shows a consistent gap throughout, not just near the toggle point.
