@@ -2,6 +2,14 @@
 
 Self-hosted manga/comic reader.
 
+> **Beta**: Kinsho is still under active testing. Expect frequent updates —
+> and occasional breaking changes — in the coming days.
+
+> **Built first for loose image folders**: Kinsho was designed and optimized
+> specifically around reading manga/comics stored as plain folders of loose
+> image files (not just CBZ/CBR archives). That's the use case it performs
+> best on.
+
 Kinsho is a self-hosted manga/comic reader built for people who want to
 serve their own library — CBZ/CBR archives, PDFs, EPUBs, or plain folders of
 images — without a database, without an account with a third party, and

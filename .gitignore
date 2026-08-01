@@ -9,3 +9,6 @@ kinsho-data/
 
 # BLE scroller hardware sketches (hardware-in-progress, not app source)
 arduino/
+
+# Internal AI-agent dev notes -- kept locally, not published in the public repo
+CLAUDE.md
