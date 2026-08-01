@@ -12,3 +12,9 @@ arduino/
 
 # Internal AI-agent dev notes -- kept locally, not published in the public repo
 CLAUDE.md
+
+# Claude Code's own local tool config -- machine-specific, not project source
+.claude/
+
+# Scratch file used to paste content back and forth during dev sessions
+read.txt
