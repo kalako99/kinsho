@@ -489,9 +489,12 @@ createApp({
                 if (!data.running && data.scanned) {
                     const d = new Date(data.last_scanned);
                     const timeStr = d.toLocaleTimeString();
+                    const lib = this.libraries.find(l => l.id === libraryId);
+                    const libName = lib ? lib.name : 'manga';
+                    const libNamePlural = libName.endsWith('s') ? libName : `${libName}'s`;
                     this.scanStatus = {
                         ...this.scanStatus,
-                        [libraryId]: { msg: `✓ ${data.manga_count} mangas found — scanned at ${timeStr}`, type: 'ok' }
+                        [libraryId]: { msg: `✓ ${data.manga_count} ${libNamePlural} found — scanned at ${timeStr}`, type: 'ok' }
                     };
                     this.loadPageCounts();
                     clearInterval(interval);

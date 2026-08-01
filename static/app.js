@@ -318,16 +318,27 @@ const app = createApp({
       // follow-up, not a replacement for the seed above. Vue only touches
       // the DOM nodes that actually differ, so when the seed already
       // matched current server state this is invisible.
-      await this.loadMangas(this.activeTab);
+      //
+      // Passing the cache-seeded lastUpdatedPage through here matters: without
+      // it, this reconciliation fetch would silently hardcode page 1 and
+      // overwrite an already-restored later page (e.g. a back-navigation that
+      // remembered the user was on page 3) right after the correct page's
+      // first paint -- undoing the remembered-position feature for pagination
+      // specifically, even though the remembered scroll Y itself was fine.
+      const activeCached = this.tabCache[this.activeTab];
+      await this.loadMangas(this.activeTab, (activeCached && activeCached.lastUpdatedPage) || 1);
       // Warm every other library's tab cache in the background, whether
       // the user ever visits it this session or not, so switching tabs
       // later is an instant local read instead of a fresh round-trip.
       // Deliberately not awaited (and started only after the active tab's
       // own load above has finished) so this never delays first paint or
-      // competes with it for the browser's connection pool.
+      // competes with it for the browser's connection pool. Same
+      // preferred-page reasoning as above -- otherwise switching to a tab
+      // that was left on a later page would show it reset to page 1.
       for (const tab of this.tabs) {
         if (tab.id !== this.activeTab) {
-          this.loadMangas(tab.id);
+          const cached = this.tabCache[tab.id];
+          this.loadMangas(tab.id, (cached && cached.lastUpdatedPage) || 1);
         }
       }
     }
@@ -460,8 +471,8 @@ const app = createApp({
     // background (mounted()'s prefetch loop) -- buildTabState() never
     // touches live display state itself, so a background call for a tab
     // the user isn't looking at can't clobber what's currently on screen.
-    async loadMangas(libraryId) {
-      const state = await this.buildTabState(libraryId);
+    async loadMangas(libraryId, lastUpdatedPage) {
+      const state = await this.buildTabState(libraryId, lastUpdatedPage);
       if (!state) return;
       this.tabCache[libraryId] = state;
       // Also persisted to sessionStorage (not just kept in memory) so the
@@ -485,7 +496,7 @@ const app = createApp({
     // Pure: fetches + computes everything one tab's view needs, without
     // touching `this.*` — safe to run for a library the user isn't
     // currently looking at (background prefetch) as well as the active one.
-    async buildTabState(libraryId) {
+    async buildTabState(libraryId, lastUpdatedPage = 1) {
       try {
         const [allRes, settingsRes, historyRes] = await Promise.all([
           fetch(`/api/mangas/${libraryId}?sort=alphabetical`),
@@ -569,8 +580,12 @@ const app = createApp({
           if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
         }
 
-        // Last Updated page 1, separately (sorted + paginated), reusing history
-        const lu = await this.fetchLastUpdatedPage(libraryId, 1, historyByMangaId);
+        // Last Updated, separately (sorted + paginated), reusing history --
+        // defaults to page 1 for a fresh tab visit, but callers restoring a
+        // remembered session (see mounted()) pass through whichever page the
+        // user was actually on, so a back-navigation's reconciliation fetch
+        // doesn't silently revert an already-restored later page back to 1.
+        const lu = await this.fetchLastUpdatedPage(libraryId, lastUpdatedPage, historyByMangaId);
         const collectionsRow = await this.fetchCollectionsRow(libraryId);
 
         return {
