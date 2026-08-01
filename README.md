@@ -50,17 +50,19 @@ python main.py
 
 This starts a server on port 8000 and prints the LAN IP it's reachable at.
 The first run auto-creates an `admin`/`admin` account (you'll be required to
-change the password immediately).
+change the password immediately). No build step, no package manager beyond
+pip.
 
 ### Docker
 
 ```bash
 docker build -t kinsho .
-docker run -p 8000:8000 -v /path/to/data:/data kinsho
 ```
 
-No build step beyond installing dependencies — there's no bundler, no
-package manager beyond pip.
+This only builds the image — you still create the container yourself with
+`docker run`. Kinsho needs at least two volumes mounted: one for its own
+app data (put this on your server's main/system drive) and one pointing at
+your actual manga/comics library.
 
 ### Optional format support
 
