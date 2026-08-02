@@ -1767,6 +1767,34 @@
   let TIER1_RADIUS = readerSettings.preloadRadius ?? 7;
   let TIER2_RADIUS = TIER1_RADIUS * 2;
 
+  // Registry of detached prefetch Image() objects still in flight, keyed by
+  // the manifest global index they were requested for. loadEntryTier1/
+  // prefetchEntryTier2 each create a plain `new Image()` with no reference
+  // kept anywhere else -- without this registry, once the conveyor window
+  // moves on (continued scrolling), those old requests are simply abandoned
+  // in the background: nothing ever cancels them, so they keep occupying one
+  // of the browser's handful of per-origin HTTP connections indefinitely.
+  // Confirmed live (not guessed at): after enough continuous scrolling, real
+  // requests for the CURRENTLY VISIBLE page were observed stuck pending for
+  // 10+ seconds, never completing or failing, while only a handful of old
+  // abandoned requests from far-scrolled-past pages were still "in flight"
+  // from the browser's own perspective -- a textbook connection-pool
+  // exhaustion, and the actual root cause of the long-standing "every ~15
+  // pages, low-res buffer zone" bug. cancelStalePrefetches (called from
+  // prefetchAroundIndex on every conveyor shift/rebuild) is what frees these
+  // up once a page falls outside even the widest (tier2) prefetch range.
+  const inFlightPrefetchImages = new Map();
+
+  function cancelStalePrefetches(keepLo, keepHi) {
+    for (const [idx, img] of inFlightPrefetchImages) {
+      if (idx < keepLo || idx > keepHi) {
+        img._cancelled = true;
+        img.src = '';
+        inFlightPrefetchImages.delete(idx);
+      }
+    }
+  }
+
   // Declared here (not down with the rest of the single-page-mode _sp* state)
   // because loadEntryTier1 below reads it synchronously the moment it's first
   // called -- which happens during the initial tier-1 preload, long before
@@ -1829,10 +1857,19 @@
     const si = assignedSlot[globalIdx];
     if (si === -1) return;
     const imgEl = slotPool[si].img;
+    // Marks this entry as having a real (non-thumbnail) fetch in flight or
+    // complete for its currently-assigned slot -- loadEntryTier3 checks
+    // this before overwriting the slot with a thumbnail, so it doesn't
+    // abort a real fetch that's simply still loading. Cleared once retries
+    // are exhausted so a genuinely failed fetch still gets a thumbnail
+    // fallback instead of a permanently broken image.
+    entry._realDispatched = true;
     imgEl.onload = () => { entry.loaded = true; };
     imgEl.onerror = () => {
       if (retriesLeft > 0) {
         setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
+      } else {
+        entry._realDispatched = false;
       }
     };
     imgEl.src = entry.url;
@@ -1897,12 +1934,41 @@
       // which is keyed by URL, not by element, so the later
       // `slotPool[si].img.src = url` reuses that decode and paints
       // immediately regardless of source type.
+      // Tracked in inFlightPrefetchImages (keyed by this entry's global
+      // index) so a later prefetchAroundIndex call -- once the conveyor has
+      // moved on and this page is no longer within even the widest prefetch
+      // range -- can actively cancel it. Without this, this detached Image()
+      // is referenced only by this closure's own pending decode()/catch, so
+      // nothing else can ever reach it to stop it: its underlying network
+      // request keeps running in the background indefinitely even after the
+      // user has scrolled far past this page, permanently occupying one of
+      // the browser's handful of per-origin connections. See
+      // cancelStalePrefetches's own comment for the full reasoning -- this
+      // was confirmed live (not guessed at): after enough continuous
+      // scrolling, real page requests for the CURRENT visible position were
+      // observed stuck pending for 10+ seconds, never completing or failing,
+      // while only a handful of these old abandoned requests were still
+      // "in flight" from the browser's perspective.
       const img = new Image();
+      inFlightPrefetchImages.set(globalIdx, img);
       img.src = url;
       img.decode().then(() => {
+        inFlightPrefetchImages.delete(globalIdx);
         if (si !== -1) slotPool[si].img.src = url;
         onSuccess();
-      }).catch(onFail);
+      }).catch(() => {
+        inFlightPrefetchImages.delete(globalIdx);
+        // A deliberate cancelStalePrefetches() (src cleared because this
+        // page fell outside even the tier2 range) also rejects this same
+        // decode() promise -- retrying here would immediately re-dispatch a
+        // fresh request for a page we just freed a connection slot for,
+        // defeating the whole point of cancelling it. img._cancelled is set
+        // by cancelStalePrefetches right before it clears src, so a real
+        // network/decode failure (never cancelled) is the only case that
+        // still retries.
+        if (img._cancelled) return;
+        onFail();
+      });
     };
     if (entry.url) { apply(entry.url); return; }
     ensureChapterUrls(entry.chapterId).then(urls => apply(urls[entry.localIdx] || ''));
@@ -1916,7 +1982,14 @@
       const url = urls[entry.localIdx] || '';
       if (!url) return;
       entry.url = url;
+      // Same stale-prefetch tracking/cancellation as loadEntryTier1 above --
+      // see that function's comment and cancelStalePrefetches for why.
       const img = new Image();
+      const idx = manifest.indexOf(entry);
+      inFlightPrefetchImages.set(idx, img);
+      const cleanup = () => inFlightPrefetchImages.delete(idx);
+      img.onload = cleanup;
+      img.onerror = cleanup;
       img.src = url;
     });
   }
@@ -1927,9 +2000,30 @@
     const globalIdx = manifest.indexOf(entry);
     const si = assignedSlot[globalIdx];
     if (si === -1) return;
-    if (!slotPool[si].img.dataset.thumbSet) {
-      slotPool[si].img.dataset.thumbSet = '1';
-      slotPool[si].img.src = thumbUrl(entry);
+    const img = slotPool[si].img;
+    // loadEntry() (called for every slot in the window on rebuild/shift,
+    // independently of this tier system) may have already dispatched the
+    // real full-res fetch to this exact slot -- confirmed live: under
+    // realistic network conditions (a real fetch takes real time), that
+    // fetch is often still in flight by the time a later shift's
+    // prefetchAroundIndex reaches this entry's tier3 range. Overwriting it
+    // here would abort the real request, and once the thumbnail's own load
+    // fires, the onload handler _applyUrlToSlot bound for the REAL image
+    // incorrectly marks entry.loaded true -- permanently blocking any
+    // future upgrade to full-res for this page (every loader early-returns
+    // on entry.loaded) until the slot is vacated and reused from scratch.
+    // Skip the stomp whenever the real fetch is still pending or already
+    // succeeded (entry._realDispatched, set by _applyUrlToSlot -- comparing
+    // img.src against entry.url directly doesn't work here, since reading
+    // back img.src always yields a browser-normalized absolute URL while
+    // entry.url is stored as the original relative path, so the two can
+    // never be string-equal). _applyUrlToSlot clears the flag once retries
+    // are exhausted, so a permanently-failed fetch still falls through to
+    // the thumbnail below instead of being left broken forever.
+    if (entry._realDispatched) return;
+    if (!img.dataset.thumbSet) {
+      img.dataset.thumbSet = '1';
+      img.src = thumbUrl(entry);
     }
   }
 
@@ -1956,6 +2050,11 @@
     const hi1 = Math.min(manifest.length - 1, centerGlobalIdx + fwdT1);
     const lo2 = Math.max(0, centerGlobalIdx - backT2);
     const hi2 = Math.min(manifest.length - 1, centerGlobalIdx + fwdT2);
+
+    // Free up any previously-dispatched full-res prefetch that's now outside
+    // even the widest (tier2) range -- see cancelStalePrefetches's own
+    // definition for why this matters.
+    cancelStalePrefetches(lo2, hi2);
 
     for (let i = lo1; i <= hi1; i++) { if (signal?.aborted) return; loadEntryTier1(manifest[i], signal); }
     for (let i = lo2; i < lo1;  i++) { if (signal?.aborted) return; prefetchEntryTier2(manifest[i], signal); }
@@ -2016,7 +2115,16 @@
   // bottomSpacer in place as permanent fixtures -- reader.replaceChildren()
   // would also wipe the spacers, which must never happen.
   function _clearSlotPool() {
-    for (const { el } of slotPool) el.remove();
+    // Clearing src before removal aborts any still-in-flight fetch
+    // loadEntry() dispatched directly onto this slot's <img> -- otherwise
+    // it keeps running in the background after the element is detached
+    // (removal alone doesn't cancel a request, only losing the last
+    // reference via GC does, which isn't immediate), needlessly occupying
+    // one of the browser's handful of per-origin connections for a page
+    // nobody's looking at anymore. Same reasoning as cancelStalePrefetches,
+    // just for loadEntry's direct slot fetches instead of the tier1/tier2
+    // detached-Image() registry.
+    for (const { el, img } of slotPool) { img.src = ''; el.remove(); }
     slotPool.length = 0;
   }
 
@@ -2112,6 +2220,9 @@
         const oldIdx = windowLo + k;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
+        // Abort any still-in-flight fetch on this vacated slot -- see
+        // _clearSlotPool's comment for why this matters.
+        slotPool[k].img.src = '';
         slotPool[k].el.remove();
 
         const newIdx = windowHi + 1 + k;
@@ -2138,6 +2249,7 @@
         const oldIdx = windowHi - k;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
+        slotPool[slotPool.length - 1 - k].img.src = '';
         slotPool[slotPool.length - 1 - k].el.remove();
       }
       windowLo -= n;
