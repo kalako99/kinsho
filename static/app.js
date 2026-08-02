@@ -638,6 +638,23 @@ const app = createApp({
       this.lastUpdatedPage    = result.page;
       this.lastUpdatedTotal   = result.total;
       this.lastUpdatedColumns = result.columns;
+      // Keep the persisted snapshot (tabCache + sessionStorage) in sync with
+      // what's actually on screen -- without this, clicking a page button only
+      // ever updated the live view above, so the cache a later back-navigation
+      // restores from still held whichever page was cached at the last full
+      // loadMangas() (normally page 1 from the initial load). That's what made
+      // "go to page 2, open a manga, hit back" always land back on page 1
+      // instead of page 2, even though the scroll Y itself restored correctly.
+      if (this.tabCache[libraryId]) {
+        this.tabCache[libraryId] = {
+          ...this.tabCache[libraryId],
+          lastUpdated:        result.mangas,
+          lastUpdatedPage:    result.page,
+          lastUpdatedTotal:   result.total,
+          lastUpdatedColumns: result.columns,
+        };
+        persistTabState(libraryId, this.tabCache[libraryId]);
+      }
     },
 
     // Pure: fetches + computes one Last Updated page without touching
