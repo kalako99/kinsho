@@ -1436,7 +1436,7 @@
             :class="{ selected: metaSelected === c }"
             @click="metaSelected = c"
           >
-            <img v-if="c.preview_cover_url || c.cover_url_medium" :src="c.preview_cover_url || c.cover_url_medium" class="meta-cover">
+            <img v-if="c.preview_cover_url || c.cover_url_medium" :src="c.preview_cover_url || c.cover_url_medium" referrerpolicy="no-referrer" class="meta-cover">
             <div v-else class="meta-cover-ph"></div>
             <div class="meta-info">
               <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
@@ -1468,7 +1468,7 @@
             :class="{ selected: metaSelected === c }"
             @click="metaSelected = c"
           >
-            <img v-if="c.preview_cover_url" :src="c.preview_cover_url" class="meta-cover">
+            <img v-if="c.preview_cover_url" :src="c.preview_cover_url" referrerpolicy="no-referrer" class="meta-cover">
             <div v-else class="meta-cover-ph"></div>
             <div class="meta-info">
               <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
