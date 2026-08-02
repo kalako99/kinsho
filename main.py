@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, BackgroundTasks, Query
+from fastapi import FastAPI, Request, BackgroundTasks, Query, Depends, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, FileResponse
@@ -5075,7 +5075,27 @@ def get_volume_pages(request: Request, library_id: int, manga_id: str, volume_id
 
     return JSONResponse({"pages": pages, "count": len(pages)})
 
-@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{filename_or_index}")
+async def abort_if_disconnected(request: Request):
+    """
+    Cheap early-exit for a page request whose client has already given up by
+    the time this dependency resolves. Runs on the event loop, before the
+    sync page-serving handlers below get dispatched into Starlette's
+    threadpool -- so a request that's already abandoned (e.g. part of
+    manga_detail.html/volume_detail.html's background reader-page preload,
+    for a manga the user has since navigated away from) doesn't waste a
+    threadpool slot reading/decoding a page image nobody's waiting for
+    anymore. This is the server-side half of that preload's own cleanup --
+    see cancelBackgroundPreloads() in those templates for the client side.
+
+    Deliberately doesn't attempt to interrupt work already in progress once
+    a handler has started reading a file/archive entry -- letting a
+    single page read finish is simpler and safer than adding cancellation
+    checks mid-read, and each read is small enough that it isn't worth it.
+    """
+    if await request.is_disconnected():
+        raise HTTPException(status_code=499, detail="Client disconnected")
+
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
 def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, filename_or_index: str, scale: float = 1.5):
     username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
@@ -5317,7 +5337,7 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
         pages = [f"{base_url}/{fname}" for fname in files]
         return JSONResponse({"pages": pages, "count": len(pages)})
 
-@app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}")
+@app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
 def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str):
     from fastapi.responses import FileResponse
     username = auth.get_opds_user(request)

@@ -1712,6 +1712,14 @@ createApp({
   },
 
   async mounted() {
+    // Registered immediately, before any of the async work below, so even a
+    // very fast navigate-away (clicking straight into another manga) is
+    // covered -- see cancelBackgroundPreloads()'s own comment for why this
+    // matters. pagehide (not beforeunload) since it fires reliably on a real
+    // navigation without blocking the back-forward cache.
+    this._preloadImages = [];
+    window.addEventListener('pagehide', () => this.cancelBackgroundPreloads());
+
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
     }).catch(() => {});
@@ -1917,6 +1925,7 @@ createApp({
       }
       const controller = new AbortController();
       window.__dimsPrefetchController__ = controller;
+      this._dimsAbortController = controller;
       this._dimsPromise = fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/dims`), {
         signal:   controller.signal,
         priority: 'low',
@@ -1959,8 +1968,28 @@ createApp({
           const img = new Image();
           img.fetchPriority = 'low';
           img.src = apiUrl(u);
+          // Kept so cancelBackgroundPreloads() can abandon these if the user
+          // navigates away before they finish -- see that method's comment.
+          this._preloadImages.push(img);
         }
       } catch (e) { /* cache warming is best-effort */ }
+    },
+
+    // Stops this page's own background preload work (dims fetch + reader-page
+    // image warming) as soon as the user navigates away, rather than leaving
+    // it to the browser's own unload cleanup, which isn't always immediate.
+    // Clicking through several manga in a row to fetch metadata one by one
+    // otherwise leaves each visited page's low-priority requests still
+    // competing for the browser's limited per-origin connection pool right
+    // when the NEXT page needs those same connections for its own real
+    // requests -- this is what made new pages feel stuck behind old ones.
+    // Setting img.src = '' is the standard way to abandon an in-flight
+    // <img> load; the server-side counterpart (bailing out of already-queued
+    // work for a client that's already gone) lives in get_volume_page.
+    cancelBackgroundPreloads() {
+      if (this._dimsAbortController) this._dimsAbortController.abort();
+      for (const img of this._preloadImages) img.src = '';
+      this._preloadImages = [];
     },
 
     async loadAdminStatus() {
