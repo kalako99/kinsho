@@ -611,8 +611,37 @@
       overflow-y: auto;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 4px;
       padding: 2px 2px 12px;
+    }
+    .meta-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .meta-section-heading {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: rgba(255,255,255,0.4);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 2px 0;
+    }
+    .meta-section-loading {
+      font-size: 0.68rem;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: normal;
+      color: var(--color-primary, #e94560);
+    }
+    .meta-section-empty {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.3);
+      padding: 4px 2px;
     }
     .meta-candidate {
       display: flex;
@@ -820,10 +849,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      opacity: 0;
-      transition: opacity 0.15s, background 0.15s;
+      transition: background 0.15s;
     }
-    .cover-option:hover .cover-option-delete { opacity: 1; }
     .cover-option-delete:hover { background: rgba(233,69,96,0.9); color: #fff; }
     .poster-clickable {
       cursor: pointer;
@@ -1363,7 +1390,7 @@
   <!-- FETCH METADATA POPUP -->
   <div class="popup-overlay" v-if="showMetadataPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showMetadataPopup = false)">
     <div class="popup meta-popup">
-      <div class="popup-title">Fetch Metadata from AniList</div>
+      <div class="popup-title">Fetch Metadata</div>
       <div class="meta-search-row">
         <input
           class="meta-search-input"
@@ -1376,39 +1403,92 @@
           {{ metaSearching ? 'Searching…' : 'Search' }}
         </button>
       </div>
-      <div class="meta-candidates" v-if="displayMetaCandidates.length > 0">
-        <div
-          v-for="(c, i) in displayMetaCandidates"
-          :key="c.anilist_id || 'local'"
-          class="meta-candidate"
-          :class="{ selected: i === metaSelectedIdx }"
-          @click="metaSelectedIdx = i"
-        >
-          <img v-if="c.cover_url_medium" :src="c.cover_url_medium" class="meta-cover">
-          <div v-else class="meta-cover-ph"></div>
-          <div class="meta-info">
-            <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
-            <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
-            <div class="meta-badges">
-              <template v-if="c.source === 'local'">
+      <div class="meta-candidates" v-if="hasAnyMetaCandidates || metaLoadingAnilist || metaLoadingMangadex">
+        <div class="meta-section" v-if="localMetaCandidate">
+          <div class="meta-section-heading">Local File</div>
+          <div
+            class="meta-candidate"
+            :class="{ selected: metaSelected === localMetaCandidate }"
+            @click="metaSelected = localMetaCandidate"
+          >
+            <div class="meta-cover-ph"></div>
+            <div class="meta-info">
+              <div class="meta-title">{{ localMetaCandidate.title_english || localMetaCandidate.title_romaji }}</div>
+              <div class="meta-badges">
                 <span class="meta-badge-sm">LOCAL FILE</span>
-              </template>
-              <template v-else>
+              </div>
+              <div class="meta-genres-preview" v-if="(localMetaCandidate.genres || []).length">
+                {{ (localMetaCandidate.genres || []).slice(0, 5).join(' · ') }}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="meta-section">
+          <div class="meta-section-heading">
+            AniList
+            <span v-if="metaLoadingAnilist" class="meta-section-loading">loading…</span>
+          </div>
+          <div
+            v-for="c in metaCandidatesAnilist"
+            :key="'al:' + c.anilist_id"
+            class="meta-candidate"
+            :class="{ selected: metaSelected === c }"
+            @click="metaSelected = c"
+          >
+            <img v-if="c.preview_cover_url || c.cover_url_medium" :src="c.preview_cover_url || c.cover_url_medium" class="meta-cover">
+            <div v-else class="meta-cover-ph"></div>
+            <div class="meta-info">
+              <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
+              <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
+              <div class="meta-badges">
                 <span class="meta-badge-sm" v-if="c.format">{{ c.format }}</span>
                 <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
                 <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
                   {{ Math.round(c.match_score * 100) }}% match
                 </span>
-              </template>
-            </div>
-            <div class="meta-genres-preview" v-if="(c.genres || []).length">
-              {{ (c.genres || []).slice(0, 5).join(' · ') }}
+              </div>
+              <div class="meta-genres-preview" v-if="(c.genres || []).length">
+                {{ (c.genres || []).slice(0, 5).join(' · ') }}
+              </div>
             </div>
           </div>
+          <div class="meta-section-empty" v-if="!metaLoadingAnilist && metaCandidatesAnilist.length === 0 && metaSearchedOnce">No AniList matches.</div>
+        </div>
+
+        <div class="meta-section">
+          <div class="meta-section-heading">
+            MangaDex
+            <span v-if="metaLoadingMangadex" class="meta-section-loading">loading…</span>
+          </div>
+          <div
+            v-for="c in metaCandidatesMangadex"
+            :key="'md:' + c.mangadex_id"
+            class="meta-candidate"
+            :class="{ selected: metaSelected === c }"
+            @click="metaSelected = c"
+          >
+            <img v-if="c.preview_cover_url" :src="c.preview_cover_url" class="meta-cover">
+            <div v-else class="meta-cover-ph"></div>
+            <div class="meta-info">
+              <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
+              <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
+              <div class="meta-badges">
+                <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
+                <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
+                  {{ Math.round(c.match_score * 100) }}% match
+                </span>
+              </div>
+              <div class="meta-genres-preview" v-if="(c.genres || []).length">
+                {{ (c.genres || []).slice(0, 5).join(' · ') }}
+              </div>
+            </div>
+          </div>
+          <div class="meta-section-empty" v-if="!metaLoadingMangadex && metaCandidatesMangadex.length === 0 && metaSearchedOnce">No MangaDex matches.</div>
         </div>
       </div>
       <div class="meta-empty" v-else>{{ metaStatus.msg || 'Search for a title above.' }}</div>
-      <div class="meta-fields-row" v-if="displayMetaCandidates.length > 0">
+      <div class="meta-fields-row" v-if="hasAnyMetaCandidates">
         <span style="font-size:0.72rem;color:#777;">Import:</span>
         <label><input type="checkbox" v-model="metaFields.description"> Description</label>
         <label><input type="checkbox" v-model="metaFields.genres"> Genres</label>
@@ -1419,11 +1499,11 @@
         <button class="popup-btn soft" @click="showMetadataPopup = false">Cancel</button>
         <button
           class="popup-btn primary"
-          :disabled="metaSelectedIdx === null || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags && !metaFields.cover)"
+          :disabled="!metaSelected || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags && !metaFields.cover)"
           @click="applyMetadata"
         >{{ metaApplying ? 'Applying…' : 'Apply' }}</button>
       </div>
-      <div v-if="metaStatus.msg && displayMetaCandidates.length > 0" class="meta-status" :class="metaStatus.type">
+      <div v-if="metaStatus.msg && hasAnyMetaCandidates" class="meta-status" :class="metaStatus.type">
         {{ metaStatus.msg }}
       </div>
     </div>
@@ -1509,15 +1589,18 @@ createApp({
       showCollectionDropdown: false,
       collectionSearch:     '',
       // fetch metadata popup
-      showMetadataPopup:    false,
-      metaSearch:           '',
-      metaSearching:        false,
-      metaCandidates:       [],
-      localMetaCandidate:   null,
-      metaSelectedIdx:      null,
-      metaFields:           { description: true, genres: true, tags: true, cover: true },
-      metaApplying:         false,
-      metaStatus:           { msg: '', type: '' },
+      showMetadataPopup:      false,
+      metaSearch:             '',
+      metaCandidatesAnilist:  [],
+      metaCandidatesMangadex: [],
+      metaLoadingAnilist:     false,
+      metaLoadingMangadex:    false,
+      localMetaCandidate:     null,
+      metaSelected:           null,
+      metaSearchedOnce:       false,
+      metaFields:             { description: true, genres: true, tags: true, cover: true },
+      metaApplying:           false,
+      metaStatus:             { msg: '', type: '' },
     };
   },
   
@@ -1550,8 +1633,12 @@ createApp({
       return this.allCollections.some(c => c.has_manga);
     },
 
-    displayMetaCandidates() {
-      return this.localMetaCandidate ? [this.localMetaCandidate, ...this.metaCandidates] : this.metaCandidates;
+    metaSearching() {
+      return this.metaLoadingAnilist || this.metaLoadingMangadex;
+    },
+
+    hasAnyMetaCandidates() {
+      return !!this.localMetaCandidate || this.metaCandidatesAnilist.length > 0 || this.metaCandidatesMangadex.length > 0;
     },
 
     sortedChapters() {
@@ -2106,42 +2193,79 @@ createApp({
     },
 
     async openMetadataSearch() {
-      this.metaSearch     = this.manga ? this.manga.name : '';
-      this.metaCandidates = [];
-      this.localMetaCandidate = null;
-      this.metaSelectedIdx = null;
-      this.metaStatus     = { msg: '', type: '' };
-      this.showMetadataPopup = true;
+      this.metaSearch             = this.manga ? this.manga.name : '';
+      this.metaCandidatesAnilist  = [];
+      this.metaCandidatesMangadex = [];
+      this.localMetaCandidate     = null;
+      this.metaSelected           = null;
+      this.metaSearchedOnce       = false;
+      this.metaStatus             = { msg: '', type: '' };
+      this.showMetadataPopup      = true;
       try {
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/local-metadata`));
         const data = await res.json();
         this.localMetaCandidate = data.candidate || null;
-        if (this.localMetaCandidate) this.metaSelectedIdx = 0;
+        if (this.localMetaCandidate) this.metaSelected = this.localMetaCandidate;
       } catch (e) {
         this.localMetaCandidate = null;
       }
     },
 
+    // Dispatches two independent, unawaited searches so the AniList section
+    // (which returns first) is already browsable while MangaDex is still
+    // loading in the background — not one blocking call for both.
     async searchMetadata() {
       if (!this.metaSearch.trim()) return;
-      this.metaSearching   = true;
-      this.metaCandidates  = [];
-      this.metaSelectedIdx = null;
-      this.metaStatus      = { msg: '', type: '' };
+      this.metaCandidatesAnilist  = [];
+      this.metaCandidatesMangadex = [];
+      this.metaSelected     = this.localMetaCandidate || null;
+      this.metaSearchedOnce = true;
+      this.metaStatus       = { msg: '', type: '' };
+      // Plain (non-reactive) instance counter, not declared in data() on
+      // purpose — guards against a slow MangaDex response from a previous
+      // search landing after a newer one has already started.
+      this._metaSearchToken = (this._metaSearchToken || 0) + 1;
+      const token = this._metaSearchToken;
+      this._searchAnilistMetadata(token);
+      this._searchMangadexMetadata(token);
+    },
+
+    async _searchAnilistMetadata(token) {
+      this.metaLoadingAnilist = true;
       try {
-        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}`));
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}&provider=anilist`));
         const data = await res.json();
-        this.metaCandidates = data.candidates || [];
-        if (this.metaCandidates.length > 0) this.metaSelectedIdx = this.localMetaCandidate ? 1 : 0;
-        else this.metaStatus = { msg: 'No results found.', type: '' };
+        if (token !== this._metaSearchToken) return;
+        this.metaCandidatesAnilist = data.candidates || [];
+        if (!this.metaSelected && this.metaCandidatesAnilist.length > 0) {
+          this.metaSelected = this.metaCandidatesAnilist[0];
+        }
       } catch (e) {
-        this.metaStatus = { msg: 'Search failed.', type: 'err' };
+        if (token === this._metaSearchToken) this.metaStatus = { msg: 'AniList search failed.', type: 'err' };
       }
-      this.metaSearching = false;
+      if (token === this._metaSearchToken) this.metaLoadingAnilist = false;
+    },
+
+    async _searchMangadexMetadata(token) {
+      this.metaLoadingMangadex = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}&provider=mangadex`));
+        const data = await res.json();
+        if (token !== this._metaSearchToken) return;
+        this.metaCandidatesMangadex = data.candidates || [];
+        if (!this.metaSelected && this.metaCandidatesMangadex.length > 0) {
+          this.metaSelected = this.metaCandidatesMangadex[0];
+        }
+      } catch (e) {
+        // AniList's own status message (if any) already covers the popup's
+        // one status line — a MangaDex-specific failure just leaves that
+        // section empty rather than overwriting it.
+      }
+      if (token === this._metaSearchToken) this.metaLoadingMangadex = false;
     },
 
     async applyMetadata() {
-      if (this.metaSelectedIdx === null) return;
+      if (!this.metaSelected) return;
       const fields = Object.entries(this.metaFields).filter(([, v]) => v).map(([k]) => k);
       if (fields.length === 0) return;
       this.metaApplying = true;
@@ -2150,7 +2274,7 @@ createApp({
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/apply-metadata`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ candidate: this.displayMetaCandidates[this.metaSelectedIdx], fields }),
+          body: JSON.stringify({ candidate: this.metaSelected, fields }),
         });
         const data = await res.json();
         if (data.ok) {

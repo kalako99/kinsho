@@ -27,6 +27,8 @@ createApp({
       scanStatus: {},
       metaScanStatus: {},
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
+      metadataFetchPriority: 'anilist',
+      metadataPriorityStatus: { msg: '', type: '' },
       hiddenLibraries: [],
       libraryVisibilityStatus: { msg: '', type: '' },
       pageCounts: {},        // library_id (string) -> {total_pages, total_chapters, total_volumes}
@@ -327,6 +329,7 @@ createApp({
         this.hiddenLibraries        = (data.hidden_libraries || []).map(String);
         this.showCollectionsRow     = data.show_collections_row     !== false;
         this.hideAdminCollections   = data.hide_admin_collections   === true;
+        this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
         this.activeCustomThemeName  = data.active_custom_theme_name || '';
         this.customThemes           = data.custom_themes            || {};
@@ -667,6 +670,24 @@ createApp({
         this.visualThemeStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.visualThemeStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    // ── METADATA FETCH PRIORITY (admin, affects only the bulk/automatic scan) ──
+    async saveMetadataPriority() {
+      try {
+        const res  = await fetch(apiUrl('/api/settings/metadata-priority'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ priority: this.metadataFetchPriority }),
+        });
+        const data = await res.json();
+        this.metadataPriorityStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: data.error || 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.metadataPriorityStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.metadataPriorityStatus = { msg: '', type: '' }; }, 3000);
     },
 
     onCustomThemeClick() {

@@ -66,6 +66,104 @@ query ($search: String, $perPage: Int, $format: [MediaFormat]) {
 }
 """
 
+# Same field selection as ANILIST_SEARCH_QUERY, but a single lookup by id
+# (Media, not Page.media) rather than a title search — used to find the exact
+# AniList counterpart of a MangaDex candidate that carries an anilist_id_link,
+# with zero fuzzy-matching risk (see find_anilist_for_mangadex).
+ANILIST_BY_ID_QUERY = """
+query ($id: Int) {
+  Media(id: $id, type: MANGA) {
+    id
+    format
+    title {
+      romaji
+      english
+      native
+    }
+    description(asHtml: false)
+    genres
+    tags {
+      name
+      rank
+    }
+    synonyms
+    status
+    coverImage {
+      extraLarge
+      large
+      medium
+    }
+    siteUrl
+  }
+}
+"""
+
+
+def _normalize_anilist_media(m: dict) -> dict:
+    """
+    Convert one raw AniList `media` object (from either the search query's
+    Page.media list or the by-id query's single Media) into this module's
+    normalized candidate shape — see search_anilist_manga's own docstring
+    for the exact field list. Shared by both so they can never drift apart.
+    """
+    title_obj = m.get("title") or {}
+    cover_obj = m.get("coverImage") or {}
+    return {
+        "provider":         "anilist",
+        "anilist_id":       m.get("id"),
+        "format":           m.get("format"),
+        "title_romaji":     title_obj.get("romaji"),
+        "title_english":    title_obj.get("english"),
+        "title_native":     title_obj.get("native"),
+        "description":      m.get("description"),
+        "genres":           m.get("genres") or [],
+        "tags":             m.get("tags") or [],
+        "synonyms":         m.get("synonyms") or [],
+        "status":           m.get("status"),
+        "cover_url_extra_large": cover_obj.get("extraLarge"),
+        "cover_url_large":  cover_obj.get("large"),
+        "cover_url_medium": cover_obj.get("medium"),
+        "site_url":         m.get("siteUrl"),
+    }
+
+
+async def get_anilist_by_id(anilist_id: int) -> dict | None:
+    """
+    Look up a single AniList MANGA entry by its numeric id.
+
+    Used for the exact-ID-join tier of find_anilist_for_mangadex: MangaDex
+    stores an "al" external link (AniList id) on many entries, and when
+    present it's a zero-fuzzy-matching-risk cross-provider join in the
+    MangaDex-to-AniList direction, mirroring what find_mangadex_for_anilist
+    already does the other way via MangaDex's own links.al field.
+
+    Returns the normalized candidate dict (same shape as search_anilist_manga's
+    results), or None if AniList has no MANGA entry with that id — confirmed
+    live against the real API that this is a 404 HTTP status, not a 200 with
+    a null Media field as GraphQL's schema alone might suggest, so that case
+    is handled explicitly here rather than left to raise.
+
+    Raises the same exceptions as search_anilist_manga for any other failure,
+    with the same "error policy belongs to the caller" reasoning.
+    """
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            ANILIST_API_URL,
+            json={"query": ANILIST_BY_ID_QUERY, "variables": {"id": anilist_id}},
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        payload = response.json()
+
+    if "errors" in payload:
+        raise RuntimeError(f"AniList GraphQL error: {payload['errors']}")
+
+    media = payload.get("data", {}).get("Media")
+    if not media:
+        return None
+    return _normalize_anilist_media(media)
+
 
 async def search_anilist_manga(
     title: str,
@@ -128,30 +226,7 @@ async def search_anilist_manga(
         raise RuntimeError(f"AniList GraphQL error: {payload['errors']}")
 
     raw_results = payload.get("data", {}).get("Page", {}).get("media", [])
-
-    results = []
-    for m in raw_results:
-        title_obj = m.get("title") or {}
-        cover_obj = m.get("coverImage") or {}
-        results.append({
-            "provider":         "anilist",
-            "anilist_id":       m.get("id"),
-            "format":           m.get("format"),
-            "title_romaji":     title_obj.get("romaji"),
-            "title_english":    title_obj.get("english"),
-            "title_native":     title_obj.get("native"),
-            "description":      m.get("description"),
-            "genres":           m.get("genres") or [],
-            "tags":             m.get("tags") or [],
-            "synonyms":         m.get("synonyms") or [],
-            "status":           m.get("status"),
-            "cover_url_extra_large": cover_obj.get("extraLarge"),
-            "cover_url_large":  cover_obj.get("large"),
-            "cover_url_medium": cover_obj.get("medium"),
-            "site_url":         m.get("siteUrl"),
-        })
-
-    return results
+    return [_normalize_anilist_media(m) for m in raw_results]
 
 
 MANGADEX_API_URL = "https://api.mangadex.org"
@@ -470,6 +545,100 @@ async def find_mangadex_for_anilist(anilist_candidate: dict, min_score: float = 
         match = pick_mangadex_match(anilist_candidate, md_results, min_score)
         if match:
             return match
+    return None
+
+
+def _mangadex_query_names(mangadex_candidate: dict) -> list[str]:
+    """
+    Every name a MangaDex candidate is known by: english/romaji/native
+    titles, deduplicated (post-normalization) in that order. Mirrors
+    _anilist_query_names, minus a synonyms list — MangaDex candidates (see
+    search_mangadex_manga) don't carry one.
+    """
+    names = []
+    for key in ("title_english", "title_romaji", "title_native"):
+        v = mangadex_candidate.get(key)
+        if v:
+            names.append(v)
+    seen, out = set(), []
+    for n in names:
+        k = _normalize_title(n)
+        if k and k not in seen:
+            seen.add(k)
+            out.append(n)
+    return out
+
+
+async def find_anilist_for_mangadex(mangadex_candidate: dict, min_score: float = 0.6) -> dict | None:
+    """
+    Find the AniList entry corresponding to `mangadex_candidate` — the
+    reverse of find_mangadex_for_anilist, needed for MangaDex-first
+    automatic-fetch priority (see main.py's scan_library_metadata).
+
+    Two tiers, strongest first:
+      1. Exact ID join — MangaDex stores AniList's id as an "al" external
+         link (mangadex_candidate["anilist_id_link"], from
+         search_mangadex_manga). When present, a single direct AniList
+         lookup by that id (get_anilist_by_id) is a zero-fuzzy-matching-risk
+         join — no need to search and hope the right entry shows up in
+         results, unlike a title search would be.
+      2. Multi-name fuzzy match — search AniList once per name MangaDex
+         knows this series by (english/romaji/native titles), score every
+         returned AniList candidate against ALL of those names, and accept
+         the best match across every search if it clears min_score.
+
+    Returns the chosen candidate (with match_score/matched_by keys added) or
+    None — a missing counterpart beats a wrong one, same philosophy as
+    find_mangadex_for_anilist/pick_mangadex_match.
+
+    A 429 from AniList (rate limit) propagates immediately rather than being
+    swallowed, in either tier, so a caller running a batch (the scan loop's
+    circuit breaker) can see it and stop hitting AniList for the rest of the
+    batch — every other exception is treated as "this attempt didn't work,
+    try the next thing" instead.
+    """
+    al_id_link = mangadex_candidate.get("anilist_id_link")
+    if al_id_link is not None:
+        try:
+            anilist_id = int(al_id_link)
+        except (TypeError, ValueError):
+            anilist_id = None
+        if anilist_id is not None:
+            try:
+                match = await get_anilist_by_id(anilist_id)
+                if match:
+                    chosen = dict(match)
+                    chosen["match_score"] = 1.0
+                    chosen["matched_by"] = "anilist_id"
+                    return chosen
+            except httpx.HTTPStatusError as e:
+                if e.response is not None and e.response.status_code == 429:
+                    raise
+                # Non-429 errors (network hiccup, AniList outage) fall
+                # through to the fuzzy tier below instead of failing outright.
+            except Exception:
+                pass
+
+    names = _mangadex_query_names(mangadex_candidate)
+    best, best_score = None, 0.0
+    for query in names[:3]:
+        try:
+            al_results = await search_anilist_manga(query, per_page=8)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                raise
+            continue
+        except Exception:
+            continue
+        for ac in al_results:
+            score = max((score_title_match(n, ac) for n in names), default=0.0)
+            if score > best_score:
+                best, best_score = ac, score
+    if best is not None and best_score >= min_score:
+        chosen = dict(best)
+        chosen["match_score"] = best_score
+        chosen["matched_by"] = "title"
+        return chosen
     return None
 
 

@@ -650,6 +650,24 @@
     <!-- ── ADMIN VIEW: full library controls ── -->
     <template v-if="isAdmin">
 
+    <div class="card" style="display:flex; flex-direction:column; gap:10px; margin-bottom:14px;">
+      <div class="field-label">Automatic fetch priority</div>
+      <div class="section-hint" style="margin:0 0 4px;">
+        Which provider the bulk "Fetch metadata" scan below tries first for each manga.
+        The other is used as a fallback when a series isn't found on your chosen one, and to fill in fields it's missing.
+        Doesn't affect the single-manga Fetch Metadata popup on a manga's own page — that always searches both directly.
+      </div>
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0;">
+        <input type="radio" v-model="metadataFetchPriority" value="anilist" @change="saveMetadataPriority" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
+        <div style="font-size:0.85rem; font-weight:600;">AniList first</div>
+      </label>
+      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0; border-top:1px solid var(--color-border,#2a2a2a);">
+        <input type="radio" v-model="metadataFetchPriority" value="mangadex" @change="saveMetadataPriority" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
+        <div style="font-size:0.85rem; font-weight:600;">MangaDex first</div>
+      </label>
+      <div class="status-msg" :class="metadataPriorityStatus.type" v-text="metadataPriorityStatus.msg" style="min-height:0; margin:0;"></div>
+    </div>
+
     <div class="section-hint">
       Each library is a folder on your system containing manga, webtoons, books, etc.
       Give each one a name — this will become the tab label on the main page.

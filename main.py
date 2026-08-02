@@ -1479,25 +1479,27 @@ def _image_width(img_bytes: bytes) -> int:
     except Exception:
         return 0
 
-async def fetch_and_set_cover(
-    library_id: int,
-    manga: dict,
+async def resolve_best_cover(
     anilist_candidate: dict | None,
     mangadex_candidate: dict | None,
-) -> bool:
+) -> tuple[str | None, bytes | None]:
     """
-    Fetch a cover image for the matched manga, process it into the manga's
-    covers directory (small + large), and set it as the manga's default cover
-    (manga["cover"]). User-selected covers still take priority since the
-    per-user override is checked before manga["cover"] when serving.
+    Decide which cover image actually wins between an AniList candidate and
+    its MangaDex counterpart, and download it.
 
     Source selection: AniList's cover is used by default, but if it's narrower
     than FETCHED_COVER_TARGET_WIDTH the MangaDex candidate's original-resolution
     cover is used instead when it's actually larger. Either candidate may be
     None (e.g. MangaDex-only match, or no MangaDex fallback found).
 
-    Mutates manga["cover"] in place; the caller is responsible for persisting
-    the change via save_app_data. Returns True if a cover was set.
+    This is the single source of truth for that decision — both
+    fetch_and_set_cover (actually writing the cover) and search_metadata_endpoint
+    (previewing what WOULD be written, before the user applies anything) call
+    this same function, so the popup's preview can never disagree with what
+    Apply actually does.
+
+    Returns (chosen_url, chosen_bytes), or (None, None) if neither source
+    yielded a usable image.
     """
     anilist_url = None
     if anilist_candidate:
@@ -1529,6 +1531,33 @@ async def fetch_and_set_cover(
             except Exception:
                 pass
 
+    return chosen_url, chosen_bytes
+
+
+async def fetch_and_set_cover(
+    library_id: int,
+    manga: dict,
+    anilist_candidate: dict | None,
+    mangadex_candidate: dict | None,
+) -> bool:
+    """
+    Fetch a cover image for the matched manga and process it into the manga's
+    covers directory (small + large), adding it as a new selectable option.
+
+    Only fills manga["cover"] (the shared default) when the manga doesn't
+    already have one — an existing cover (scan-derived, previously fetched, or
+    picked) is never silently replaced by a later metadata fetch. The fetched
+    file is still written to disk either way, so it always becomes available
+    as an option in the cover picker even when it doesn't become the default.
+    User-selected covers still take priority regardless, since the per-user
+    override is checked before manga["cover"] when serving.
+
+    Mutates manga["cover"] in place when applicable; the caller is responsible
+    for persisting the change via save_app_data. Returns True if a cover file
+    was successfully fetched and saved, regardless of whether it became the
+    default.
+    """
+    chosen_url, chosen_bytes = await resolve_best_cover(anilist_candidate, mangadex_candidate)
     if not chosen_bytes:
         return False
 
@@ -1549,7 +1578,8 @@ async def fetch_and_set_cover(
     )
     if not result_fname:
         return False
-    manga["cover"] = result_fname
+    if not manga.get("cover"):
+        manga["cover"] = result_fname
     return True
 
 def auto_organize_library_root(library: dict):
@@ -2627,6 +2657,7 @@ def get_settings(request: Request):
         "hidden_libraries":         user_data.get("hidden_libraries", []),
         "show_collections_row":     user_data.get("show_collections_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
+        "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
     })
 
 @app.get("/api/settings/page-counts")
@@ -2697,6 +2728,27 @@ async def set_data_path(request: Request):
     existing = load_app_data()
     existing["data_path"] = new_path
     save_app_data(existing)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/settings/metadata-priority")
+async def set_metadata_priority(request: Request):
+    """
+    Which provider the bulk/automatic metadata scan (scan_library_metadata)
+    tries first for each manga, admin-controlled and global (same tier as
+    data["libraries"]) -- deliberately does NOT affect the manual single-manga
+    Fetch Metadata popup (search_metadata_endpoint/apply_metadata_endpoint),
+    which always searches AniList directly regardless of this setting.
+    """
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    priority = body.get("priority", "").strip().lower()
+    if priority not in ("anilist", "mangadex"):
+        return JSONResponse({"error": "priority must be 'anilist' or 'mangadex'"}, status_code=400)
+    data = load_app_data()
+    data["metadata_fetch_priority"] = priority
+    save_app_data(data)
     return JSONResponse({"ok": True})
 
 @app.post("/api/settings/libraries")
@@ -4025,7 +4077,7 @@ def get_local_metadata(request: Request, library_id: int, manga_id: str):
     }})
 
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
-async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = ""):
+async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = "", provider: str = "anilist"):
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
@@ -4033,9 +4085,53 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
     if not (perms.get("is_admin") or perms.get("metadata_fetch")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     query = q.strip() or manga_id
+
+    if provider == "mangadex":
+        # A real, independent MangaDex candidate list for the popup's own
+        # MangaDex section -- distinct from the AniList branch below, where
+        # MangaDex is only ever consulted per-candidate for a cover preview,
+        # never surfaced as its own set of results.
+        try:
+            results = await metadata_fetch.search_mangadex_manga(query, per_page=8)
+            scored  = metadata_fetch.score_all_candidates(query, results)
+            for c in scored:
+                # MangaDex candidates already carry one resolution tier for
+                # their cover -- no AniList cross-check needed here, unlike
+                # the AniList branch's resolve_candidate_preview_cover below.
+                c["preview_cover_url"] = c.get("cover_url")
+            return JSONResponse({"candidates": scored})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     try:
         results = await metadata_fetch.search_anilist_manga(query, per_page=8)
         scored  = metadata_fetch.score_all_candidates(query, results)
+
+        # Resolve each candidate's actual preview cover the same way Apply will
+        # pick one later (see resolve_best_cover) -- without this, the popup
+        # always showed AniList's own thumbnail even when Apply would silently
+        # swap in a wider MangaDex cover instead (AniList's covers are usually
+        # under FETCHED_COVER_TARGET_WIDTH, so this isn't a rare edge case).
+        # Run concurrently so 8 candidates' MangaDex lookups + image downloads
+        # don't serialize into a slow search; one candidate's failure just
+        # falls back to its plain AniList thumbnail rather than breaking the
+        # rest (see the try/except below).
+        async def resolve_candidate_preview_cover(candidate: dict) -> None:
+            candidate["preview_cover_url"] = (
+                candidate.get("cover_url_medium")
+                or candidate.get("cover_url_large")
+                or candidate.get("cover_url_extra_large")
+            )
+            try:
+                mangadex_best = await metadata_fetch.find_mangadex_for_anilist(candidate)
+                chosen_url, _ = await resolve_best_cover(candidate, mangadex_best)
+                if chosen_url:
+                    candidate["preview_cover_url"] = chosen_url
+            except Exception:
+                pass
+
+        await asyncio.gather(*(resolve_candidate_preview_cover(c) for c in scored))
+
         return JSONResponse({"candidates": scored})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -4100,6 +4196,31 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+async def _try_anilist_primary(name: str, manga_formats: set) -> tuple[dict | None, bool]:
+    """
+    Try to find a single, confident, manga-type-formatted AniList candidate
+    for `name`. Returns (candidate_or_None, hit_rate_limit) -- the caller
+    uses hit_rate_limit to flip its own anilist_enabled circuit breaker for
+    the rest of a batch scan.
+    """
+    try:
+        a_results = await metadata_fetch.search_anilist_manga(name, per_page=8)
+        a_typed = [r for r in a_results if (r.get("format") or "").upper() in manga_formats]
+        return (a_typed[0] if len(a_typed) == 1 else None), False
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 429:
+            return None, True
+        raise
+
+
+async def _try_mangadex_primary(name: str) -> dict | None:
+    """Try to find a single, confident (match_score >= 0.85) MangaDex candidate for `name`."""
+    md_results = await metadata_fetch.search_mangadex_manga(name)
+    scored_md = metadata_fetch.score_all_candidates(name, md_results)
+    strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
+    return strong_md[0] if len(strong_md) == 1 else None
+
+
 @app.post("/api/libraries/{library_id}/scan-metadata")
 async def scan_library_metadata(request: Request, library_id: int):
     username = auth.get_current_user(request)
@@ -4118,8 +4239,13 @@ async def scan_library_metadata(request: Request, library_id: int):
     manga_formats = set(metadata_fetch.ANILIST_MANGA_FORMATS)
     auto_matched = skipped = no_match = errors = 0
     covers_changed = False
+    # Which provider to try first -- admin setting, Settings -> Libraries.
+    # Only affects this bulk/automatic scan; the manual single-manga popup
+    # always searches AniList directly regardless of this setting.
+    priority = data.get("metadata_fetch_priority", "anilist")
     # Once AniList rate-limits us, stop hitting it for the rest of the scan and
-    # run on MangaDex alone — the whole point of the fallback.
+    # run on MangaDex alone — the whole point of the fallback. Also gates the
+    # AniList half of MangaDex-first mode's counterpart lookup below.
     anilist_enabled = True
 
     for manga in mangas:
@@ -4131,45 +4257,57 @@ async def scan_library_metadata(request: Request, library_id: int):
         try:
             name = manga["name"]
 
-            # ── AniList: accept only a single format-matched candidate ──
-            anilist_primary = None
-            if anilist_enabled:
-                try:
-                    a_results = await metadata_fetch.search_anilist_manga(name, per_page=8)
-                    a_typed = [r for r in a_results if (r.get("format") or "").upper() in manga_formats]
-                    if len(a_typed) == 1:
-                        anilist_primary = a_typed[0]
-                except httpx.HTTPStatusError as e:
-                    if e.response is not None and e.response.status_code == 429:
+            # ── Decide source(s), in whichever provider order the admin picked ──
+            # Both directions: the priority provider is tried as a single/
+            # confident match; if it hits, the OTHER provider is looked up as
+            # its same-series counterpart (fills gaps + supplies a cover
+            # candidate) — exact ID join when possible, multi-name fuzzy
+            # match otherwise. If the priority provider misses, the fallback
+            # provider gets one shot at its own direct match against the
+            # folder name, with no further counterpart lookup on that path —
+            # matching this scan's original (pre-priority) AniList-first
+            # asymmetry exactly, just mirrored for whichever side lost.
+            primary = fallback = anilist_for_cover = mangadex_for_cover = None
+
+            if priority == "mangadex":
+                mangadex_primary = await _try_mangadex_primary(name)
+                if mangadex_primary:
+                    counterpart = None
+                    if anilist_enabled:
+                        try:
+                            counterpart = await metadata_fetch.find_anilist_for_mangadex(mangadex_primary)
+                        except httpx.HTTPStatusError as e:
+                            if e.response is not None and e.response.status_code == 429:
+                                anilist_enabled = False
+                            else:
+                                raise
+                        await asyncio.sleep(0.7)
+                    primary, fallback = mangadex_primary, counterpart
+                    anilist_for_cover, mangadex_for_cover = counterpart, mangadex_primary
+                elif anilist_enabled:
+                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats)
+                    if rate_limited:
                         anilist_enabled = False
-                await asyncio.sleep(0.7)
+                    await asyncio.sleep(0.7)
+                    if anilist_primary:
+                        primary = anilist_for_cover = anilist_primary
+            else:  # priority == "anilist" (default, original behavior)
+                anilist_primary = None
+                if anilist_enabled:
+                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats)
+                    if rate_limited:
+                        anilist_enabled = False
+                    await asyncio.sleep(0.7)
+                if anilist_primary:
+                    mangadex_best = await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
+                    primary, fallback = anilist_primary, mangadex_best
+                    anilist_for_cover, mangadex_for_cover = anilist_primary, mangadex_best
+                else:
+                    mangadex_single = await _try_mangadex_primary(name)
+                    if mangadex_single:
+                        primary = mangadex_for_cover = mangadex_single
 
-            # ── MangaDex ──
-            # With an AniList match in hand: find the SAME SERIES on MangaDex
-            # (exact links.al ID join, multi-name fuzzy fallback) — matching by
-            # the folder name alone paired wrong-series covers with correct
-            # AniList descriptions. Without one: fall back to the "single
-            # confident entry" rule against the folder name, as before.
-            mangadex_best = mangadex_single = None
-            if anilist_primary:
-                mangadex_best = await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
-            else:
-                md_results = await metadata_fetch.search_mangadex_manga(name)
-                scored_md = metadata_fetch.score_all_candidates(name, md_results)
-                strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
-                mangadex_single = strong_md[0] if len(strong_md) == 1 else None
-
-            # ── Decide source(s) ──
-            # AniList single match → primary, MangaDex fills gaps + cover.
-            # AniList ambiguous/none/rate-limited → fall back to MangaDex, but
-            # only when it has a single (confident) entry, per the spec.
-            if anilist_primary:
-                primary, fallback = anilist_primary, mangadex_best
-                anilist_for_cover, mangadex_for_cover = anilist_primary, mangadex_best
-            elif mangadex_single:
-                primary, fallback = mangadex_single, None
-                anilist_for_cover, mangadex_for_cover = None, mangadex_single
-            else:
+            if primary is None:
                 no_match += 1
                 await asyncio.sleep(0.3)
                 continue
