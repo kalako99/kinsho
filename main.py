@@ -13,6 +13,8 @@ import shutil
 import zipfile
 import io
 import uuid
+import secrets
+import hmac
 from PIL import Image
 from typing import List, Optional
 from datetime import datetime
@@ -107,7 +109,13 @@ app.add_middleware(
 # redirect; static assets (/static) are just JS/CSS and are not gated. Cover
 # images (/covers) are their own authenticated route (see get_cover_image)
 # rather than a plain mount.
-PUBLIC_API_PREFIXES = ("/api/auth/",)
+#
+# /api/admin/idle-status is also excluded: it authenticates via its own
+# dedicated shared-secret header (X-Backup-Token) rather than a normal user
+# session, for an external backup script running on the same host -- letting
+# it through here doesn't weaken anything, since get_idle_status enforces its
+# own equally-strict check before returning anything.
+PUBLIC_API_PREFIXES = ("/api/auth/", "/api/admin/idle-status")
 
 last_activity_ts: float = time.time()
 
@@ -2659,6 +2667,35 @@ def get_settings(request: Request):
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
     })
+
+@app.get("/api/admin/idle-status")
+def get_idle_status(request: Request):
+    """
+    Internal-only endpoint for an external daily backup script to check
+    whether this instance is currently in active use before deciding
+    whether it's safe to briefly stop the container for a consistent
+    backup of its appdata. Deliberately NOT gated by a normal user
+    login (get_current_user/require_admin) -- this is a single-purpose
+    ops credential for a cron script running on the same host, not
+    something that should need a real admin password handed to it.
+    Authenticated instead by a dedicated shared secret
+    (data["backup_check_token"]), provisioned directly into data.json
+    at deploy time, never via the API.
+
+    is_idle()'s own 1200s default (tuned for the background integrity-check
+    feature, which only needs "properly idle for a while") is too lenient
+    here -- reusing it would report "idle" for many minutes after someone
+    actually stopped reading, which is exactly the gap that risks
+    interrupting them. 300s (5 minutes) is a much tighter "is anyone
+    plausibly still around right now" bar: a genuinely active reader's own
+    page loads/progress-saves land well inside that window.
+    """
+    data = load_app_data()
+    expected_token = data.get("backup_check_token")
+    provided_token = request.headers.get("X-Backup-Token", "")
+    if not expected_token or not hmac.compare_digest(provided_token, expected_token):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    return JSONResponse({"idle": is_idle(threshold_seconds=300)})
 
 @app.get("/api/settings/page-counts")
 def get_library_page_counts(request: Request):
