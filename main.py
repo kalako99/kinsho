@@ -50,6 +50,16 @@ try:
 except ImportError:
     EPUB_SUPPORT = False
 
+try:
+    import pillow_avif  # noqa: F401 -- registers the AVIF codec with Pillow
+except ImportError:
+    # No AVIF_SUPPORT flag needed unlike RAR/PDF/EPUB above -- this is just a
+    # Pillow codec plugin, not a separate format with its own branching logic
+    # elsewhere. Missing, every existing try/except-wrapped Image.open() call
+    # (dims extraction, thumbnails, cover processing) already degrades the
+    # same way it does for any other undecodable file.
+    pass
+
 from contextlib import asynccontextmanager
 import socket
 
@@ -338,7 +348,7 @@ def is_chapter_folder(name: str) -> bool:
     return bool(re.search(r'chapter', name, re.IGNORECASE))
 
 ARCHIVE_EXTENSIONS = {'.cbz', '.cbr', '.zip', '.rar'}
-IMAGE_EXTENSIONS   = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+IMAGE_EXTENSIONS   = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
 
 def is_archive(name: str) -> bool:
     return os.path.splitext(name)[1].lower() in ARCHIVE_EXTENSIONS
@@ -1218,7 +1228,7 @@ def _get_source_info(library_id: int, manga_id: str, source_id: str, is_volume: 
         return (manga, source, source_type, source.get("path", ""), source.get("prefix", ""))
 
 def find_cover_image(folder: str):
-    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
     try:
         all_files = os.listdir(folder)
     except Exception as e:
@@ -1344,7 +1354,7 @@ def _classify_loose_folder(folder_path: str) -> dict:
     }
 
 def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stored_mtimes: dict) -> tuple[str | None, dict]:
-    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
     covers_dir = get_covers_dir()
     if not covers_dir:
         return None, stored_mtimes
@@ -3666,7 +3676,7 @@ def get_collection_cover_options(request: Request, collection_id: str):
     user_data = auth.load_user_data(username)
     override = user_data.get("collection_covers", {}).get(collection_id)
     covers_dir = get_covers_dir()
-    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
     options = []
     for m in visible:
         manga = _lookup_manga(m["library_id"], m["manga_id"])
@@ -3769,7 +3779,7 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
     if not os.path.exists(manga_covers_dir):
         return JSONResponse({"covers": []})
  
-    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
     all_files = os.listdir(manga_covers_dir)
     large_files = sorted(
         [f for f in all_files
@@ -3853,7 +3863,7 @@ async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
 
     # Default cover pointed here → fall back to the first remaining cover.
     if manga.get("cover") == filename:
-        extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+        extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
         remaining_large = sorted(
             (f for f in os.listdir(manga_covers_dir)
              if os.path.splitext(f)[0].endswith('+')
@@ -5174,7 +5184,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         file_path = os.path.join(volume["path"], fname)
         ext = os.path.splitext(fname)[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                      "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+                      "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         try:
             with open(file_path, "rb") as f:
                 img_bytes = f.read()
@@ -5199,7 +5209,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             return JSONResponse({"error": "Failed to read page"}, status_code=500)
         ext = os.path.splitext(images[page_index])[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                      "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+                      "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
@@ -5414,7 +5424,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
             return JSONResponse({"error": "Failed to read page"}, status_code=500)
         ext = os.path.splitext(images[page_index])[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                      "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+                      "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
@@ -5437,16 +5447,31 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
         page_index = int(filename_or_index)
         if page_index >= len(files):
             return JSONResponse({"error": "Page not found"}, status_code=404)
+        picked_name = files[page_index]
+        ext = os.path.splitext(picked_name)[1].lower().lstrip('.')
+        # Starlette's FileResponse falls back to guessing via the stdlib
+        # mimetypes module when media_type isn't given -- confirmed that
+        # returns (None, None) for both .avif and (pre-existing, unnoticed)
+        # .webp in this environment, defaulting the response to text/plain
+        # and breaking the image entirely. Explicit lookup, same mapping
+        # already used for the archive/loose-volume page routes above.
+        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                      "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return FileResponse(
-            os.path.join(chapter["path"], files[page_index]),
+            os.path.join(chapter["path"], picked_name),
+            media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
     else:
         file_path = os.path.join(chapter["path"], filename_or_index)
         if not os.path.exists(file_path):
             return JSONResponse({"error": "File not found"}, status_code=404)
+        ext = os.path.splitext(filename_or_index)[1].lower().lstrip('.')
+        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                      "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return FileResponse(
             file_path,
+            media_type=media_type,
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
 
@@ -5609,7 +5634,7 @@ def get_thumb_full_on_demand(request: Request, library_id: int, manga_id: str, s
             raw = _cached_archive_page(source_path, images[page_index])
             ext = os.path.splitext(images[page_index])[1].lower().lstrip(".")
             media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                          "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+                          "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         elif source_type == "pdf":
             raw = _cached_pdf_page(source_path, page_index)
             media_type = "image/png"
@@ -5633,7 +5658,7 @@ def get_thumb_full_on_demand(request: Request, library_id: int, manga_id: str, s
                 raw = f.read()
             ext = os.path.splitext(files[page_index])[1].lower().lstrip(".")
             media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                          "webp": "image/webp", "gif": "image/gif"}.get(ext, "image/jpeg")
+                          "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
     except Exception as e:
         print(f"[ThumbFull] Error reading page {page_index} for {source_id}: {e}")
 
