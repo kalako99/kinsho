@@ -1529,7 +1529,7 @@
           <img :src="cover.url_large" :alt="cover.filename">
           <button
             class="cover-option-delete"
-            v-if="isAdmin"
+            v-if="canFetchMetadata"
             @click.stop="deleteCover(cover)"
             title="Delete this cover file (removes it for every user)"
           >✕</button>
@@ -2198,7 +2198,7 @@ createApp({
       }
     },
 
-    // Admin only: delete a cover FILE (e.g. a wrong metadata-fetched one) —
+    // Admin or metadata-fetch-permitted: delete a cover FILE (e.g. a wrong metadata-fetched one) —
     // global, unlike selectCover's per-user preference.
     async deleteCover(cover) {
       if (!confirm('Delete this cover file? This removes it for every user.')) return;

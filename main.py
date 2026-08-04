@@ -3828,14 +3828,15 @@ async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
     """
     Delete one cover file (small + large '+' variant) from a manga's covers
     directory — for pruning wrong covers pulled in by the metadata fetch.
-    Admin-only: the files are shared by every user. Cleans up every
-    reference: the manga's default cover falls back to another remaining
-    cover, and any per-user override pointing at the deleted file is
-    removed so those users fall back to the default.
+    Admin or metadata-fetch-permitted users only: the files are shared by
+    every user. Cleans up every reference: the manga's default cover falls
+    back to another remaining cover, and any per-user override pointing at
+    the deleted file is removed so those users fall back to the default.
     """
     username = auth.get_current_user(request)
-    if not auth.resolve_permissions(username).get("is_admin"):
-        return JSONResponse({"error": "Admin only"}, status_code=403)
+    perms = auth.resolve_permissions(username)
+    if not (perms.get("is_admin") or perms.get("metadata_fetch")):
+        return JSONResponse({"error": "Not permitted"}, status_code=403)
     body = await request.json()
     filename = os.path.basename(body.get("filename", "").strip())
     if not filename:
