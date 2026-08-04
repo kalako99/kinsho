@@ -5151,11 +5151,20 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
         return RedirectResponse("/", status_code=302)
     if _is_manga_id_blocked(username, library_id, manga_id):
         return RedirectResponse("/", status_code=302)
+    # Oneshots have no manga_detail page of their own to go back to (see the
+    # redirect in manga_detail()) -- the reader's back button needs to know
+    # that so it can go straight to the manga list instead of back to
+    # /manga/{library_id}/{manga_id}, which would just redirect right back
+    # into this exact same chapter.
+    manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
+    is_oneshot = bool(manga and manga.get("manga_type") == "oneshot")
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
         "chapter_id": chapter_id,
         "theme_css": get_theme_css(username),
+        "is_oneshot": is_oneshot,
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapters")

@@ -1385,6 +1385,7 @@
 </div>
 
 <script>
+window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 (async () => {
 
   // Replace the current history entry so chapter-to-chapter navigation
@@ -1505,7 +1506,11 @@
 
   backBtn.addEventListener('click', () => {
     exitFullscreen();
-    window.location.href = `/manga/${libraryId}/${mangaId}`;
+    // A oneshot has no manga_detail/volume_detail page of its own -- that
+    // URL just redirects straight back into this exact chapter (see
+    // manga_detail()), which read as "back reloads the oneshot" instead of
+    // actually going anywhere. Go straight to the manga list instead.
+    window.location.href = window.__IS_ONESHOT__ ? '/' : `/manga/${libraryId}/${mangaId}`;
   });
 
   // ── FETCH HELPERS ──

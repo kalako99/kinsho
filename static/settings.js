@@ -24,6 +24,7 @@ createApp({
       libraries: [],
       libStatus: { msg: '', type: '' },
       nextId: 1,
+      existingLibraryIds: new Set(),
       scanStatus: {},
       metaScanStatus: {},
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
@@ -352,6 +353,12 @@ createApp({
             paths: lib.paths ?? (lib.path ? [lib.path] : ['']),
           }));
           this.nextId = data.libraries.length > 0 ? Math.max(...data.libraries.map(l => l.id)) + 1 : 1;
+          // Snapshot of which library ids already existed server-side at
+          // load time -- addLibrary() pushes new ones with ids >= nextId,
+          // which are never in this set, so the flat-scan checkbox can tell
+          // "brand new, still editable" apart from "already saved, locked"
+          // without needing a separate flag on the library object itself.
+          this.existingLibraryIds = new Set(this.libraries.map(l => l.id));
         }
         this.activeTheme = data.active_theme || 'Midnight Red';
         if (!this.BUILTIN_THEMES.find(t => t.name === this.activeTheme)) {
