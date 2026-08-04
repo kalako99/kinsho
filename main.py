@@ -4336,6 +4336,37 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+async def _find_description_fallback(source: str, candidate: dict, title_fallback: str) -> dict | None:
+    """
+    Live-searches the *other* AniList/MangaDex provider for a counterpart to
+    `candidate`, to use as a description-only fallback -- see the note in
+    apply_metadata_endpoint on why this is scoped to just this one field.
+    Local File candidates get no fallback search: "the other provider" only
+    ever means AniList/MangaDex, matching how the user refers to providers.
+
+    Asymmetric on purpose, mirroring the app's pre-existing anilist<->mangadex
+    relationship: AniList candidates carry MangaDex's own links.al reference,
+    so an AniList->MangaDex counterpart can be found by exact ID join
+    (find_mangadex_for_anilist). There's no equivalent MangaDex->AniList link
+    to join on, so that direction falls back to the same fuzzy best-title-match
+    search this app already uses for any non-AniList-ID'd candidate elsewhere.
+    """
+    try:
+        if source == "anilist":
+            return await metadata_fetch.find_mangadex_for_anilist(candidate)
+        if source == "mangadex":
+            title = (
+                candidate.get("title_english")
+                or candidate.get("title_romaji")
+                or candidate.get("title_native")
+                or title_fallback
+            )
+            al_results = await metadata_fetch.search_anilist_manga(title)
+            return metadata_fetch.best_match(title, al_results)
+    except Exception:
+        pass
+    return None
+
 @app.post("/api/manga/{library_id}/{manga_id}/apply-metadata")
 async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: str):
     """
@@ -4343,14 +4374,17 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     once -- one per source (local ComicInfo.xml, AniList, MangaDex) -- each
     carrying its own explicit field list, e.g. cover from AniList's pick and
     description/genres/tags from MangaDex's pick in one request. Each entry
-    is resolved using ONLY its own candidate (fallback=None) -- there is
-    deliberately no automatic cross-provider filling here anymore (there
-    used to be: a silent MangaDex-counterpart search/fallback for whatever
-    the single old-style candidate was missing). Once the caller can pick
-    both providers explicitly, an invisible auto-fallback would just fight
-    with what the user actually chose, so it's the frontend's job now to
-    mutually-exclude fields across sources before ever sending this request,
-    not this endpoint's job to reconcile ambiguity after the fact.
+    is resolved using ONLY its own candidate for genres/tags/cover (no
+    automatic cross-provider filling there -- an invisible auto-fallback
+    would just fight with what the user explicitly picked).
+
+    description is the one exception, reinstated by request: if the selected
+    candidate doesn't have a description, this endpoint automatically
+    searches the *other* AniList/MangaDex provider for a counterpart and
+    uses its description instead of leaving the field empty -- restoring
+    the original single-select behavior's cross-provider fallback, but
+    scoped to just this field now that every other field is explicit-only.
+    See _find_description_fallback.
     """
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
@@ -4379,10 +4413,19 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
             if not candidate or not fields:
                 continue
 
-            text_fields = [f for f in fields if f in ("description", "genres", "tags")]
-            if text_fields:
+            if "description" in fields:
+                desc_fallback = None
+                if not metadata_fetch.resolve_field_value(candidate, "description"):
+                    desc_fallback = await _find_description_fallback(source, candidate, manga["name"])
                 metadata_fetch.apply_resolved_metadata(
-                    library_id, manga["name"], candidate, None, text_fields,
+                    library_id, manga["name"], candidate, desc_fallback, ["description"],
+                    load_manga_dims, save_manga_dims,
+                )
+
+            other_text_fields = [f for f in fields if f in ("genres", "tags")]
+            if other_text_fields:
+                metadata_fetch.apply_resolved_metadata(
+                    library_id, manga["name"], candidate, None, other_text_fields,
                     load_manga_dims, save_manga_dims,
                 )
             if "cover" in fields:
