@@ -40,6 +40,12 @@ createApp({
       newPassword:        '',
       passwordStatus:     { msg: '', type: '' },
       mustChangePassword: false,
+      // Self-service username change -- separate fields from newUsername
+      // (that one's the admin "create user" form's field, a different
+      // feature entirely).
+      renameUsernameInput:    '',
+      renameUsernamePassword: '',
+      usernameStatus:         { msg: '', type: '' },
 
       // ── BACKDROP ──
       backdropList:   true,
@@ -289,6 +295,35 @@ createApp({
       setTimeout(() => { this.passwordStatus = { msg: '', type: '' }; }, 3000);
     },
  
+    async changeUsername() {
+      const newUsername = this.renameUsernameInput.trim().toLowerCase();
+      const password     = this.renameUsernamePassword.trim();
+      if (!newUsername || !password) return;
+
+      try {
+        const res  = await fetch(apiUrl('/api/auth/change-username'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ current_password: password, new_username: newUsername }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          // Unlike changePassword(), this never invalidates the session --
+          // the server updates it in place to the new username, so there's
+          // nothing to re-login for. Just reflect the new name locally.
+          this.username                = data.username;
+          this.renameUsernameInput     = '';
+          this.renameUsernamePassword  = '';
+          this.usernameStatus = { msg: '✓ Username updated.', type: 'ok' };
+        } else {
+          this.usernameStatus = { msg: data.error || 'Something went wrong.', type: 'err' };
+        }
+      } catch (e) {
+        this.usernameStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.usernameStatus = { msg: '', type: '' }; }, 3000);
+    },
+
     async logout() {
       await fetch(apiUrl('/api/auth/logout'), { method: 'POST' });
       window.location.href = '/login';

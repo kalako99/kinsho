@@ -693,6 +693,77 @@ async def route_change_password(request: Request):
 
     return JSONResponse({"ok": True})
 
+async def route_change_username(request: Request):
+    """
+    POST /api/auth/change-username — { current_password, new_username }
+
+    Self-service, mirroring change-password's shape (current-password
+    confirmation, same validation change-password doesn't need). Unlike a
+    password change, this deliberately does NOT invalidate sessions —
+    renaming isn't the kind of security event a password change is (it
+    grants an already-logged-in caller nothing they didn't already have),
+    so every active session for this user is updated in place to the new
+    username instead of forcing a re-login.
+
+    Touches every place a username is used as a key: the users.json record,
+    the per-user {username}.json data file (renamed on disk — this is what
+    carries reading history/favourites/private collections/cover overrides
+    along for free, no separate migration needed for any of that), the
+    permissions.json entry if one exists (a user with no explicit entry,
+    just falling back to _default, has nothing to move), and every active
+    session's username field. Shared collections.json is untouched — shared
+    collection records carry no owner/created-by reference at all.
+    """
+    username = get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+
+    body             = await request.json()
+    current_password = body.get("current_password", "")
+    new_username     = body.get("new_username", "").strip().lower()
+
+    if not current_password or not new_username:
+        return JSONResponse({"ok": False, "error": "Both fields are required."}, status_code=400)
+
+    data = _load_users()
+    user = next((u for u in data["users"] if u["username"] == username), None)
+    if not user or not _verify_password(user["password_hash"], current_password):
+        return JSONResponse({"ok": False, "error": "Current password is incorrect."}, status_code=401)
+
+    if new_username == username:
+        return JSONResponse({"ok": True, "username": username})
+    if not VALID_USERNAME_RE.match(new_username):
+        return JSONResponse({"ok": False, "error": "Username must be 3-32 characters: lowercase letters, numbers, underscore, or hyphen only."}, status_code=400)
+    if new_username in RESERVED_USERNAMES:
+        return JSONResponse({"ok": False, "error": "That username is reserved."}, status_code=400)
+    if _find_user(new_username):
+        return JSONResponse({"ok": False, "error": "Username already taken."}, status_code=409)
+
+    user["username"] = new_username
+    _save_users(data)
+
+    old_path = _user_data_file(username)
+    new_path = _user_data_file(new_username)
+    if old_path and new_path and os.path.exists(old_path):
+        os.makedirs(os.path.dirname(os.path.abspath(new_path)), exist_ok=True)
+        os.rename(old_path, new_path)
+
+    perms_data = load_permissions()
+    if username in perms_data:
+        perms_data[new_username] = perms_data.pop(username)
+        save_permissions(perms_data)
+
+    sessions_data = _load_sessions()
+    changed = False
+    for sess in sessions_data["sessions"].values():
+        if sess.get("username") == username:
+            sess["username"] = new_username
+            changed = True
+    if changed:
+        _save_sessions(sessions_data)
+
+    return JSONResponse({"ok": True, "username": new_username})
+
 def route_get_permissions(request: Request):
     """GET /api/admin/permissions — all users with their resolved permissions."""
     err = require_admin(request)

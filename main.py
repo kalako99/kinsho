@@ -5911,6 +5911,10 @@ def api_me(request: Request):
 async def api_change_password(request: Request):
     return await auth.route_change_password(request)
 
+@app.post("/api/auth/change-username")
+async def api_change_username(request: Request):
+    return await auth.route_change_username(request)
+
 @app.get("/api/admin/permissions")
 def api_get_permissions(request: Request):
     return auth.route_get_permissions(request)
