@@ -693,6 +693,31 @@ def resolve_field_value(candidate: dict | None, field: str, min_tag_rank: int = 
     return None
 
 
+def _merge_preserving_manual(dims: dict, field: str, fetched_value: list) -> list:
+    """
+    Combine a freshly-fetched genres/tags list with whatever the user has
+    manually added for this manga, so a fetch can never silently erase a
+    hand-typed entry -- but a *previously fetched* (non-manual) entry that
+    isn't in this new fetch is dropped, same as before: only manual entries
+    are protected, fetched ones stay freely replaceable fetch-to-fetch.
+
+    dims["manual_<field>"] tracks which entries were added by hand (see
+    add_tag/add_genre in main.py). A manga that predates this tracking has
+    no such key yet -- the first fetch to touch its tags/genres seeds it
+    from whatever's already there, treating pre-existing entries as manual
+    rather than risking silently wiping out tags nobody marked as fetched.
+    """
+    manual_key = f"manual_{field}"
+    if manual_key not in dims:
+        dims[manual_key] = list(dims.get(field, []))
+    manual = dims[manual_key]
+    merged = list(manual)
+    for v in (fetched_value or []):
+        if v not in merged:
+            merged.append(v)
+    return merged
+
+
 def apply_resolved_metadata(
     library_id: int,
     manga_name: str,
@@ -716,6 +741,10 @@ def apply_resolved_metadata(
             the cover image itself is fetched and written by main.py, so here
             "cover" only contributes its per-field timestamp.
 
+    description is always a straight overwrite -- it's the one field with no
+    manual/fetched distinction, replaced by whichever fetch supplies it.
+    genres/tags are merged instead of replaced: see _merge_preserving_manual.
+
     Stamps dims["metadata_mtimes"][field] for every field in `fields`,
     regardless of whether a value was found — once a field has been attempted
     for a confirmed match, the skip-gate considers it done (the per-manga
@@ -733,10 +762,8 @@ def apply_resolved_metadata(
                 value = resolve_field_value(fallback, field, min_tag_rank)
             if field == "description":
                 dims["description"] = value or ""
-            elif field == "genres":
-                dims["genres"] = value or []
-            elif field == "tags":
-                dims["tags"] = value or []
+            elif field in ("genres", "tags"):
+                dims[field] = _merge_preserving_manual(dims, field, value)
         mtimes[field] = now
 
     dims["metadata_mtimes"] = mtimes

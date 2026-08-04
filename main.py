@@ -1570,6 +1570,14 @@ async def fetch_and_set_cover(
     User-selected covers still take priority regardless, since the per-user
     override is checked before manga["cover"] when serving.
 
+    The filename is derived from the candidate(s) themselves (see below), not
+    a fixed name — a previous version always wrote to the same
+    "anilist_cover.*" file, so fetching a cover a second time (a different
+    provider, a different matched series, or just re-running the search)
+    silently overwrote whatever was fetched before. A metadata-fetched cover
+    is meant to only ever be removable by hand from the cover popup, same as
+    any other cover file — never as a side effect of fetching again.
+
     Mutates manga["cover"] in place when applicable; the caller is responsible
     for persisting the change via save_app_data. Returns True if a cover file
     was successfully fetched and saved, regardless of whether it became the
@@ -1582,7 +1590,17 @@ async def fetch_and_set_cover(
     url_ext = os.path.splitext(urlparse(chosen_url).path)[1].lower()
     if url_ext not in ('.jpg', '.jpeg', '.png', '.webp'):
         url_ext = '.jpg'
-    filename = f"anilist_cover{url_ext}"
+    # Stable per-candidate stem: re-fetching the exact same match again
+    # reuses (refreshes) the same file, same as before, but a different
+    # match -- a different provider, a different matched series -- gets its
+    # own file instead of clobbering the previous one.
+    stem_parts = []
+    if anilist_candidate and anilist_candidate.get("anilist_id") is not None:
+        stem_parts.append(f"anilist_{anilist_candidate['anilist_id']}")
+    if mangadex_candidate and mangadex_candidate.get("mangadex_id"):
+        stem_parts.append(f"mangadex_{mangadex_candidate['mangadex_id']}")
+    stem = "_".join(stem_parts) if stem_parts else f"metadata_cover_{int(time.time())}"
+    filename = f"{stem}{url_ext}"
     # Pass empty stored_mtimes so a re-fetch always re-processes the image
     # rather than skipping it as unchanged.
     result_fname, _ = process_cover_from_bytes(
@@ -4041,8 +4059,17 @@ async def add_tag(library_id: int, manga_id: str, request: Request):
     dims = load_manga_dims(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    # One-time migration for a manga that predates manual/fetched tracking:
+    # seed manual_tags from whatever's already there, the first time either
+    # a manual add or a metadata fetch touches this manga's tags -- without
+    # this, a manga's pre-existing tags would look "fetched" (unprotected)
+    # to the very next metadata fetch and could be wiped out by it.
+    if "manual_tags" not in dims:
+        dims["manual_tags"] = list(dims.get("tags", []))
     if tag not in dims["tags"]:
         dims["tags"].append(tag)
+    if tag not in dims["manual_tags"]:
+        dims["manual_tags"].append(tag)
     save_manga_dims(library_id, manga["name"], dims)
     data["all_tags"] = rebuild_all_tags(data)
     save_app_data(data)
@@ -4065,6 +4092,7 @@ async def remove_tags(library_id: int, manga_id: str, request: Request):
             for m in lib_data.get("mangas", []):
                 dims = load_manga_dims(int(lib_id), m["name"])
                 dims["tags"] = [t for t in dims.get("tags", []) if t not in tags_to_remove]
+                dims["manual_tags"] = [t for t in dims.get("manual_tags", []) if t not in tags_to_remove]
                 save_manga_dims(int(lib_id), m["name"], dims)
         data["all_tags"] = rebuild_all_tags(data)
     else:
@@ -4078,6 +4106,7 @@ async def remove_tags(library_id: int, manga_id: str, request: Request):
         if auth.is_manga_blocked(username, dims.get("tags", [])):
             return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
         dims["tags"] = [t for t in dims.get("tags", []) if t not in tags_to_remove]
+        dims["manual_tags"] = [t for t in dims.get("manual_tags", []) if t not in tags_to_remove]
         save_manga_dims(library_id, manga["name"], dims)
 
     save_app_data(data)
@@ -4121,8 +4150,13 @@ async def add_genre(library_id: int, manga_id: str, request: Request):
     dims = load_manga_dims(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    # See the matching comment in add_tag -- same one-time migration, same reason.
+    if "manual_genres" not in dims:
+        dims["manual_genres"] = list(dims.get("genres", []))
     if genre not in dims["genres"]:
         dims["genres"].append(genre)
+    if genre not in dims["manual_genres"]:
+        dims["manual_genres"].append(genre)
     save_manga_dims(library_id, manga["name"], dims)
     data["all_genres"] = rebuild_all_genres(data)
     save_app_data(data)
@@ -4144,6 +4178,7 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
             for m in lib_data.get("mangas", []):
                 dims = load_manga_dims(int(lib_id), m["name"])
                 dims["genres"] = [g for g in dims.get("genres", []) if g not in genres_to_remove]
+                dims["manual_genres"] = [g for g in dims.get("manual_genres", []) if g not in genres_to_remove]
                 save_manga_dims(int(lib_id), m["name"], dims)
         data["all_genres"] = rebuild_all_genres(data)
         save_app_data(data)
@@ -4158,6 +4193,7 @@ async def remove_genres(library_id: int, manga_id: str, request: Request):
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims["genres"] = [g for g in dims.get("genres", []) if g not in genres_to_remove]
+    dims["manual_genres"] = [g for g in dims.get("manual_genres", []) if g not in genres_to_remove]
     save_manga_dims(library_id, manga["name"], dims)
     save_app_data(data)
     return JSONResponse({"ok": True, "genres": dims["genres"], "all_genres": data.get("all_genres", [])})
