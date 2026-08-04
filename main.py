@@ -1881,9 +1881,122 @@ def scan_library(library: dict) -> tuple:
 
         save_manga_dims(library_id, manga_name, dims)
 
+    def _register_oneshot_manga(manga_path: str):
+        """
+        Flat-scan only (see below): a top-level folder with no chapter/volume
+        subfolders that directly contains images -- e.g. a oneshot. Modeled as
+        a manga with exactly one chapter (the folder's own images), so it goes
+        through the same dims shape and reading-history/integrity/comicinfo
+        machinery every other chapter-based manga already does -- manga_type
+        == "oneshot" is the only thing that behaves differently, used by the
+        /manga/{library_id}/{manga_id} route to skip straight to the reader
+        instead of rendering a detail page.
+        """
+        if manga_path in mangas:
+            return
+        try:
+            files = sorted(
+                [f for f in os.listdir(manga_path)
+                 if os.path.isfile(os.path.join(manga_path, f))
+                 and os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
+                key=natural_sort_key
+            )
+        except Exception as e:
+            print(f"[ScanLib] Cannot list {manga_path}: {e}")
+            return
+        if not files:
+            return  # empty folder -- not a manga
+
+        manga_name    = os.path.basename(manga_path)
+        manga_id      = make_id(manga_name)
+        existing      = existing_by_id.get(manga_id, {})
+        stored_mtime  = existing.get("folder_mtime")
+        current_mtime = os.path.getmtime(manga_path)
+        stored_cover_mtimes = existing.get("cover_mtimes", {})
+
+        if stored_mtime is not None and current_mtime == stored_mtime:
+            print(f"[ScanLib] Skipping unchanged oneshot: {manga_name}")
+            if existing.get("path") and existing["path"] != manga_path:
+                relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
+            mangas[manga_path] = {**existing, "path": manga_path}
+            return
+
+        print(f"[ScanLib] Scanning oneshot: {manga_name}")
+        default_cover, new_cover_mtimes = process_manga_covers(
+            manga_path, library_id, manga_name, stored_cover_mtimes
+        )
+        mangas[manga_path] = {
+            "id":           manga_id,
+            "name":         manga_name,
+            "path":         manga_path,
+            "cover":        default_cover,
+            "folder_mtime": current_mtime,
+            "cover_mtimes": new_cover_mtimes,
+            "last_updated": datetime.now().isoformat(),
+            "manga_type":   "oneshot",
+        }
+
+        pages = []
+        for fname in files:
+            try:
+                img = Image.open(os.path.join(manga_path, fname))
+                w, h = img.size
+                pages.append({"w": w, "h": h})
+            except Exception:
+                pages.append({"w": 800, "h": 1100})
+
+        chapter_id = make_id(manga_name + ":oneshot")
+        dims = load_manga_dims(library_id, manga_name)
+        dims["chapters"][chapter_id] = {
+            "name":      manga_name,
+            "path":      manga_path,
+            "mtime":     current_mtime,
+            "pages":     pages,
+            "source":    "loose",
+            "filenames": files,
+        }
+        save_manga_dims(library_id, manga_name, dims)
+
+    # ── FLAT SCAN: one folder = one manga, no nested-manga detection at all ──
+    # Opt-in per library (library["flat_scan"], set at library creation --
+    # see settings.html). Every direct child of the library path becomes
+    # exactly one manga: if it has its own chapter/volume subfolders it's
+    # scanned the normal loose way (_classify_loose_folder/_register_loose_manga,
+    # unchanged), otherwise -- if it directly contains images with no
+    # subfolders at all -- it's a oneshot (_register_oneshot_manga, above).
+    # This exists because the standard recursive walk below (PASS 1) looks
+    # for manga-shaped structure at every depth: pointed at a folder full of
+    # oneshots, each individual oneshot folder "contains only images" by
+    # _classify_loose_folder's own rule, which makes the folder ABOVE them
+    # (the library path itself, or some intermediate folder) look like one
+    # single case2-loose manga whose "volumes" are actually a pile of
+    # unrelated oneshot titles. PASS 1/2 below are skipped entirely for a
+    # flat-scan library (see the `if library.get("flat_scan")` guards in
+    # each), since this replaces them rather than supplementing them.
+    if library.get("flat_scan"):
+        for lib_path in lib_paths:
+            try:
+                children = sorted(
+                    (e for e in os.scandir(lib_path) if e.is_dir()),
+                    key=lambda e: natural_sort_key(e.name)
+                )
+            except Exception as e:
+                print(f"[ScanLib] Cannot list {lib_path}: {e}")
+                continue
+            for entry in children:
+                manga_path = entry.path
+                classification = _classify_loose_folder(manga_path)
+                if classification["is_manga"]:
+                    _register_loose_manga(manga_path, classification)
+                else:
+                    _register_oneshot_manga(manga_path)
+
     for lib_path in lib_paths:
         for dirpath, dirnames, filenames in os.walk(lib_path):
             dirnames.sort(key=natural_sort_key)
+            if library.get("flat_scan"):
+                dirnames[:] = []
+                continue  # flat-scan libraries are populated by the one-level walk above, not PASS 1
             if dirpath in _loose_registered:
                 continue  # already processed as a nested manga
             classification = _classify_loose_folder(dirpath)
@@ -1896,6 +2009,9 @@ def scan_library(library: dict) -> tuple:
     for lib_path in lib_paths:
         for dirpath, dirnames, filenames in os.walk(lib_path):
             dirnames.sort(key=natural_sort_key)
+            if library.get("flat_scan"):
+                dirnames[:] = []
+                continue  # flat-scan libraries are populated by the one-level walk above, not PASS 2
             filenames_sorted = sorted(filenames, key=natural_sort_key)
 
             # Collect archive/pdf/epub files directly in this folder
@@ -4896,6 +5012,13 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
     if manga and auth.is_manga_blocked(username, load_manga_dims(library_id, manga["name"]).get("tags", [])):
         return RedirectResponse("/", status_code=302)
     manga_type = manga.get("manga_type", "loose") if manga else "loose"
+    if manga_type == "oneshot":
+        # Flat-scan oneshots have no detail page of their own -- they're
+        # modeled as a manga with exactly one chapter (see
+        # _register_oneshot_manga in scan_library), so clicking one from the
+        # manga list goes straight into the reader on that chapter.
+        chapter_id = make_id(manga["name"] + ":oneshot")
+        return RedirectResponse(f"/manga/{library_id}/{manga_id}/chapter/{chapter_id}", status_code=302)
     if manga_type == "case2":
         template = "volume_detail.html"
     elif manga_type == "loose":

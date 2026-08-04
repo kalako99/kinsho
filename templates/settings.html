@@ -702,6 +702,18 @@
         <template v-if="pageCounts[String(lib.id)].volumes"> · <span v-text="pageCounts[String(lib.id)].volumes.toLocaleString()"></span> volumes</template>
         · <span v-text="pageCounts[String(lib.id)].pagesRead.toLocaleString()"></span> read (<span v-text="pageCounts[String(lib.id)].readPct"></span>%)
       </div>
+      <label
+        style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-muted,#888); cursor:pointer; margin:2px 0 4px;"
+        title="Every top-level folder in this library's path becomes its own manga -- no nested chapter/volume detection at all. Turn this on for a library made up of oneshots (folders that are just a pile of loose images), which the standard scan would otherwise misread as volumes of one big manga."
+      >
+        <input type="checkbox" v-model="lib.flat_scan" style="width:16px; height:16px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+        Flat scan (for oneshot folders)
+      </label>
+      <div class="section-hint" style="margin:0 0 10px;">
+        Decide this when you create the library, not after -- flipping it later and reloading will rescan every manga in this
+        library under the new rule, which can reshuffle or lose manually-edited metadata for anything that no longer maps the
+        same way. Off is the standard behavior (chapters/volumes detected however deep they're nested).
+      </div>
       <div class="field-label">Folder path</div>
       <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
         <input type="text" v-model="lib.paths[pi]" placeholder="e.g. /app/manga" />

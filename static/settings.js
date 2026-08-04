@@ -402,7 +402,7 @@ createApp({
 
     // ── ADD LIBRARY ──
     addLibrary() {
-      this.libraries.push({ id: this.nextId++, name: '', paths: [''] });
+      this.libraries.push({ id: this.nextId++, name: '', paths: [''], flat_scan: false });
     },
 
     addPath(lib) {
