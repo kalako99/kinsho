@@ -4302,6 +4302,20 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
 
 @app.post("/api/manga/{library_id}/{manga_id}/apply-metadata")
 async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: str):
+    """
+    Applies metadata from up to three independently-selected candidates at
+    once -- one per source (local ComicInfo.xml, AniList, MangaDex) -- each
+    carrying its own explicit field list, e.g. cover from AniList's pick and
+    description/genres/tags from MangaDex's pick in one request. Each entry
+    is resolved using ONLY its own candidate (fallback=None) -- there is
+    deliberately no automatic cross-provider filling here anymore (there
+    used to be: a silent MangaDex-counterpart search/fallback for whatever
+    the single old-style candidate was missing). Once the caller can pick
+    both providers explicitly, an invisible auto-fallback would just fight
+    with what the user actually chose, so it's the frontend's job now to
+    mutually-exclude fields across sources before ever sending this request,
+    not this endpoint's job to reconcile ambiguity after the fact.
+    """
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
@@ -4309,8 +4323,9 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     if not (perms.get("is_admin") or perms.get("metadata_fetch")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     body = await request.json()
-    candidate = body.get("candidate", {})
-    fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
+    entries = body.get("entries", [])
+    if not entries:
+        return JSONResponse({"error": "Nothing selected"}, status_code=400)
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -4321,41 +4336,32 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     if auth.is_manga_blocked(username, load_manga_dims(library_id, manga["name"]).get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     try:
-        # The chosen candidate (from the AniList search) is the primary source.
-        # Look up the SAME SERIES on MangaDex to fill any field AniList is
-        # missing and to provide a higher-res cover fallback.
-        mangadex_best = None
-        try:
-            if candidate.get("anilist_id") is not None:
-                # AniList candidate: exact ID join via MangaDex's links.al,
-                # multi-name fuzzy fallback. Deliberately NO weaker fallback
-                # beyond that — None means "no confident MangaDex counterpart",
-                # and a missing cover beats a wrong-series cover.
-                mangadex_best = await metadata_fetch.find_mangadex_for_anilist(candidate)
-            else:
-                # Non-AniList candidate (e.g. the "Local file" card): single
-                # best-title match, as before.
-                title = (
-                    candidate.get("title_english")
-                    or candidate.get("title_romaji")
-                    or candidate.get("title_native")
-                    or manga["name"]
-                )
-                md_results = await metadata_fetch.search_mangadex_manga(title)
-                mangadex_best = metadata_fetch.best_match(title, md_results)
-        except Exception:
-            mangadex_best = None
+        for entry in entries:
+            source    = entry.get("source")
+            candidate = entry.get("candidate") or {}
+            fields    = set(entry.get("fields") or [])
+            if not candidate or not fields:
+                continue
 
-        applied = [f for f in fields if f in ("description", "genres", "tags")]
-        if "cover" in fields:
-            if await fetch_and_set_cover(library_id, manga, candidate, mangadex_best):
-                applied.append("cover")
-                save_app_data(data)
-        if applied:
-            metadata_fetch.apply_resolved_metadata(
-                library_id, manga["name"], candidate, mangadex_best, applied,
-                load_manga_dims, save_manga_dims,
-            )
+            text_fields = [f for f in fields if f in ("description", "genres", "tags")]
+            if text_fields:
+                metadata_fetch.apply_resolved_metadata(
+                    library_id, manga["name"], candidate, None, text_fields,
+                    load_manga_dims, save_manga_dims,
+                )
+            if "cover" in fields:
+                # resolve_best_cover reads AniList-shaped and MangaDex-shaped
+                # candidates from different keys (cover_url_extra_large/large/
+                # medium vs. cover_url) -- routing this entry's candidate into
+                # the matching slot (and leaving the other None) reuses that
+                # existing resolution logic for a single explicit source
+                # instead of its usual "compare two sources, pick the bigger
+                # image" role, since mutual exclusion already guarantees at
+                # most one source ever has "cover" checked.
+                anilist_candidate  = candidate if source == "anilist"  else None
+                mangadex_candidate = candidate if source == "mangadex" else None
+                if await fetch_and_set_cover(library_id, manga, anilist_candidate, mangadex_candidate):
+                    save_app_data(data)
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

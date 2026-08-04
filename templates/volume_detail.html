@@ -804,21 +804,29 @@
       color: #555;
       padding: 28px 0;
     }
-    .meta-fields-row {
+    .meta-fields-inline {
       display: flex;
       align-items: center;
-      gap: 16px;
-      padding: 10px 0;
-      border-top: 1px solid rgba(255,255,255,0.08);
-      font-size: 0.8rem;
-      color: var(--color-text, #f0f0f0);
+      gap: 10px;
+      margin-left: auto;
       flex-wrap: wrap;
     }
-    .meta-fields-row label {
+    .meta-fields-inline label {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 4px;
       cursor: pointer;
+      font-size: 0.68rem;
+      font-weight: 400;
+      text-transform: none;
+      letter-spacing: normal;
+      color: rgba(255,255,255,0.65);
+    }
+    .meta-fields-inline input[type="checkbox"] {
+      width: 13px;
+      height: 13px;
+      cursor: pointer;
+      accent-color: var(--color-primary, #e94560);
     }
     .meta-status {
       font-size: 0.78rem;
@@ -1474,11 +1482,18 @@
       </div>
       <div class="meta-candidates" v-if="hasAnyMetaCandidates || metaLoadingAnilist || metaLoadingMangadex">
         <div class="meta-section" v-if="localMetaCandidate">
-          <div class="meta-section-heading">Local File</div>
+          <div class="meta-section-heading">
+            Local File
+            <span class="meta-fields-inline" v-if="metaSelected.local" @click.stop>
+              <label><input type="checkbox" :checked="metaFields.local.description" @change="toggleMetaField('local','description')"> Desc</label>
+              <label><input type="checkbox" :checked="metaFields.local.genres" @change="toggleMetaField('local','genres')"> Genres</label>
+              <label><input type="checkbox" :checked="metaFields.local.tags" @change="toggleMetaField('local','tags')"> Tags</label>
+            </span>
+          </div>
           <div
             class="meta-candidate"
-            :class="{ selected: metaSelected === localMetaCandidate }"
-            @click="metaSelected = localMetaCandidate"
+            :class="{ selected: metaSelected.local === localMetaCandidate }"
+            @click="selectMetaCandidate('local', localMetaCandidate)"
           >
             <div class="meta-cover-ph"></div>
             <div class="meta-info">
@@ -1497,13 +1512,19 @@
           <div class="meta-section-heading">
             AniList
             <span v-if="metaLoadingAnilist" class="meta-section-loading">loading…</span>
+            <span class="meta-fields-inline" v-if="metaSelected.anilist" @click.stop>
+              <label><input type="checkbox" :checked="metaFields.anilist.description" @change="toggleMetaField('anilist','description')"> Desc</label>
+              <label><input type="checkbox" :checked="metaFields.anilist.genres" @change="toggleMetaField('anilist','genres')"> Genres</label>
+              <label><input type="checkbox" :checked="metaFields.anilist.tags" @change="toggleMetaField('anilist','tags')"> Tags</label>
+              <label><input type="checkbox" :checked="metaFields.anilist.cover" @change="toggleMetaField('anilist','cover')"> Cover</label>
+            </span>
           </div>
           <div
             v-for="c in metaCandidatesAnilist"
             :key="'al:' + c.anilist_id"
             class="meta-candidate"
-            :class="{ selected: metaSelected === c }"
-            @click="metaSelected = c"
+            :class="{ selected: metaSelected.anilist === c }"
+            @click="selectMetaCandidate('anilist', c)"
           >
             <img v-if="c.preview_cover_url || c.cover_url_medium" :src="c.preview_cover_url || c.cover_url_medium" referrerpolicy="no-referrer" class="meta-cover">
             <div v-else class="meta-cover-ph"></div>
@@ -1529,13 +1550,19 @@
           <div class="meta-section-heading">
             MangaDex
             <span v-if="metaLoadingMangadex" class="meta-section-loading">loading…</span>
+            <span class="meta-fields-inline" v-if="metaSelected.mangadex" @click.stop>
+              <label><input type="checkbox" :checked="metaFields.mangadex.description" @change="toggleMetaField('mangadex','description')"> Desc</label>
+              <label><input type="checkbox" :checked="metaFields.mangadex.genres" @change="toggleMetaField('mangadex','genres')"> Genres</label>
+              <label><input type="checkbox" :checked="metaFields.mangadex.tags" @change="toggleMetaField('mangadex','tags')"> Tags</label>
+              <label><input type="checkbox" :checked="metaFields.mangadex.cover" @change="toggleMetaField('mangadex','cover')"> Cover</label>
+            </span>
           </div>
           <div
             v-for="c in metaCandidatesMangadex"
             :key="'md:' + c.mangadex_id"
             class="meta-candidate"
-            :class="{ selected: metaSelected === c }"
-            @click="metaSelected = c"
+            :class="{ selected: metaSelected.mangadex === c }"
+            @click="selectMetaCandidate('mangadex', c)"
           >
             <img v-if="c.preview_cover_url" :src="c.preview_cover_url" referrerpolicy="no-referrer" class="meta-cover">
             <div v-else class="meta-cover-ph"></div>
@@ -1557,18 +1584,11 @@
         </div>
       </div>
       <div class="meta-empty" v-else>{{ metaStatus.msg || 'Search for a title above.' }}</div>
-      <div class="meta-fields-row" v-if="hasAnyMetaCandidates">
-        <span style="font-size:0.72rem;color:#777;">Import:</span>
-        <label><input type="checkbox" v-model="metaFields.description"> Description</label>
-        <label><input type="checkbox" v-model="metaFields.genres"> Genres</label>
-        <label><input type="checkbox" v-model="metaFields.tags"> Tags</label>
-        <label><input type="checkbox" v-model="metaFields.cover"> Cover</label>
-      </div>
       <div class="popup-actions" style="margin-top:12px;">
         <button class="popup-btn soft" @click="showMetadataPopup = false">Cancel</button>
         <button
           class="popup-btn primary"
-          :disabled="!metaSelected || metaApplying || (!metaFields.description && !metaFields.genres && !metaFields.tags && !metaFields.cover)"
+          :disabled="!hasAnyMetaSelection || metaApplying || !hasAnyCheckedMetaField"
           @click="applyMetadata"
         >{{ metaApplying ? 'Applying…' : 'Apply' }}</button>
       </div>
@@ -1660,9 +1680,20 @@ createApp({
       metaLoadingAnilist:     false,
       metaLoadingMangadex:    false,
       localMetaCandidate:     null,
-      metaSelected:           null,
+      // One independent selection per source -- unlike the old single
+      // metaSelected, a candidate can be picked from more than one source
+      // at once (e.g. cover from AniList, description from MangaDex).
+      metaSelected: { local: null, anilist: null, mangadex: null },
       metaSearchedOnce:       false,
-      metaFields:             { description: true, genres: true, tags: true, cover: true },
+      // Per-source field checkboxes. Mutually exclusive across sources for
+      // the same field (see toggleMetaField) -- checking "cover" under
+      // anilist auto-unchecks it under mangadex/local, since a field can
+      // only ever be imported from one place at a time.
+      metaFields: {
+        local:    { description: false, genres: false, tags: false, cover: false },
+        anilist:  { description: false, genres: false, tags: false, cover: false },
+        mangadex: { description: false, genres: false, tags: false, cover: false },
+      },
       metaApplying:           false,
       metaStatus:             { msg: '', type: '' },
       // reading progress
@@ -1708,6 +1739,16 @@ createApp({
 
     hasAnyMetaCandidates() {
       return !!this.localMetaCandidate || this.metaCandidatesAnilist.length > 0 || this.metaCandidatesMangadex.length > 0;
+    },
+
+    hasAnyMetaSelection() {
+      return !!(this.metaSelected.local || this.metaSelected.anilist || this.metaSelected.mangadex);
+    },
+
+    hasAnyCheckedMetaField() {
+      return ['local', 'anilist', 'mangadex'].some(src =>
+        this.metaSelected[src] && Object.values(this.metaFields[src]).some(v => v)
+      );
     },
   },
 
@@ -2018,7 +2059,12 @@ createApp({
       this.metaCandidatesAnilist  = [];
       this.metaCandidatesMangadex = [];
       this.localMetaCandidate     = null;
-      this.metaSelected           = null;
+      this.metaSelected           = { local: null, anilist: null, mangadex: null };
+      this.metaFields = {
+        local:    { description: false, genres: false, tags: false, cover: false },
+        anilist:  { description: false, genres: false, tags: false, cover: false },
+        mangadex: { description: false, genres: false, tags: false, cover: false },
+      };
       this.metaSearchedOnce       = false;
       this.metaStatus             = { msg: '', type: '' };
       this.showMetadataPopup      = true;
@@ -2026,7 +2072,6 @@ createApp({
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/local-metadata`));
         const data = await res.json();
         this.localMetaCandidate = data.candidate || null;
-        if (this.localMetaCandidate) this.metaSelected = this.localMetaCandidate;
       } catch (e) {
         this.localMetaCandidate = null;
       }
@@ -2039,7 +2084,13 @@ createApp({
       if (!this.metaSearch.trim()) return;
       this.metaCandidatesAnilist  = [];
       this.metaCandidatesMangadex = [];
-      this.metaSelected     = this.localMetaCandidate || null;
+      // A new search only resets the two provider sections -- Local File
+      // isn't affected by the search box at all, so an already-configured
+      // Local File selection survives searching for something else.
+      this.metaSelected.anilist  = null;
+      this.metaSelected.mangadex = null;
+      this.metaFields.anilist    = { description: false, genres: false, tags: false, cover: false };
+      this.metaFields.mangadex   = { description: false, genres: false, tags: false, cover: false };
       this.metaSearchedOnce = true;
       this.metaStatus       = { msg: '', type: '' };
       // Plain (non-reactive) instance counter, not declared in data() on
@@ -2058,9 +2109,6 @@ createApp({
         const data = await res.json();
         if (token !== this._metaSearchToken) return;
         this.metaCandidatesAnilist = data.candidates || [];
-        if (!this.metaSelected && this.metaCandidatesAnilist.length > 0) {
-          this.metaSelected = this.metaCandidatesAnilist[0];
-        }
       } catch (e) {
         if (token === this._metaSearchToken) this.metaStatus = { msg: 'AniList search failed.', type: 'err' };
       }
@@ -2074,9 +2122,6 @@ createApp({
         const data = await res.json();
         if (token !== this._metaSearchToken) return;
         this.metaCandidatesMangadex = data.candidates || [];
-        if (!this.metaSelected && this.metaCandidatesMangadex.length > 0) {
-          this.metaSelected = this.metaCandidatesMangadex[0];
-        }
       } catch (e) {
         // AniList's own status message (if any) already covers the popup's
         // one status line — a MangaDex-specific failure just leaves that
@@ -2085,17 +2130,79 @@ createApp({
       if (token === this._metaSearchToken) this.metaLoadingMangadex = false;
     },
 
+    // Clicking a card selects it for that source; clicking the
+    // already-selected card again deselects it -- the only way back to
+    // "nothing chosen" for that source without restarting the search.
+    // Newly selecting a candidate in a source that had nothing selected
+    // defaults its checkboxes to whichever fields aren't already claimed by
+    // another currently-selected source, so picking a second or third
+    // source doesn't silently steal fields already assigned elsewhere;
+    // switching to a *different* candidate within an already-selected
+    // source keeps its existing checkboxes as-is.
+    selectMetaCandidate(source, candidate) {
+      if (this.metaSelected[source] === candidate) {
+        this.metaSelected[source] = null;
+        this.metaFields[source] = { description: false, genres: false, tags: false, cover: false };
+        return;
+      }
+      const wasUnselected = !this.metaSelected[source];
+      this.metaSelected[source] = candidate;
+      if (wasUnselected) {
+        const claimed = this.claimedMetaFields(source);
+        this.metaFields[source] = {
+          description: !claimed.has('description'),
+          genres:      !claimed.has('genres'),
+          tags:        !claimed.has('tags'),
+          // Local File never has cover data (see local-metadata) -- no
+          // checkbox is even shown for it, so this never actually toggles.
+          cover:       source !== 'local' && !claimed.has('cover'),
+        };
+      }
+    },
+
+    // Every field currently checked in some OTHER selected source, used to
+    // pick sensible non-conflicting defaults when a new source is selected.
+    claimedMetaFields(excludeSource) {
+      const claimed = new Set();
+      for (const src of ['local', 'anilist', 'mangadex']) {
+        if (src === excludeSource || !this.metaSelected[src]) continue;
+        for (const [field, checked] of Object.entries(this.metaFields[src])) {
+          if (checked) claimed.add(field);
+        }
+      }
+      return claimed;
+    },
+
+    // Enforces mutual exclusion: checking a field under one source
+    // auto-unchecks that same field under every other source, since a
+    // field can only ever be imported from one place per Apply.
+    toggleMetaField(source, field) {
+      const newVal = !this.metaFields[source][field];
+      this.metaFields[source][field] = newVal;
+      if (newVal) {
+        for (const src of ['local', 'anilist', 'mangadex']) {
+          if (src !== source) this.metaFields[src][field] = false;
+        }
+      }
+    },
+
     async applyMetadata() {
-      if (!this.metaSelected) return;
-      const fields = Object.entries(this.metaFields).filter(([, v]) => v).map(([k]) => k);
-      if (fields.length === 0) return;
+      const entries = [];
+      for (const source of ['local', 'anilist', 'mangadex']) {
+        const candidate = this.metaSelected[source];
+        if (!candidate) continue;
+        const fields = Object.entries(this.metaFields[source]).filter(([, v]) => v).map(([k]) => k);
+        if (fields.length === 0) continue;
+        entries.push({ source, candidate, fields });
+      }
+      if (entries.length === 0) return;
       this.metaApplying = true;
       this.metaStatus   = { msg: '', type: '' };
       try {
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/apply-metadata`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ candidate: this.metaSelected, fields }),
+          body: JSON.stringify({ entries }),
         });
         const data = await res.json();
         if (data.ok) {
