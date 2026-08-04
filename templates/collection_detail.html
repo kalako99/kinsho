@@ -264,7 +264,7 @@
     }
     .manga-thumb:hover { transform: translateY(-4px); }
     .manga-thumb:hover .cover { box-shadow: 0 8px 24px rgba(0,0,0,0.55); }
-    .manga-thumb.dragging-source { opacity: 0.4; }
+    .manga-thumb.dragging-source { opacity: 0.4; touch-action: none; }
     .manga-thumb.drag-over .cover { outline: 2px solid var(--color-primary, #e94560); outline-offset: 2px; }
     .manga-thumb .cover {
       width: 100%;
@@ -1195,12 +1195,17 @@
           class="manga-thumb"
           v-for="m in collection.members"
           :key="m.library_id + ':' + m.manga_id"
+          :data-member-key="m.library_id + ':' + m.manga_id"
           :draggable="canEdit"
           @dragstart="onMemberDragStart($event, m.library_id + ':' + m.manga_id)"
           @dragover.prevent="onMemberDragOver($event, m.library_id + ':' + m.manga_id)"
           @dragleave="onMemberDragLeave($event)"
           @drop.prevent="onMemberDrop($event, m.library_id + ':' + m.manga_id)"
           @dragend="onMemberDragEnd"
+          @touchstart="canEdit && onMemberTouchStart($event, m.library_id + ':' + m.manga_id)"
+          @touchmove="canEdit && onMemberTouchMove($event)"
+          @touchend="canEdit && onMemberTouchEnd($event)"
+          @touchcancel="canEdit && onMemberTouchCancel()"
           @click="openMember(m)"
         >
           <div class="cover">
@@ -1352,6 +1357,13 @@
 
 <script>
 const { createApp } = Vue;
+
+// Touch-drag tuning for the member-reorder grid (see onMemberTouchStart) --
+// how long a press must hold still before it's treated as a drag rather
+// than the start of a page scroll, and how much movement is still
+// considered "still" while waiting.
+const TOUCH_DRAG_HOLD_MS   = 350;
+const TOUCH_DRAG_JITTER_PX = 10;
 
 createApp({
   data() {
@@ -1860,10 +1872,97 @@ createApp({
 
     async onMemberDrop(e, targetKey) {
       if (targetKey === this._dragKey) return;
+      await this.reorderMembers(this._dragKey, targetKey);
+    },
+
+    onMemberDragEnd() {
+      this._dragKey = null;
+      document.querySelectorAll('.manga-thumb').forEach(el => {
+        el.classList.remove('dragging-source');
+        el.classList.remove('drag-over');
+      });
+    },
+
+    // Touch equivalent of the mouse drag above. HTML5 drag-and-drop
+    // (dragstart/dragover/drop) has no touch support on iOS Safari and is
+    // unreliable on Android, so it's reimplemented here on raw touch events
+    // instead of relying on those listeners at all. Uses a long-press to
+    // "arm" the drag rather than arming on the first bit of movement --
+    // otherwise there'd be no way to tell an intended reorder-drag apart
+    // from the user just scrolling the page past this grid, since both
+    // start as a touchstart on a tile followed by movement. A press held
+    // TOUCH_DRAG_HOLD_MS without moving more than TOUCH_DRAG_JITTER_PX arms
+    // the drag; moving further than that first cancels the pending arm and
+    // leaves the touch as an ordinary scroll.
+    onMemberTouchStart(e, key) {
+      const t = e.touches[0];
+      this._touchStartX = t.clientX;
+      this._touchStartY = t.clientY;
+      this._touchDragging = false;
+      this._touchTargetKey = null;
+      clearTimeout(this._touchHoldTimer);
+      this._touchHoldTimer = setTimeout(() => {
+        this._dragKey = key;
+        this._touchDragging = true;
+        e.target.closest('.manga-thumb')?.classList.add('dragging-source');
+      }, TOUCH_DRAG_HOLD_MS);
+    },
+
+    onMemberTouchMove(e) {
+      const t = e.touches[0];
+      if (!this._touchDragging) {
+        const dx = t.clientX - this._touchStartX;
+        const dy = t.clientY - this._touchStartY;
+        if (Math.hypot(dx, dy) > TOUCH_DRAG_JITTER_PX) clearTimeout(this._touchHoldTimer);
+        return; // not armed yet -- let the page scroll normally
+      }
+      e.preventDefault();
+      const thumb = document.elementFromPoint(t.clientX, t.clientY)?.closest('.manga-thumb');
+      document.querySelectorAll('.manga-thumb').forEach(n => n.classList.remove('drag-over'));
+      this._touchTargetKey = null;
+      if (thumb && thumb.dataset.memberKey && thumb.dataset.memberKey !== this._dragKey) {
+        thumb.classList.add('drag-over');
+        this._touchTargetKey = thumb.dataset.memberKey;
+      }
+    },
+
+    async onMemberTouchEnd(e) {
+      clearTimeout(this._touchHoldTimer);
+      const wasDragging = this._touchDragging;
+      const fromKey = this._dragKey;
+      const toKey = this._touchTargetKey;
+      document.querySelectorAll('.manga-thumb').forEach(n => {
+        n.classList.remove('dragging-source');
+        n.classList.remove('drag-over');
+      });
+      this._dragKey = null;
+      this._touchDragging = false;
+      this._touchTargetKey = null;
+      if (wasDragging) {
+        // Suppresses the emulated click mobile browsers fire after a touch
+        // sequence ends, so completing a drag doesn't also navigate into
+        // the member's own page the way a plain tap would.
+        e.preventDefault();
+        if (toKey) await this.reorderMembers(fromKey, toKey);
+      }
+    },
+
+    onMemberTouchCancel() {
+      clearTimeout(this._touchHoldTimer);
+      document.querySelectorAll('.manga-thumb').forEach(n => {
+        n.classList.remove('dragging-source');
+        n.classList.remove('drag-over');
+      });
+      this._dragKey = null;
+      this._touchDragging = false;
+      this._touchTargetKey = null;
+    },
+
+    async reorderMembers(fromKey, toKey) {
       const members = this.collection.members;
       const keyOf = m => `${m.library_id}:${m.manga_id}`;
-      const fromIdx = members.findIndex(m => keyOf(m) === this._dragKey);
-      const toIdx   = members.findIndex(m => keyOf(m) === targetKey);
+      const fromIdx = members.findIndex(m => keyOf(m) === fromKey);
+      const toIdx   = members.findIndex(m => keyOf(m) === toKey);
       if (fromIdx === -1 || toIdx === -1) return;
       const reordered = [...members];
       const [moved] = reordered.splice(fromIdx, 1);
@@ -1879,14 +1978,6 @@ createApp({
         // description/tags/genres may derive from the new first member — refresh
         await this.loadCollection();
       }
-    },
-
-    onMemberDragEnd() {
-      this._dragKey = null;
-      document.querySelectorAll('.manga-thumb').forEach(el => {
-        el.classList.remove('dragging-source');
-        el.classList.remove('drag-over');
-      });
     },
   },
 }).mount('#app');
