@@ -638,6 +638,13 @@ const app = createApp({
       this.lastUpdatedPage    = result.page;
       this.lastUpdatedTotal   = result.total;
       this.lastUpdatedColumns = result.columns;
+      // Page-button navigation (unlike a back-navigation restore, which goes
+      // through applyState()/mounted() instead and must keep the remembered
+      // scroll Y) always lands the user back at the top -- otherwise, since
+      // page >1 hides the rows above the grid (see the v-if on those
+      // sections in manga_list.html), they'd stay scrolled to wherever the
+      // pagination controls used to be, well past the now-shorter page.
+      window.scrollTo(0, 0);
       // Keep the persisted snapshot (tabCache + sessionStorage) in sync with
       // what's actually on screen -- without this, clicking a page button only
       // ever updated the live view above, so the cache a later back-navigation

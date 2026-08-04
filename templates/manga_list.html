@@ -487,7 +487,7 @@
     
   </div>
 
-  <div class="section">
+  <div class="section" v-if="lastUpdatedPage === 1">
     <div class="section-header">
       <span class="section-title">Last Read</span>
       <div class="row-more-btn" :class="{ visible: atEnd.lastRead }">
@@ -504,7 +504,7 @@
       </div>
   </div>
 
-  <div class="section">
+  <div class="section" v-if="lastUpdatedPage === 1">
     <div class="section-header">
       <span class="section-title">Random</span>
       <div class="row-more-btn" :class="{ visible: atEnd.random }">
@@ -521,7 +521,7 @@
       </div>
   </div>
 
-  <div class="section">
+  <div class="section" v-if="lastUpdatedPage === 1">
     <div class="section-header">
       <span class="section-title">Favourites</span>
       <div class="row-more-btn" :class="{ visible: atEnd.favourites }">
@@ -538,7 +538,7 @@
       </div>
   </div>
 
-  <div class="section" v-if="showCollectionsRow && collectionsRow.length > 0">
+  <div class="section" v-if="lastUpdatedPage === 1 && showCollectionsRow && collectionsRow.length > 0">
     <div class="section-header">
       <span class="section-title">Collections</span>
       <div class="row-more-btn" :class="{ visible: atEnd.collections }">
