@@ -2349,7 +2349,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // True end-of-manifest bound (matches momentumLoop's own check below) --
     // NOT reader.scrollHeight, which is now always the full cursorY thanks
     // to the spacers and would make this fire at the wrong position anyway.
-    if (currentChapIdx >= chapterList.length - 1 && virtualY >= cursorY - viewH - 1) {
+    // isOnLastChapter() (not currentChapIdx, which is frozen to the entry
+    // chapter) -- see its own comment for why.
+    if (isOnLastChapter() && virtualY >= cursorY - viewH - 1) {
       showLastPagePopup();
       // checkChapterCompletion() only ever fires on a chapter-boundary crossing
       // (visibleChapterId changing), which never happens for the manga's last
@@ -2471,7 +2473,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
     velocity *= 0.982;
     const atEnd = virtualY >= cursorY - viewH - 1;
-    if (velocity > 0 && currentChapIdx >= chapterList.length - 1 && atEnd) {
+    if (velocity > 0 && isOnLastChapter() && atEnd) {
       velocity = 0;
       rafId    = null;
       showLastPagePopup();
@@ -4320,6 +4322,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       else break;
     }
     return visibleChapterId;
+  }
+
+  // currentChapIdx is a const frozen to the chapter the reader was *opened*
+  // with (see its own declaration) -- fine for the chapter dropdown/next-prev
+  // buttons, but wrong for "have we reached the manga's true last chapter",
+  // since long-strip's manifest scrolls continuously across chapter
+  // boundaries within one page load. Opening chapter 1 of a 50-chapter
+  // webtoon and reading straight through to the end left currentChapIdx
+  // stuck at 0 forever, so the end-of-manifest checks below never recognized
+  // the true last chapter as the true last chapter -- the manga never got
+  // marked 100% read no matter how far the user actually scrolled.
+  function isOnLastChapter() {
+    return chapterList.length > 0 && getVisibleChapterId() === chapterList[chapterList.length - 1].id;
   }
 
   async function saveReadingProgress(completedChapterId = null) {
