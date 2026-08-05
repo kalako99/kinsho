@@ -63,7 +63,7 @@ const app = createApp({
     },
 
     openCollection(id) { window.location.href = `/collection/${id}`; },
-    goBack()           { window.location.href = '/'; },
+    goBack()           { window.kinshoGoBack('/'); },
 
     async createCollection() {
       const name = this.newCollectionName.trim();

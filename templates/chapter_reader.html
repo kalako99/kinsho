@@ -1509,8 +1509,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // A oneshot has no manga_detail/volume_detail page of its own -- that
     // URL just redirects straight back into this exact chapter (see
     // manga_detail()), which read as "back reloads the oneshot" instead of
-    // actually going anywhere. Go straight to the manga list instead.
-    window.location.href = window.__IS_ONESHOT__ ? '/' : `/manga/${libraryId}/${mangaId}`;
+    // actually going anywhere. Go straight to the manga list instead --
+    // only matters as kinshoGoBack's fallback now (real history usually
+    // takes over instead, landing wherever the oneshot was actually opened
+    // from, since the redirect above never created its own back-stack entry).
+    window.kinshoGoBack(window.__IS_ONESHOT__ ? '/' : `/manga/${libraryId}/${mangaId}`);
   });
 
   // ── FETCH HELPERS ──

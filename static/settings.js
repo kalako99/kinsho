@@ -186,7 +186,7 @@ createApp({
   methods: {
 
     goBack() {
-      window.location.href = '/';
+      window.kinshoGoBack('/');
     },
 
     saveServerUrl() {

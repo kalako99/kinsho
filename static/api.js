@@ -26,6 +26,26 @@
   window.KINSHO_LOCAL = localStorage.getItem('kinsho_local_mode') === 'true';
   window.apiUrl       = function (path) { return (window.API_BASE || '') + path; };
 
+  // ── UNIFIED "BACK" NAVIGATION ──
+  // Every in-app back button used to be a hardcoded window.location.href
+  // redirect to one fixed URL, regardless of where the user actually came
+  // from -- which made it behave differently from the browser/mouse back
+  // button (real history navigation) and, e.g., sent "back" from a
+  // collection page to the unscoped all-collections list instead of
+  // wherever the user was actually browsing. history.length > 1 means this
+  // tab has a real previous page to return to (the normal case, arrived via
+  // an in-app click); history.length <= 1 means this page was opened
+  // directly (a bookmarked/shared link as the tab's first navigation),
+  // where there's nothing to go back to and the caller's fallback URL is
+  // used instead, unchanged from the old always-redirect behavior.
+  window.kinshoGoBack = function (fallbackUrl) {
+    if (window.history.length > 1) {
+      window.history.back();
+    } else {
+      window.location.href = fallbackUrl;
+    }
+  };
+
   // ── LIVE PERMISSION / SESSION CHANGE DETECTION ──
   // An admin changing a user's permissions (blocked tags, library access,
   // tag/genre/description toggles, role) previously only took effect on

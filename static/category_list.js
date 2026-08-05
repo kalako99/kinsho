@@ -137,7 +137,7 @@ const app = createApp({
       const cid = this.collectionMembership[`${this.libraryId}:${id}`];
       window.location.href = cid ? `/collection/${cid}` : `/manga/${this.libraryId}/${id}`;
     },
-    goBack()      { window.location.href = '/'; },
+    goBack()      { window.kinshoGoBack('/'); },
 
     async loadTheme() {
       const BUILTIN_THEMES = [

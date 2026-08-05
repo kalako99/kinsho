@@ -621,7 +621,7 @@
   }
   backBtn.addEventListener('click', () => {
     exitFullscreen();
-    window.location.href = `/manga/${libraryId}/${mangaId}`;
+    window.kinshoGoBack(`/manga/${libraryId}/${mangaId}`);
   });
 
   // ── TOP/BOTTOM BAR VISIBILITY ──

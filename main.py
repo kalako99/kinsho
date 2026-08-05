@@ -5073,12 +5073,13 @@ def manga_list(request: Request):
     if not perms.get("is_admin"):
         lib_perms = perms.get("libraries", {})
         libraries = [l for l in libraries if lib_perms.get(str(l["id"]), True) is not False]
-    hidden_libraries = set(str(x) for x in auth.load_user_data(username).get("hidden_libraries", []))
+    user_data = auth.load_user_data(username)
+    hidden_libraries = set(str(x) for x in user_data.get("hidden_libraries", []))
     if hidden_libraries:
         libraries = [l for l in libraries if str(l["id"]) not in hidden_libraries]
     return templates.TemplateResponse(request, "manga_list.html", {
         "libraries": libraries,
-        "last_tab":  admin.get("last_tab", None),
+        "last_tab":  user_data.get("last_tab", None),
         "theme_css": get_theme_css(username),
     })
 
