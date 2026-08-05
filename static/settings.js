@@ -1,6 +1,134 @@
 const { createApp } = Vue;
 
+// ── COMMUNITY: donut chart (genre/tag preference) ──
+// Hand-built inline SVG -- this codebase has no charting library dependency
+// anywhere, and this is the one small chart in the whole app. Palette is the
+// dataviz skill's own validated categorical set (Kinsho's accent-color
+// system only ever defines a single primary hue per theme, not a
+// categorical set to draw 5 distinguishable slice colors from), picked at
+// render time between a dark-surface and light-surface variant based on the
+// actual resolved --color-secondary this chart is sitting on -- covers the
+// Custom Theme editor's ability to set a light background, while defaulting
+// correctly for every dark-surface built-in theme.
+function _communityRelativeLuminance(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec((hex || '').trim());
+  if (!m) return 0; // unparseable -- assume dark, the overwhelming default here
+  const int = parseInt(m[1], 16);
+  const r = ((int >> 16) & 255) / 255;
+  const g = ((int >> 8) & 255) / 255;
+  const b = (int & 255) / 255;
+  const lin = c => (c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+function _donutSlicePath(cx, cy, rOuter, rInner, startAngle, endAngle) {
+  const TWO_PI = Math.PI * 2;
+  // A full-circle slice (only one category present) degenerates to a
+  // zero-length path with a literal 360° arc command -- nudge it just
+  // short of a full turn so it still renders as (essentially) whole.
+  if (endAngle - startAngle >= TWO_PI - 1e-6) endAngle = startAngle + TWO_PI - 1e-4;
+  const largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
+  const x1o = cx + rOuter * Math.cos(startAngle), y1o = cy + rOuter * Math.sin(startAngle);
+  const x2o = cx + rOuter * Math.cos(endAngle),   y2o = cy + rOuter * Math.sin(endAngle);
+  const x1i = cx + rInner * Math.cos(endAngle),   y1i = cy + rInner * Math.sin(endAngle);
+  const x2i = cx + rInner * Math.cos(startAngle), y2i = cy + rInner * Math.sin(startAngle);
+  return [
+    `M ${x1o} ${y1o}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${x2o} ${y2o}`,
+    `L ${x1i} ${y1i}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${x2i} ${y2i}`,
+    'Z',
+  ].join(' ');
+}
+
+const DonutChart = {
+  props: { title: String, categories: { type: Array, default: () => [] } },
+  data() {
+    return { hoverIndex: null, tooltipX: 0, tooltipY: 0 };
+  },
+  computed: {
+    total() {
+      return this.categories.reduce((sum, c) => sum + c.count, 0);
+    },
+    palette() {
+      const surface = getComputedStyle(document.documentElement)
+        .getPropertyValue('--color-secondary').trim() || '#1a1a1a';
+      const isLight = _communityRelativeLuminance(surface) > 0.5;
+      // Both sets validated (scripts/validate_palette.js, dataviz skill) on
+      // the adjacent-pair CVD check -- the correct topology for a donut's
+      // ring-neighbor slices. Light set's contrast check is a WARN, which
+      // the always-visible legend text (never slice-colored) satisfies.
+      return isLight
+        ? ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4']
+        : ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181'];
+    },
+    slices() {
+      if (this.total === 0) return [];
+      let cumulative = 0;
+      const R_OUTER = 90, R_INNER = 54, CX = 100, CY = 100;
+      return this.categories.map((c, i) => {
+        const isOther = c.label === 'Other';
+        // 'Other' is a residual bucket, never a categorical identity, so it
+        // never takes one of the 5 assigned hues -- same muted-ink gray used
+        // throughout this page's own chrome.
+        const color = isOther ? '#888' : this.palette[i % this.palette.length];
+        const fraction = c.count / this.total;
+        const startAngle = cumulative * 2 * Math.PI - Math.PI / 2;
+        cumulative += fraction;
+        const endAngle = cumulative * 2 * Math.PI - Math.PI / 2;
+        return {
+          ...c, color,
+          path: _donutSlicePath(CX, CY, R_OUTER, R_INNER, startAngle, endAngle),
+          pct: Math.round(fraction * 100),
+        };
+      });
+    },
+  },
+  methods: {
+    onSliceEnter(i, evt) {
+      this.hoverIndex = i;
+      this.onSliceMove(evt);
+    },
+    onSliceMove(evt) {
+      const wrap = evt.currentTarget.closest('.donut-chart-wrap');
+      if (!wrap) return;
+      const rect = wrap.getBoundingClientRect();
+      this.tooltipX = evt.clientX - rect.left;
+      this.tooltipY = evt.clientY - rect.top;
+    },
+    onSliceLeave() { this.hoverIndex = null; },
+  },
+  template: `
+    <div class="donut-chart-wrap" style="position:relative; min-width:170px;">
+      <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-muted,#888); margin-bottom:6px;" v-text="title"></div>
+      <div v-if="categories.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888);">No data visible to you.</div>
+      <template v-else>
+        <svg viewBox="0 0 200 200" width="130" height="130">
+          <path v-for="(s, i) in slices" :key="s.label" :d="s.path" :fill="s.color"
+                stroke="var(--color-secondary,#1a1a1a)" stroke-width="2" stroke-linejoin="round"
+                :style="{ filter: hoverIndex === i ? 'brightness(1.12)' : 'none', cursor: 'pointer' }"
+                tabindex="0" role="img" :aria-label="s.label + ': ' + s.count + ' (' + s.pct + '%)'"
+                @mouseenter="onSliceEnter(i, $event)" @mousemove="onSliceMove"
+                @mouseleave="onSliceLeave" @focus="onSliceEnter(i, $event)" @blur="onSliceLeave"></path>
+        </svg>
+        <div v-if="hoverIndex !== null"
+             :style="{ position: 'absolute', left: tooltipX + 'px', top: tooltipY + 'px', transform: 'translate(-50%,-120%)', background: 'var(--color-background,#0f0f0f)', border: '1px solid var(--color-border,#333)', borderRadius: '6px', padding: '4px 8px', fontSize: '0.72rem', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 10 }">
+          <strong v-text="slices[hoverIndex].count"></strong> — <span v-text="slices[hoverIndex].label"></span>
+        </div>
+        <div style="margin-top:8px; display:flex; flex-direction:column; gap:3px;">
+          <div v-for="s in slices" :key="s.label" style="display:flex; align-items:center; gap:6px; font-size:0.72rem;">
+            <span :style="{ width: '8px', height: '8px', borderRadius: '2px', background: s.color, flexShrink: 0 }"></span>
+            <span style="color:var(--color-text,#f0f0f0); flex:1;" v-text="s.label"></span>
+            <span style="color:var(--color-muted,#888);" v-text="s.count"></span>
+          </div>
+        </div>
+      </template>
+    </div>
+  `,
+};
+
 createApp({
+  components: { DonutChart },
   data() {
     return {
       // ── SECTION NAV ──
@@ -123,6 +251,11 @@ createApp({
       integrityRechecking:  false,   // Recheck All (bulk) in progress
       recheckingIssueId:    null,    // single-row Recheck currently in progress, if any
       integrityStatus:      { msg: '', type: '' },
+
+      // ── COMMUNITY (everyone, not admin-gated) ──
+      communityUsers:         [],
+      communityLoading:       false,
+      expandedCommunityUser:  null,
 
       // ── ADMIN: USER PERMISSIONS ──
       allUsers:           [],
@@ -1145,6 +1278,35 @@ createApp({
 
     toggleAdminStatsUser(username) {
       this.adminStatsExpanded = this.adminStatsExpanded === username ? null : username;
+    },
+
+    // ── COMMUNITY (everyone, not admin-gated) ──
+    // Lazy-loaded on first click into the section (see the nav button), same
+    // as Issues -- this endpoint's cost scales with every other user's whole
+    // reading history, unlike the eagerly-loaded Analytics/Accounts data.
+    async loadCommunity() {
+      if (this.communityUsers.length > 0) return; // already loaded this visit
+      this.communityLoading = true;
+      try {
+        const res  = await fetch(apiUrl('/api/community/overview'));
+        const data = await res.json();
+        if (data.ok) this.communityUsers = data.users;
+      } catch (e) {
+        console.error('Failed to load community overview:', e);
+      }
+      this.communityLoading = false;
+    },
+
+    toggleCommunityUser(username) {
+      this.expandedCommunityUser = this.expandedCommunityUser === username ? null : username;
+    },
+
+    goToCommunityFavourites(username) {
+      window.location.href = '/community/' + encodeURIComponent(username) + '/favourites';
+    },
+
+    openCommunityManga(libraryId, mangaId) {
+      window.location.href = '/manga/' + libraryId + '/' + mangaId;
     },
 
     // ── ADMIN: INTEGRITY ISSUES ──

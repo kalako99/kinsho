@@ -6023,6 +6023,214 @@ def reading_stats_all_users(request: Request):
         })
     return JSONResponse({"ok": True, "users": result})
 
+# ── COMMUNITY ─────────────────────────────────────────────────────────────
+# Cross-user reading stats + favourites, visible to every logged-in user (not
+# admin-gated). The one rule that matters everywhere below: every result is
+# filtered through the VIEWER's own permissions (can_access_library /
+# is_manga_blocked), never the target user's -- a manga the viewer can't see
+# must never surface here, even if the target genuinely read/favourited it.
+
+def _is_bootstrap_admin(username: str) -> bool:
+    """The one literal bootstrapped 'admin' account -- not all admin-role
+    accounts. Excluded from every 'other users' listing this feature has;
+    any OTHER admin-role account is browsable like anyone else."""
+    return username.strip().lower() == "admin"
+
+def _top5_plus_other(counts: dict) -> list:
+    """Sort by count desc (label as tiebreak for determinism), keep the top
+    5, fold the rest into one 'Other' bucket -- real genre/tag vocabularies
+    can exceed the ~6-segment readability ceiling for a donut chart."""
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    top = [{"label": label, "count": count} for label, count in ordered[:5]]
+    rest = sum(count for _, count in ordered[5:])
+    if rest > 0:
+        top.append({"label": "Other", "count": rest})
+    return top
+
+def _community_stats_for_user(viewer: str, target_username: str, libraries: dict,
+                               mangas_by_lib: dict, dims_cache: dict) -> dict:
+    """One target user's per-library stats + genre/tag tallies + favourites,
+    all filtered through the VIEWER's own permissions. dims_cache is a plain
+    {(library_id, manga_name): dims} dict the caller threads across every
+    target user in one request -- a manga's tags/genres don't depend on who's
+    asking, so this avoids re-reading the same dims.json once per user who
+    happens to have that title in their history. Request-scoped only (built
+    fresh per request, discarded after), so it can never go stale."""
+    target_data = auth.load_user_data(target_username)
+
+    def _dims_for(lib_id: int, manga_name: str) -> dict:
+        key = (lib_id, manga_name)
+        if key not in dims_cache:
+            dims_cache[key] = load_manga_dims(lib_id, manga_name)
+        return dims_cache[key]
+
+    by_library: dict = {}
+    genre_counts: dict = {}
+    tag_counts: dict = {}
+
+    # ── chapters/volumes read + genre/tag tally, one combined pass ──
+    for lib_id_str, lib_history in target_data.get("reading_history", {}).items():
+        lib_id = int(lib_id_str)
+        if not auth.can_access_library(viewer, lib_id):
+            continue
+        mangas_by_id = mangas_by_lib.get(lib_id, {})
+        for manga_id, entry in lib_history.items():
+            count = completed_chapter_count(entry)
+            if count == 0:
+                continue
+            manga = mangas_by_id.get(manga_id)
+            if not manga:
+                continue
+            dims = _dims_for(lib_id, manga["name"])
+            if auth.is_manga_blocked(viewer, dims.get("tags", [])):
+                continue
+            is_volume_manga = manga.get("manga_type") == "case2" or bool(dims.get("volumes"))
+            bucket = by_library.setdefault(lib_id, {"total_minutes": 0, "chapters_read": 0, "volumes_read": 0})
+            if is_volume_manga:
+                bucket["volumes_read"] += count
+            else:
+                bucket["chapters_read"] += count
+            for g in dims.get("genres", []):
+                genre_counts[g] = genre_counts.get(g, 0) + 1
+            for t in dims.get("tags", []):
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+
+    # ── read time, separate pass -- reading_sessions carry manga_name, not
+    # ── manga_id, so this needs a per-library name lookup instead of an id one
+    name_lookup_cache: dict = {}
+    for s in target_data.get("reading_sessions", []):
+        lib_id_raw = s.get("library_id")
+        if not lib_id_raw or not auth.can_access_library(viewer, lib_id_raw):
+            continue
+        try:
+            lib_id = int(lib_id_raw)
+        except (TypeError, ValueError):
+            continue
+        if lib_id not in name_lookup_cache:
+            name_lookup_cache[lib_id] = {m["name"]: m for m in mangas_by_lib.get(lib_id, {}).values()}
+        manga = name_lookup_cache[lib_id].get(s.get("manga_name", ""))
+        if not manga:
+            continue
+        dims = _dims_for(lib_id, manga["name"])
+        if auth.is_manga_blocked(viewer, dims.get("tags", [])):
+            continue
+        bucket = by_library.setdefault(lib_id, {"total_minutes": 0, "chapters_read": 0, "volumes_read": 0})
+        bucket["total_minutes"] += s.get("minutes", 0)
+
+    libraries_out = [
+        {"library_id": lib_id, "library_name": libraries.get(str(lib_id), f"Library {lib_id}"), **stats}
+        for lib_id, stats in sorted(by_library.items())
+    ]
+
+    # ── favourites, cross-library, viewer-filtered ──
+    visible_favs = list(reversed(_visible_members(viewer, target_data.get("favourites", []))))
+    fav_items = []
+    for f in visible_favs[:20]:
+        lib_id = f["library_id"]
+        manga = mangas_by_lib.get(lib_id, {}).get(f["manga_id"])
+        if not manga:
+            continue
+        cover_url, cover_url_large = _resolve_member_cover_urls(viewer, lib_id, f["manga_id"])
+        fav_items.append({
+            "library_id": lib_id, "manga_id": f["manga_id"], "title": manga["name"],
+            "cover_url": cover_url, "cover_url_large": cover_url_large,
+        })
+
+    return {
+        "username":         target_username,
+        "libraries":        libraries_out,
+        "genre_categories": _top5_plus_other(genre_counts),
+        "tag_categories":   _top5_plus_other(tag_counts),
+        "favourites":       {"items": fav_items, "total": len(visible_favs)},
+    }
+
+def _mangas_by_lib(app_data: dict) -> dict:
+    """library_id (int) -> {manga_id: manga} -- built once per request and
+    reused across every target user, instead of each helper re-reading
+    load_app_data() (and re-walking its manga list) per call."""
+    return {
+        int(lib_id): {m["id"]: m for m in lib_data.get("mangas", [])}
+        for lib_id, lib_data in app_data.get("manga_data", {}).items()
+    }
+
+@app.get("/api/community/users")
+def community_users(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+    users = [
+        u["username"] for u in auth._load_users()["users"]
+        if u["username"] != username and not _is_bootstrap_admin(u["username"])
+    ]
+    return JSONResponse({"ok": True, "users": users})
+
+@app.get("/api/community/overview")
+def community_overview(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+
+    app_data      = load_app_data()
+    libraries     = {str(lib["id"]): lib["name"] for lib in app_data.get("libraries", [])}
+    mangas_by_lib = _mangas_by_lib(app_data)
+    dims_cache: dict = {}
+
+    result = []
+    for user in auth._load_users()["users"]:
+        target = user["username"]
+        if target == username or _is_bootstrap_admin(target):
+            continue
+        result.append(_community_stats_for_user(username, target, libraries, mangas_by_lib, dims_cache))
+
+    return JSONResponse({"ok": True, "users": result})
+
+@app.get("/api/community/{target_username}/favourites")
+def community_user_favourites(request: Request, target_username: str, page: int = Query(default=1, ge=1)):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+    target = target_username.strip().lower()
+    if _is_bootstrap_admin(target) or not any(u["username"] == target for u in auth._load_users()["users"]):
+        return JSONResponse({"error": "User not found"}, status_code=404)
+
+    mangas_by_lib = _mangas_by_lib(load_app_data())
+    target_data   = auth.load_user_data(target)
+    visible_favs  = list(reversed(_visible_members(username, target_data.get("favourites", []))))
+
+    total    = len(visible_favs)
+    per_page = 50
+    offset   = (page - 1) * per_page
+    page_favs = visible_favs[offset: offset + per_page]
+
+    result = []
+    for f in page_favs:
+        lib_id = f["library_id"]
+        manga  = mangas_by_lib.get(lib_id, {}).get(f["manga_id"])
+        if not manga:
+            continue
+        cover_url, _ = _resolve_member_cover_urls(username, lib_id, f["manga_id"])
+        result.append({
+            "library_id": lib_id, "manga_id": f["manga_id"], "title": manga["name"],
+            "cover": cover_url, "is_complete": manga.get("is_complete", False),
+        })
+
+    return JSONResponse({"mangas": result, "total": total, "page": page, "per_page": per_page})
+
+@app.get("/community/{target_username}/favourites")
+def community_favourites_page(request: Request, target_username: str):
+    username = auth.get_current_user(request)
+    if not username:
+        return RedirectResponse("/login", status_code=302)
+    if auth.must_change_password(username):
+        return RedirectResponse("/settings", status_code=302)
+    target = target_username.strip().lower()
+    if _is_bootstrap_admin(target) or not any(u["username"] == target for u in auth._load_users()["users"]):
+        return RedirectResponse("/settings", status_code=302)
+    return templates.TemplateResponse(request, "community_favourites.html", {
+        "target_username": target,
+        "theme_css":        get_theme_css(username),
+    })
+
 # ── OPDS + OPDS-PSE CATALOG ──────────────────────────────────────────────────
 # A standard OPDS 1.2 catalog, with the Page Streaming Extension for comic
 # clients (Chunky, and Mihon's generic OPDS source) that can page through a
