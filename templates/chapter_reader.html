@@ -4340,6 +4340,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   async function saveReadingProgress(completedChapterId = null) {
     const currentPage      = getCurrentPageIdx();
     const visibleChapterId = getVisibleChapterId();
+    // keepalive: true -- the true-last-chapter completion save (syncScrollPosition)
+    // fires the instant the user hits the real bottom, and the very next thing
+    // they typically do is hit "back" to leave the reader. Without keepalive, a
+    // plain fetch can be aborted mid-flight by the browser when the document
+    // starts unloading, silently dropping the completion write even though the
+    // popup already confirmed the end was reached. Same class of fix as the
+    // sendBeacon used for the reading-session tick above.
     await fetch(apiUrl('/api/reading/progress'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -4350,6 +4357,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         page:                 currentPage,
         completed_chapter_id: completedChapterId,
       }),
+      keepalive: true,
     });
   }
 
@@ -5006,6 +5014,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   spForward = function() {
     if (readerSettings.mode === 'single-page' && spCurrentIdx >= spManifest.length - 1) {
       const lastPageIdx = spManifest.length > 0 ? spManifest[spManifest.length - 1].localIdx : 0;
+      // keepalive: true -- same reasoning as saveReadingProgress() above; flipping
+      // past the last page here is immediately followed by leaving the reader.
       fetch(apiUrl('/api/reading/progress'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5016,6 +5026,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
           page:                 lastPageIdx,
           completed_chapter_id: chapterId,
         }),
+        keepalive: true,
       });
     }
     _origSpForward();
