@@ -127,8 +127,89 @@ const DonutChart = {
   `,
 };
 
-createApp({
+// ── COMMUNITY: one user's stats block (per-library time/counts, genre/tag
+// donuts, favourites row) -- shared between the "You" card and every other
+// user's expanded row so both render identically off the same stats shape
+// the backend returns for either target.
+const CommunityUserPanel = {
   components: { DonutChart },
+  props: { stats: { type: Object, required: true } },
+  emits: ['open-manga', 'view-more'],
+  methods: {
+    formatMinutes(mins) {
+      if (!mins) return '0 m';
+      if (mins < 60) return mins + ' m';
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      return m > 0 ? `${h} h ${m} m` : `${h} h`;
+    },
+  },
+  template: `
+    <div>
+      <div v-if="stats.libraries.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888); padding-top:10px;">No reading data yet.</div>
+      <div v-for="lib in stats.libraries" :key="lib.library_id" style="margin-top:12px;">
+        <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-primary,#e94560); margin-bottom:6px;" v-text="lib.library_name"></div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.8rem; color:var(--color-text,#f0f0f0);">
+          <span>Time: <strong v-text="formatMinutes(lib.total_minutes)"></strong></span>
+          <span v-if="lib.chapters_read > 0">Chapters read: <strong v-text="lib.chapters_read"></strong></span>
+          <span v-if="lib.volumes_read > 0">Volumes read: <strong v-text="lib.volumes_read"></strong></span>
+        </div>
+      </div>
+
+      <div style="display:flex; flex-wrap:wrap; gap:24px; margin-top:16px;">
+        <donut-chart title="Genres" :categories="stats.genre_categories"></donut-chart>
+        <donut-chart title="Tags" :categories="stats.tag_categories"></donut-chart>
+      </div>
+
+      <div style="margin-top:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-muted,#888);">Favourites</div>
+          <div class="row-more-btn visible" v-if="stats.favourites.total > 0">
+            <a href="#" @click.prevent="$emit('view-more')">View more →</a>
+          </div>
+        </div>
+        <div v-if="stats.favourites.items.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888);">No favourites visible to you.</div>
+        <div v-else class="manga-row" v-drag-scroll>
+          <div v-for="fav in stats.favourites.items" :key="fav.library_id + ':' + fav.manga_id"
+               class="manga-thumb" @click="$emit('open-manga', fav.library_id, fav.manga_id)">
+            <div class="cover">
+              <img v-if="fav.cover_url" :src="fav.cover_url" loading="lazy" :alt="fav.title" />
+              <span v-else>No Cover</span>
+            </div>
+            <div class="card-body">
+              <div class="thumb-title" v-text="fav.title"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `,
+};
+
+// ── DRAG TO SCROLL DIRECTIVE (same behavior as the manga-list rows) ──
+const vDragScroll = {
+  mounted(el) {
+    let isDown = false;
+    let startX, scrollLeft;
+    el.addEventListener('dragstart', (e) => { e.preventDefault(); });
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      isDown = true;
+      el.classList.add('dragging');
+      startX = e.pageX - el.offsetLeft;
+      scrollLeft = el.scrollLeft;
+    });
+    document.addEventListener('mouseup', () => { isDown = false; el.classList.remove('dragging'); });
+    el.addEventListener('mousemove', (e) => {
+      if (!isDown) return;
+      e.preventDefault();
+      el.scrollLeft = scrollLeft - (e.pageX - el.offsetLeft - startX) * 1.5;
+    });
+  },
+};
+
+createApp({
+  components: { DonutChart, CommunityUserPanel },
   data() {
     return {
       // ── SECTION NAV ──
@@ -253,9 +334,12 @@ createApp({
       integrityStatus:      { msg: '', type: '' },
 
       // ── COMMUNITY (everyone, not admin-gated) ──
-      communityUsers:         [],
+      communityUsersList:     [],   // usernames only -- cheap, loaded once
       communityLoading:       false,
-      expandedCommunityUser:  null,
+      expandedCommunityUsers: [],   // multiple rows can stay open at once, to compare
+      communityUserStats:     {},   // username -> stats, fetched fresh on every expand
+      communityUserLoading:   {},   // username -> bool, per-row loading state
+      communitySelf:          null, // the current account's own stats
 
       // ── ADMIN: USER PERMISSIONS ──
       allUsers:           [],
@@ -1281,24 +1365,53 @@ createApp({
     },
 
     // ── COMMUNITY (everyone, not admin-gated) ──
-    // Lazy-loaded on first click into the section (see the nav button), same
-    // as Issues -- this endpoint's cost scales with every other user's whole
-    // reading history, unlike the eagerly-loaded Analytics/Accounts data.
+    // The username list is cheap and only fetched once per visit (same as
+    // before), but each user's actual stats -- including your own -- are
+    // fetched fresh every time they're actually looked at (here, and again
+    // in toggleCommunityUser below) rather than cached for the rest of the
+    // page visit, so reading time/progress is never stale from an earlier
+    // look this same session.
     async loadCommunity() {
-      if (this.communityUsers.length > 0) return; // already loaded this visit
-      this.communityLoading = true;
-      try {
-        const res  = await fetch(apiUrl('/api/community/overview'));
-        const data = await res.json();
-        if (data.ok) this.communityUsers = data.users;
-      } catch (e) {
-        console.error('Failed to load community overview:', e);
+      if (this.communityUsersList.length === 0) {
+        this.communityLoading = true;
+        try {
+          const res  = await fetch(apiUrl('/api/community/users'));
+          const data = await res.json();
+          if (data.ok) this.communityUsersList = data.users;
+        } catch (e) {
+          console.error('Failed to load community user list:', e);
+        }
+        this.communityLoading = false;
       }
-      this.communityLoading = false;
+      try {
+        const res  = await fetch(apiUrl('/api/community/self'));
+        const data = await res.json();
+        if (data.ok) this.communitySelf = data.stats;
+      } catch (e) {
+        console.error('Failed to load your own community stats:', e);
+      }
     },
 
-    toggleCommunityUser(username) {
-      this.expandedCommunityUser = this.expandedCommunityUser === username ? null : username;
+    // Rows stay independently expanded (no accordion collapse of one row
+    // when another is opened) so multiple users' data can sit open side by
+    // side for comparison. Every expand re-fetches that user's stats fresh,
+    // even if this row was already opened earlier this visit.
+    async toggleCommunityUser(username) {
+      const idx = this.expandedCommunityUsers.indexOf(username);
+      if (idx !== -1) {
+        this.expandedCommunityUsers.splice(idx, 1);
+        return;
+      }
+      this.expandedCommunityUsers.push(username);
+      this.communityUserLoading[username] = true;
+      try {
+        const res  = await fetch(apiUrl('/api/community/' + encodeURIComponent(username) + '/stats'));
+        const data = await res.json();
+        if (data.ok) this.communityUserStats[username] = data.stats;
+      } catch (e) {
+        console.error('Failed to load community stats for', username, e);
+      }
+      this.communityUserLoading[username] = false;
     },
 
     goToCommunityFavourites(username) {
@@ -1589,4 +1702,4 @@ createApp({
     },
 
   }
-}).mount('#app');
+}).directive('drag-scroll', vDragScroll).mount('#app');

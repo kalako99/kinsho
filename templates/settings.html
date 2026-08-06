@@ -176,43 +176,90 @@
       font-size: 0.9rem;
     }
 
-    /* ── COMMUNITY: favourites row ── */
-    .community-fav-row {
+    /* ── COMMUNITY: favourites row -- same look/behavior as the manga-list
+       page's own scrollable rows (manga-row/manga-thumb), copied here since
+       this template has no shared stylesheet with manga_list.html. ── */
+    .row-more-btn {
+      display: none;
+      opacity: 0;
+      transform: translateX(8px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .row-more-btn.visible {
+      display: inline-flex;
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .row-more-btn a {
+      color: var(--color-primary);
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-decoration: none;
+      white-space: nowrap;
+      background: var(--color-secondary);
+      border: 1px solid var(--color-primary);
+      border-radius: 20px;
+      padding: 4px 10px;
+      transition: background 0.2s, color 0.2s;
+    }
+    .row-more-btn a:hover { background: var(--color-primary); color: #fff; }
+
+    .manga-row {
       display: flex;
-      gap: 10px;
+      gap: 12px;
       overflow-x: auto;
-      padding-bottom: 4px;
+      padding-bottom: 10px;
+      scrollbar-width: none;
+      cursor: grab;
+      user-select: none;
     }
-    .community-fav-tile {
-      flex: 0 0 72px;
+    .manga-row::-webkit-scrollbar { display: none; }
+    .manga-row.dragging { cursor: grabbing; }
+
+    .manga-thumb {
+      flex: 0 0 clamp(100px, 13vw, 160px);
+      width: clamp(100px, 13vw, 160px);
       cursor: pointer;
+      transition: transform 0.2s;
     }
-    .community-fav-cover {
-      width: 72px;
-      aspect-ratio: 2 / 3;
-      background: var(--color-background, #0f0f0f);
-      border-radius: 8px;
-      border: 1px solid var(--color-border, #333);
+    .manga-thumb:hover { transform: translateY(-4px); }
+    .manga-thumb:hover .cover { box-shadow: 0 8px 24px rgba(0,0,0,0.55); }
+    .manga-thumb .cover {
+      width: 100%;
+      height: calc(clamp(100px, 13vw, 160px) * 3 / 2);
+      background: var(--color-secondary);
+      border-radius: 11px;
+      border: 1px solid #333;
       overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--color-muted, #888);
-      font-size: 0.7rem;
+      position: relative;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
     }
-    .community-fav-cover img {
+    .manga-thumb .cover img {
+      position: absolute;
+      top: 0; left: 0;
       width: 100%;
       height: 100%;
       object-fit: cover;
+      border-radius: 11px;
       display: block;
     }
-    .community-fav-title {
-      font-size: 0.68rem;
+    .manga-thumb .cover span {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      color: #555;
+      font-size: 0.7rem;
+    }
+    .manga-thumb .card-body { padding: 5px 2px 0; }
+    .manga-thumb .thumb-title {
+      font-size: 0.72rem;
       color: var(--color-text, #f0f0f0);
-      margin-top: 4px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      text-shadow: 0 1px 4px rgba(0,0,0,0.5);
     }
 
     .status-msg {
@@ -1390,58 +1437,38 @@
     <div class="section-label">Community</div>
     <div class="section-hint">See what other users on this server are reading — filtered to only what you yourself have permission to see. Manga in a library or tag you can't access never appears here, even if it genuinely appears in their history.</div>
 
-    <div v-if="communityLoading" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">Loading…</div>
-    <div v-if="!communityLoading && communityUsers.length === 0" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">No other users yet.</div>
+    <!-- your own stats -- always shown, own card, never collapsed -->
+    <div v-if="communitySelf" class="library-card">
+      <div class="library-header" style="margin-bottom:0;">
+        <span style="font-weight:600; font-size:0.9rem; flex:1;">You</span>
+      </div>
+      <community-user-panel :stats="communitySelf"
+        @open-manga="openCommunityManga"
+        @view-more="goToCommunityFavourites(communitySelf.username)"></community-user-panel>
+    </div>
 
-    <div v-for="u in communityUsers" :key="u.username" class="library-card">
-      <div class="library-header" style="cursor:pointer; margin-bottom:0;" @click="toggleCommunityUser(u.username)">
-        <span style="font-weight:600; font-size:0.9rem; flex:1;" v-text="u.username"></span>
+    <div v-if="communityLoading" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">Loading…</div>
+    <div v-if="!communityLoading && communityUsersList.length === 0" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">No other users yet.</div>
+
+    <!-- other users -- each row expands/collapses independently, so several
+         can stay open at once to compare against each other (and against
+         your own card above) -- and each fetches its own stats fresh every
+         time it's opened, never reused from an earlier expand this visit. -->
+    <div v-for="uname in communityUsersList" :key="uname" class="library-card">
+      <div class="library-header" style="cursor:pointer; margin-bottom:0;" @click="toggleCommunityUser(uname)">
+        <span style="font-weight:600; font-size:0.9rem; flex:1;" v-text="uname"></span>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              style="transition:transform 0.2s; flex-shrink:0;"
-             :style="{ transform: expandedCommunityUser === u.username ? 'rotate(180deg)' : 'none' }">
+             :style="{ transform: expandedCommunityUsers.includes(uname) ? 'rotate(180deg)' : 'none' }">
           <polyline points="6 9 12 15 18 9"/>
         </svg>
       </div>
 
-      <template v-if="expandedCommunityUser === u.username">
-
-        <!-- per-library stats -->
-        <div v-if="u.libraries.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888); padding-top:10px;">No reading activity visible to you.</div>
-        <div v-for="lib in u.libraries" :key="lib.library_id" style="margin-top:12px;">
-          <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-primary,#e94560); margin-bottom:6px;" v-text="lib.library_name"></div>
-          <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.8rem; color:var(--color-text,#f0f0f0);">
-            <span>Time: <strong v-text="formatMinutes(lib.total_minutes)"></strong></span>
-            <span v-if="lib.chapters_read > 0">Chapters read: <strong v-text="lib.chapters_read"></strong></span>
-            <span v-if="lib.volumes_read > 0">Volumes read: <strong v-text="lib.volumes_read"></strong></span>
-          </div>
-        </div>
-
-        <!-- genre/tag preference donuts -->
-        <div style="display:flex; flex-wrap:wrap; gap:24px; margin-top:16px;">
-          <donut-chart title="Genres" :categories="u.genre_categories"></donut-chart>
-          <donut-chart title="Tags" :categories="u.tag_categories"></donut-chart>
-        </div>
-
-        <!-- favourites row -->
-        <div style="margin-top:16px;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-muted,#888);">Favourites</div>
-            <a v-if="u.favourites.total > 20" href="#" @click.prevent="goToCommunityFavourites(u.username)"
-               style="font-size:0.75rem; color:var(--color-primary,#e94560); text-decoration:none;">View more →</a>
-          </div>
-          <div v-if="u.favourites.items.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888);">No favourites visible to you.</div>
-          <div v-else class="community-fav-row">
-            <div v-for="fav in u.favourites.items" :key="fav.library_id + ':' + fav.manga_id"
-                 class="community-fav-tile" @click="openCommunityManga(fav.library_id, fav.manga_id)">
-              <div class="community-fav-cover">
-                <img v-if="fav.cover_url" :src="fav.cover_url" loading="lazy" alt="" />
-                <span v-else>?</span>
-              </div>
-              <div class="community-fav-title" v-text="fav.title"></div>
-            </div>
-          </div>
-        </div>
-
+      <template v-if="expandedCommunityUsers.includes(uname)">
+        <div v-if="communityUserLoading[uname]" style="font-size:0.8rem; color:var(--color-muted,#888); text-align:center; padding:8px;">Loading…</div>
+        <community-user-panel v-else-if="communityUserStats[uname]" :stats="communityUserStats[uname]"
+          @open-manga="openCommunityManga"
+          @view-more="goToCommunityFavourites(uname)"></community-user-panel>
       </template>
     </div>
   </div>

@@ -6051,11 +6051,13 @@ def _community_stats_for_user(viewer: str, target_username: str, libraries: dict
                                mangas_by_lib: dict, dims_cache: dict) -> dict:
     """One target user's per-library stats + genre/tag tallies + favourites,
     all filtered through the VIEWER's own permissions. dims_cache is a plain
-    {(library_id, manga_name): dims} dict the caller threads across every
-    target user in one request -- a manga's tags/genres don't depend on who's
-    asking, so this avoids re-reading the same dims.json once per user who
-    happens to have that title in their history. Request-scoped only (built
-    fresh per request, discarded after), so it can never go stale."""
+    {(library_id, manga_name): dims} dict -- callers fetching just one target
+    (the common case, since each user's row is loaded on demand) can pass a
+    fresh {}; a caller that ever needs several targets in one request can
+    still thread the same dict through to avoid re-reading a dims.json a
+    second time for a title that appears in more than one target's history.
+    Request-scoped only (built fresh per request, discarded after), so it
+    can never go stale."""
     target_data = auth.load_user_data(target_username)
 
     def _dims_for(lib_id: int, manga_name: str) -> dict:
@@ -6164,25 +6166,38 @@ def community_users(request: Request):
     ]
     return JSONResponse({"ok": True, "users": users})
 
-@app.get("/api/community/overview")
-def community_overview(request: Request):
+@app.get("/api/community/self")
+def community_self(request: Request):
+    """Same shape _community_stats_for_user always produces, just with the
+    viewer looking at their own data -- lets the Community section show a
+    "you" card using the exact same rendering as every other user's row."""
     username = auth.get_current_user(request)
     if not username:
         return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
-
     app_data      = load_app_data()
     libraries     = {str(lib["id"]): lib["name"] for lib in app_data.get("libraries", [])}
     mangas_by_lib = _mangas_by_lib(app_data)
-    dims_cache: dict = {}
+    stats = _community_stats_for_user(username, username, libraries, mangas_by_lib, {})
+    return JSONResponse({"ok": True, "stats": stats})
 
-    result = []
-    for user in auth._load_users()["users"]:
-        target = user["username"]
-        if target == username or _is_bootstrap_admin(target):
-            continue
-        result.append(_community_stats_for_user(username, target, libraries, mangas_by_lib, dims_cache))
-
-    return JSONResponse({"ok": True, "users": result})
+@app.get("/api/community/{target_username}/stats")
+def community_user_stats(request: Request, target_username: str):
+    """One target user's stats, fetched on demand (when their row is expanded
+    in Settings) rather than batched for every user up front -- keeps the
+    numbers (reading time especially) current as of the moment you actually
+    look, instead of whatever they were the first time the Community section
+    was opened this page visit."""
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+    target = target_username.strip().lower()
+    if _is_bootstrap_admin(target) or not any(u["username"] == target for u in auth._load_users()["users"]):
+        return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
+    app_data      = load_app_data()
+    libraries     = {str(lib["id"]): lib["name"] for lib in app_data.get("libraries", [])}
+    mangas_by_lib = _mangas_by_lib(app_data)
+    stats = _community_stats_for_user(username, target, libraries, mangas_by_lib, {})
+    return JSONResponse({"ok": True, "stats": stats})
 
 @app.get("/api/community/{target_username}/favourites")
 def community_user_favourites(request: Request, target_username: str, page: int = Query(default=1, ge=1)):
