@@ -3246,6 +3246,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   bbNextChap.addEventListener('click', (e) => {
     e.stopPropagation();
     if (currentChapIdx < chapterList.length - 1) {
+      // goToChapter() is a hard navigation (location.replace) -- it never
+      // gives long-strip's scroll-crossing detection or single-page mode's
+      // own spForward hook a chance to fire, so clicking straight to the
+      // next chapter (instead of scrolling/flipping past the actual seam)
+      // silently never marked the chapter being left as read, no matter how
+      // much of it had actually been read. An explicit "next chapter" click
+      // is as clear a "done with this one" signal as either of those, so it
+      // marks completion the same way. saveReadingProgress's fetch is
+      // keepalive, so it's safe to fire-and-forget right before navigating.
+      saveReadingProgress(chapterId);
       goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx + 1].id}`);
     }
   });
