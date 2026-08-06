@@ -244,6 +244,11 @@ createApp({
       pageCounts: {},        // library_id (string) -> {total_pages, total_chapters, total_volumes}
       pageCountsGrand: null, // null while unloaded, so the UI can tell "loading" from "zero"
 
+      // ── AUTO-RESCAN + SCAN ACTIVITY (admin) ──
+      autoRescanEnabled: true,
+      autoRescanStatus:  { msg: '', type: '' },
+      scanActivity:      { scanning: false, libraries: [] },
+
       // ── USERNAME ──
       username:           '',
       currentPassword:    '',
@@ -481,6 +486,12 @@ createApp({
         await this.loadUserPermissions();
         await this.loadAdminStats();
         await this.loadIntegrityIssues();
+        await this.loadScanActivity();
+        // Kept live for the whole page visit (not just while the Libraries
+        // section is open) so an admin who checks Settings for any reason
+        // still sees an in-progress scan -- this is specifically to answer
+        // "is it safe to update/restart the container right now".
+        setInterval(() => this.loadScanActivity(), 4000);
       }
       await this.loadAnalytics();
     },
@@ -589,6 +600,7 @@ createApp({
         this.showCollectionsRow     = data.show_collections_row     !== false;
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
+        this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
         this.activeCustomThemeName  = data.active_custom_theme_name || '';
         this.customThemes           = data.custom_themes            || {};
@@ -700,6 +712,39 @@ createApp({
       } catch (e) {
         console.error('Failed to persist library removal:', e);
       }
+    },
+
+    // ── AUTO-RESCAN TOGGLE ──
+    // Only gates the unattended 12-hour background rescan -- the per-library
+    // Reload button below and the startup corruption self-heal both still
+    // work regardless of this setting.
+    async saveAutoRescan() {
+      try {
+        await fetch(apiUrl('/api/admin/settings/auto-rescan'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: this.autoRescanEnabled }),
+        });
+        this.autoRescanStatus = { msg: '✓ Saved.', type: 'ok' };
+      } catch (e) {
+        this.autoRescanStatus = { msg: 'Failed to save.', type: 'err' };
+      }
+      setTimeout(() => { this.autoRescanStatus = { msg: '', type: '' }; }, 3000);
+    },
+
+    // ── SCAN ACTIVITY (any library currently scanning, with progress) ──
+    async loadScanActivity() {
+      try {
+        const res  = await fetch(apiUrl('/api/scan/activity'));
+        const data = await res.json();
+        this.scanActivity = data;
+      } catch (e) {
+        // leave the last known state on a transient fetch failure
+      }
+    },
+
+    scanProgressPct(lib) {
+      return Math.max(0, Math.min(100, Math.round((lib.processed / Math.max(lib.total, 1)) * 100)));
     },
 
     // ── TRIGGER SCAN FOR ONE LIBRARY ──

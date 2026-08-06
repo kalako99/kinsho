@@ -76,6 +76,7 @@ def get_local_ip():
 @asynccontextmanager
 async def lifespan(app):
     auth._ensure_admin_exists()
+    _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
     if os.path.exists(bg_folder):
         app.mount("/backgrounds", StaticFiles(directory=bg_folder), name="backgrounds")
@@ -209,6 +210,7 @@ _thumb_progress: dict = {}
 _thumb_progress_lock = threading.Lock()
 
 _scan_running: set = set()  # library_ids currently being scanned
+_scan_progress: dict = {}  # library_id -> {"processed": int, "total": int}, present only while running
 
 templates = Jinja2Templates(directory="templates")
 
@@ -313,6 +315,68 @@ def load_manga_dims(library_id: int, manga_name: str) -> dict:
     with open(path, "r") as f:
         return json.load(f)
 
+def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
+    """Scanning-only wrapper around load_manga_dims -- a dims.json can be left
+    truncated if the process is killed mid-write (save_manga_dims is now
+    atomic going forward, but a file corrupted before that fix, or by some
+    other means, still needs to not take the whole scan down). Every
+    "is this manga/chapter/volume unchanged" comparison in scan_library
+    already treats an absent per-item mtime as "must reprocess" -- returning
+    the same empty shape load_manga_dims already returns for a genuinely
+    missing file makes those checks naturally force a full rebuild of this
+    one manga's chapters/pages/cover from the real source files, self-healing
+    the corrupted file as a side effect of the normal rescan-if-changed path.
+    This does NOT recover tags/genres/description -- those aren't derivable
+    from the source images, so if the corrupted write had ever saved
+    different values than what's recoverable from a backup, they're gone.
+    Used by scan_library/relocate_dims_paths/extract_thumbs_for_library, where
+    "treat as empty and let the existing rescan-if-changed logic rebuild it"
+    is exactly the right behavior. Permission checks keep calling
+    load_manga_dims directly and keep failing loudly on real corruption,
+    since silently treating a corrupted file's tags as empty there could
+    surface a manga a blocked-tag was supposed to hide. Listing/serving
+    routes use _load_dims_or_flag_for_repair (below) instead -- same
+    detection, but skips the manga from the response rather than showing it
+    with fabricated-empty data."""
+    try:
+        return load_manga_dims(library_id, manga_name)
+    except json.JSONDecodeError as e:
+        print(f"[ScanLib] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
+              f"-- treating as empty and rebuilding from source this scan. "
+              f"Manually-added tags/genres/description for this manga are lost unless a backup exists.")
+        return {"chapters": {}, "tags": [], "genres": [], "description": ""}
+
+_corruption_repair_started: set = set()  # library_ids where a repair rescan has already been kicked off this process's lifetime, cleared when that scan finishes
+
+def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[dict]:
+    """Listing/serving-path-safe dims loader. A corrupted dims.json here
+    would otherwise 500 the entire request -- e.g. one bad manga taking down
+    a whole library tab's listing for every user, which is the actual bug
+    report this exists for. Returns None on corruption; the caller must skip
+    this manga from whatever it's building (never substitute an empty dict --
+    that would read as "no tags", which could surface a manga a blocked tag
+    was supposed to hide). Also triggers a background rescan of the whole
+    library, same as the startup self-heal check, so the very next request
+    sees it repaired instead of it staying invisible until someone happens to
+    trigger a manual Reload."""
+    try:
+        return load_manga_dims(library_id, manga_name)
+    except json.JSONDecodeError as e:
+        print(f"[Serving] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
+              f"-- hiding it from this response and triggering a repair rescan.")
+        if library_id not in _scan_running and library_id not in _corruption_repair_started:
+            _corruption_repair_started.add(library_id)
+            _scan_running.add(library_id)  # claim it now (synchronously) so a flood of
+            # concurrent requests hitting this same corrupted manga can't each pass the
+            # check above and each spawn their own redundant repair scan.
+            def _repair():
+                try:
+                    run_scan(library_id)
+                finally:
+                    _corruption_repair_started.discard(library_id)
+            threading.Thread(target=_repair, daemon=True).start()
+        return None
+
 def _is_manga_id_blocked(username: str, library_id: int, manga_id: str) -> bool:
     """
     Whether the manga behind this id carries one of the user's blocked tags.
@@ -332,8 +396,17 @@ def save_manga_dims(library_id: int, manga_name: str, data: dict):
     if not path:
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
+    # Atomic write: if the process gets killed mid-write (container stop/OOM/
+    # crash), the ONLY thing that can be left behind is a half-written .tmp
+    # file -- the real path stays whichever complete version it was before,
+    # never a truncated hybrid. os.replace is an atomic rename on both POSIX
+    # and Windows. This is what a dims.json corruption from an interrupted
+    # write actually looked like before this fix (main.py's own scan_library
+    # history has a real example) -- prevention, not just detection.
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp_path, path)
 
 # ── SCANNING ──
 
@@ -1111,7 +1184,7 @@ def extract_thumbs_for_library(library_id: int):
         if not manga_name or not manga_id:
             continue
 
-        dims = load_manga_dims(library_id, manga_name)
+        dims = _safe_load_manga_dims(library_id, manga_name)
 
         # ── CHAPTERS: compressed only ──
         for chapter_id, chapter in dims.get("chapters", {}).items():
@@ -1672,7 +1745,7 @@ def relocate_dims_paths(library_id: int, manga_name: str, old_manga_path: str, n
     absolute paths stored in dims.json by replacing the old path prefix with
     the new one. Does not touch reading progress in admin.json.
     """
-    dims = load_manga_dims(library_id, manga_name)
+    dims = _safe_load_manga_dims(library_id, manga_name)
     changed = False
 
     for section in ("chapters", "volumes"):
@@ -1703,10 +1776,18 @@ def relocate_dims_paths(library_id: int, manga_name: str, old_manga_path: str, n
 
         save_manga_dims(library_id, manga_name, dims)
 
-def scan_library(library: dict) -> tuple:
+def scan_library(library: dict, progress_cb=None) -> tuple:
     """Returns (mangas, comicinfo_changed) — comicinfo_changed is True if any
     manga's genres/tags were filled in from ComicInfo.xml during this scan,
-    telling the caller to rebuild all_tags/all_genres once manga_data is saved."""
+    telling the caller to rebuild all_tags/all_genres once manga_data is saved.
+
+    progress_cb(processed, total), if given, is called once per manga/folder
+    candidate examined (skip or full rescan both count -- this is "how far
+    through the library" progress, not "how many actually changed"). total is
+    an estimate (last scan's manga count, or 1 for a never-scanned library) --
+    a library that grew/shrank since won't show an exactly-100%-at-the-end
+    bar, but it's close enough to tell whether a scan is actively working
+    through a library versus stuck/idle, which is all this is for."""
     raw_paths = library.get("paths") or ([library["path"]] if library.get("path") else [])
     lib_paths = [p for p in raw_paths if p and os.path.exists(p)]
     library_id = library["id"]
@@ -1718,6 +1799,13 @@ def scan_library(library: dict) -> tuple:
 
     existing_data = load_app_data()
     existing_mangas = existing_data.get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
+    _scan_total = max(len(existing_mangas), 1)
+    _scan_processed = 0
+    def _tick():
+        nonlocal _scan_processed
+        _scan_processed += 1
+        if progress_cb:
+            progress_cb(_scan_processed, _scan_total)
     existing_by_id = {m["id"]: m for m in existing_mangas if "id" in m}
 
     # ── PASS 1: loose folders (recursive classification) ──
@@ -1732,6 +1820,7 @@ def scan_library(library: dict) -> tuple:
         if manga_path in mangas or manga_path in _loose_registered:
             return
         _loose_registered.add(manga_path)
+        _tick()
 
         manga_name   = os.path.basename(manga_path)
         manga_id     = make_id(manga_name)
@@ -1742,7 +1831,7 @@ def scan_library(library: dict) -> tuple:
         manga_type    = classification["manga_type"]  # "case1" or "case2"
 
         def _dims_paths_valid(manga_name: str) -> bool:
-            dims = load_manga_dims(library_id, manga_name)
+            dims = _safe_load_manga_dims(library_id, manga_name)
             sources = {**dims.get("chapters", {}), **dims.get("volumes", {})}
             if not sources:
                 return True  # nothing stored yet, not a stale-path problem
@@ -1758,7 +1847,7 @@ def scan_library(library: dict) -> tuple:
         # check alone meant it never got reached for that kind of edit.
         any_subfolder_changed = False
         if folder_unchanged:
-            existing_dims_peek = load_manga_dims(library_id, manga_name)
+            existing_dims_peek = _safe_load_manga_dims(library_id, manga_name)
             bucket = existing_dims_peek.get("chapters" if manga_type == "case1" else "volumes", {})
             id_infix = ":" if manga_type == "case1" else ":vol:"
             for dirname in classification["content_subfolders"]:
@@ -1798,7 +1887,7 @@ def scan_library(library: dict) -> tuple:
         if folder_unchanged and not any_subfolder_changed:
             return
 
-        dims = load_manga_dims(library_id, manga_name)
+        dims = _safe_load_manga_dims(library_id, manga_name)
 
         if manga_type == "case1":
             # Content subfolders are chapters
@@ -1912,6 +2001,7 @@ def scan_library(library: dict) -> tuple:
         """
         if manga_path in mangas:
             return
+        _tick()
         try:
             files = sorted(
                 [f for f in os.listdir(manga_path)
@@ -1964,7 +2054,7 @@ def scan_library(library: dict) -> tuple:
                 pages.append({"w": 800, "h": 1100})
 
         chapter_id = make_id(manga_name + ":oneshot")
-        dims = load_manga_dims(library_id, manga_name)
+        dims = _safe_load_manga_dims(library_id, manga_name)
         dims["chapters"][chapter_id] = {
             "name":      manga_name,
             "path":      manga_path,
@@ -2030,6 +2120,7 @@ def scan_library(library: dict) -> tuple:
             if library.get("flat_scan"):
                 dirnames[:] = []
                 continue  # flat-scan libraries are populated by the one-level walk above, not PASS 2
+            _tick()
             filenames_sorted = sorted(filenames, key=natural_sort_key)
 
             # Collect archive/pdf/epub files directly in this folder
@@ -2055,10 +2146,18 @@ def scan_library(library: dict) -> tuple:
                 current_mtime   = os.path.getmtime(arc_path)
 
                 def _arc_dims_valid(manga_name: str, arc_path: str) -> bool:
-                    dims = load_manga_dims(library_id, manga_name)
+                    # Only ever called once stored_mtime is already known to be set
+                    # (see the short-circuited `and` at the call site below) -- so
+                    # "nothing stored" here always means a previously-scanned manga
+                    # whose dims.json just came back empty (corrupted and caught by
+                    # _safe_load_manga_dims, never a legitimate first-time scan,
+                    # which would have short-circuited before ever reaching this
+                    # call). Must be treated as invalid so the manga actually gets
+                    # rebuilt instead of being left permanently chapter-less.
+                    dims = _safe_load_manga_dims(library_id, manga_name)
                     sources = {**dims.get("chapters", {}), **dims.get("volumes", {})}
                     if not sources:
-                        return True
+                        return False
                     return all(os.path.exists(s.get("path", "")) for s in sources.values())
 
                 if stored_mtime is not None and current_mtime == stored_mtime and _arc_dims_valid(manga_name, arc_path):
@@ -2143,7 +2242,7 @@ def scan_library(library: dict) -> tuple:
                                 default_cover = fname
 
                     # Scan chapters and page dims
-                    dims = load_manga_dims(library_id, manga_name)
+                    dims = _safe_load_manga_dims(library_id, manga_name)
                     for ch_dir in chapter_dirs:
                         chapter_id = make_id(manga_name + ":" + ch_dir)
                         existing_ch = dims["chapters"].get(chapter_id, {})
@@ -2227,7 +2326,7 @@ def scan_library(library: dict) -> tuple:
                     # archive's own mtime against what's stored per-chapter.
                     any_archive_changed = False
                     if folder_unchanged:
-                        existing_dims_peek = load_manga_dims(library_id, manga_name)
+                        existing_dims_peek = _safe_load_manga_dims(library_id, manga_name)
                         any_archive_changed = any(
                             existing_dims_peek.get("chapters", {}).get(
                                 make_id(manga_name + ":" + os.path.splitext(af)[0]), {}
@@ -2257,7 +2356,7 @@ def scan_library(library: dict) -> tuple:
                             "manga_type":   "case3",
                         }
 
-                        dims = load_manga_dims(library_id, manga_name)
+                        dims = _safe_load_manga_dims(library_id, manga_name)
                         for arc_file, arc_path, _ in case3_files:
                             chapter_name = os.path.splitext(arc_file)[0]
                             chapter_id   = make_id(manga_name + ":" + chapter_name)
@@ -2309,7 +2408,7 @@ def scan_library(library: dict) -> tuple:
                     # noticed.
                     any_volume_changed = False
                     if folder_unchanged:
-                        existing_dims_peek = load_manga_dims(library_id, manga_name)
+                        existing_dims_peek = _safe_load_manga_dims(library_id, manga_name)
                         any_volume_changed = any(
                             existing_dims_peek.get("volumes", {}).get(
                                 make_id(manga_name + ":vol:" + os.path.splitext(vf)[0]), {}
@@ -2339,7 +2438,7 @@ def scan_library(library: dict) -> tuple:
                             "manga_type":   "case2",
                         }
 
-                        dims = load_manga_dims(library_id, manga_name)
+                        dims = _safe_load_manga_dims(library_id, manga_name)
                         if "volumes" not in dims:
                             dims["volumes"] = {}
 
@@ -2484,7 +2583,7 @@ def scan_library(library: dict) -> tuple:
     comicinfo_changed = False
     for manga in mangas.values():
         manga_name = manga.get("name", "")
-        dims = load_manga_dims(library_id, manga_name)
+        dims = _safe_load_manga_dims(library_id, manga_name)
         last_name = None
         volumes = dims.get("volumes", {})
         chapters = dims.get("chapters", {})
@@ -2533,8 +2632,20 @@ async def periodic_library_rescan():
         await asyncio.sleep(next_boundary - now)
         try:
             data = load_app_data()
+            if not data.get("auto_rescan_enabled", True):
+                print("[AutoScan] Auto-rescan is disabled -- skipping this cycle.")
+                continue
             libraries = data.get("libraries", [])
             for lib in libraries:
+                # Re-read the flag before every library, not just once per
+                # cycle -- so disabling it while a batch is partway through
+                # still lets whichever library is CURRENTLY scanning finish
+                # (run_scan is never interrupted once started), it just
+                # stops the remaining not-yet-started libraries in this
+                # same batch from beginning.
+                if not load_app_data().get("auto_rescan_enabled", True):
+                    print("[AutoScan] Auto-rescan disabled mid-cycle -- letting any already-running scan finish, starting no more this cycle.")
+                    break
                 lib_id = lib.get("id")
                 if lib_id is not None and lib_id not in _scan_running:
                     print(f"[AutoScan] Re-scanning library {lib_id}...")
@@ -2690,8 +2801,51 @@ async def dismiss_all_integrity_issues_endpoint(request: Request):
         save_integrity_issues(issues_data)
     return JSONResponse({"ok": True, "count": 0})
 
+def _startup_heal_corrupted_dims():
+    """Called once at app startup (see lifespan). Detects any manga's
+    dims.json that fails to parse -- the truncated-mid-write corruption
+    save_manga_dims's atomic rewrite now prevents going forward, but a file
+    already left broken (from before that fix, or any other cause) would
+    otherwise sit crashing every request that touches it (e.g. a whole
+    library tab 500ing for every user) until whatever finds it: the next
+    12-hour auto-rescan, or an admin manually clicking Reload. Detecting it
+    here and immediately kicking off a rescan of just the affected
+    library/libraries closes that window to "the next time the container
+    starts" instead. The actual repair happens via scan_library's own
+    resilience (_safe_load_manga_dims + the mtime-comparison logic already
+    in every manga_type's branch) rebuilding chapters/pages/cover from the
+    real source files -- this function only detects and triggers, it doesn't
+    repair anything itself. Does NOT recover tags/genres/description; those
+    aren't derivable from the source images, so if a backup doesn't have a
+    good copy, they're genuinely gone for whatever manga this catches."""
+    data = load_app_data()
+    affected_libraries = set()
+    for lib in data.get("libraries", []):
+        library_id = lib.get("id")
+        if library_id is None:
+            continue
+        manga_data = data.get("manga_data", {}).get(str(library_id), {})
+        for manga in manga_data.get("mangas", []):
+            manga_name = manga.get("name", "")
+            if not manga_name:
+                continue
+            path = get_manga_dims_file(library_id, manga_name)
+            if not path or not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r") as f:
+                    json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"[StartupCheck] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
+                      f"-- queuing library {library_id} for an immediate rescan to rebuild it.")
+                affected_libraries.add(library_id)
+
+    for library_id in affected_libraries:
+        threading.Thread(target=run_scan, args=(library_id,), daemon=True).start()
+
 def run_scan(library_id: int):
     _scan_running.add(library_id)
+    _scan_progress[library_id] = {"processed": 0, "total": 1}
     print(f"[Scan] Starting scan for library {library_id}...")
     data = load_app_data()
     libraries = data.get("libraries", [])
@@ -2699,6 +2853,7 @@ def run_scan(library_id: int):
     if not lib:
         print(f"[Scan] Library {library_id} not found in data.")
         _scan_running.discard(library_id)
+        _scan_progress.pop(library_id, None)
         return
 
     raw_paths = lib.get("paths") or ([lib["path"]] if lib.get("path") else [])
@@ -2708,8 +2863,22 @@ def run_scan(library_id: int):
     print(f"[Scan] data_path: {get_data_path()}")
     print(f"[Scan] covers_dir: {get_covers_dir()}")
 
-    auto_organize_library_root(lib)
-    mangas, comicinfo_changed = scan_library(lib)
+    def _progress_cb(processed, total):
+        _scan_progress[library_id] = {"processed": processed, "total": total}
+
+    try:
+        auto_organize_library_root(lib)
+        mangas, comicinfo_changed = scan_library(lib, progress_cb=_progress_cb)
+    except Exception as e:
+        # A single manga/folder that scan_library's own per-manga resilience
+        # doesn't already catch (see _safe_load_manga_dims) shouldn't leave
+        # this library's scan permanently marked "running" with nothing ever
+        # saved -- log clearly and let the next scheduled/manual scan retry,
+        # same as a caught-and-skipped per-manga error would.
+        print(f"[Scan] ERROR scanning library {library_id}: {e} -- aborting this scan, nothing saved this run.")
+        _scan_running.discard(library_id)
+        _scan_progress.pop(library_id, None)
+        return
     print(f"[Scan] Found {len(mangas)} mangas.")
 
     data = load_app_data()
@@ -2730,6 +2899,7 @@ def run_scan(library_id: int):
     if any(os.path.exists(p) for p in raw_paths if p):
         prune_stale_integrity_issues(library_id, mangas)
     _scan_running.discard(library_id)
+    _scan_progress.pop(library_id, None)
     print(f"[Scan] Done. Saved to data.json.")
     t = threading.Thread(target=extract_thumbs_for_library, args=(library_id,), daemon=True)
     t.start()
@@ -2810,7 +2980,29 @@ def get_settings(request: Request):
         "show_collections_row":     user_data.get("show_collections_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
+        "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
     })
+
+@app.post("/api/admin/settings/auto-rescan")
+async def set_auto_rescan(request: Request):
+    """Admin-only switch for the 12-hour periodic auto-rescan (periodic_library_rescan).
+    Manual scans (the per-library Reload button, and the startup corruption
+    self-heal) are unaffected either way -- this only gates the unattended
+    background one, e.g. so an admin can be sure nothing will start scanning
+    on its own while they're about to update/restart the container.
+    Disabling mid-scan does not interrupt whichever library is currently
+    scanning -- periodic_library_rescan re-checks this flag before starting
+    each library in its batch, not just once, so an in-progress scan always
+    finishes; only libraries that haven't started yet this cycle get
+    skipped."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    data = load_app_data()
+    data["auto_rescan_enabled"] = bool(body.get("enabled", True))
+    save_app_data(data)
+    return JSONResponse({"ok": True})
 
 @app.get("/api/admin/idle-status")
 def get_idle_status(request: Request):
@@ -3157,7 +3349,8 @@ async def trigger_scan(library_id: int, background_tasks: BackgroundTasks):
 @app.get("/api/scan/{library_id}/status")
 def scan_status(library_id: int):
     if library_id in _scan_running:
-        return JSONResponse({"scanned": False, "running": True})
+        progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
+        return JSONResponse({"scanned": False, "running": True, **progress})
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -3168,6 +3361,31 @@ def scan_status(library_id: int):
         "manga_count": len(manga_data.get("mangas", [])),
         "last_scanned": manga_data.get("last_scanned"),
     })
+
+@app.get("/api/scan/activity")
+def scan_activity(request: Request):
+    """Whether ANY library is currently being scanned, for the "is it safe to
+    update/restart the container right now" question -- checked proactively
+    by Settings on load, not just after the current session's own Reload
+    click (an auto-rescan or another admin's manual scan wouldn't otherwise
+    show up at all until this page happened to poll a specific library it
+    already knew was running)."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    if not _scan_running:
+        return JSONResponse({"scanning": False, "libraries": []})
+    data = load_app_data()
+    lib_names = {lib["id"]: lib.get("name", f"Library {lib['id']}") for lib in data.get("libraries", [])}
+    active = []
+    for library_id in sorted(_scan_running):
+        progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
+        active.append({
+            "library_id":   library_id,
+            "library_name": lib_names.get(library_id, f"Library {library_id}"),
+            **progress,
+        })
+    return JSONResponse({"scanning": True, "libraries": active})
 
 def _round_up_to_multiple(n: int, multiple: Optional[int]) -> int:
     """Rounds n UP to the next multiple of `multiple` (never down -- for
@@ -3208,7 +3426,9 @@ def get_mangas(
     blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
     result = []
     for manga in mangas:
-        dims = load_manga_dims(library_id, manga["name"])
+        dims = _load_dims_or_flag_for_repair(library_id, manga["name"])
+        if dims is None:
+            continue  # corrupted -- hidden until the triggered repair rescan fixes it
         if blocked_tags:
             if any(t in blocked_tags for t in dims.get("tags", [])):
                 continue
@@ -3276,7 +3496,9 @@ def get_mangas_for_search(request: Request, library_id: int):
             m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
         else:
             m["cover_url"] = None
-        dims = load_manga_dims(library_id, m["name"])
+        dims = _load_dims_or_flag_for_repair(library_id, m["name"])
+        if dims is None:
+            continue
         m["tags"]   = dims.get("tags", [])
         m["genres"] = dims.get("genres", [])
         if blocked_tags and any(t in blocked_tags for t in m["tags"]):
@@ -4884,7 +5106,9 @@ def get_category_list(
 
     mangas_by_id = {}
     for manga in raw_mangas:
-        dims = load_manga_dims(library_id, manga["name"])
+        dims = _load_dims_or_flag_for_repair(library_id, manga["name"])
+        if dims is None:
+            continue  # corrupted -- hidden until the triggered repair rescan fixes it
         if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
             continue
         m = dict(manga)
