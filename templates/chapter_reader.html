@@ -4395,18 +4395,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // starts unloading, silently dropping the completion write even though the
     // popup already confirmed the end was reached. Same class of fix as the
     // sendBeacon used for the reading-session tick above.
-    await fetch(apiUrl('/api/reading/progress'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        library_id:           libraryId,
-        manga_id:             mangaId,
-        chapter_id:           visibleChapterId,
-        page:                 currentPage,
-        completed_chapter_id: completedChapterId,
-      }),
-      keepalive: true,
-    });
+    //
+    // signal: AbortSignal.timeout(...) -- checkChapterCompletion's multi-
+    // chapter catch-up loop awaits this sequentially under a reentrancy guard
+    // (_creditingInFlight). A plain hung request (accepted but never
+    // resolving -- more likely right around a screen lock/wake, a dropped
+    // WiFi association, etc.) never rejects on its own, so without a bound
+    // the guard would stay stuck true for the rest of the page's session,
+    // silently blocking every future completion-credit. Wrapped in try/catch
+    // so a timeout (or any other fetch failure) just drops this one save
+    // instead of throwing -- most callers don't await/catch this function.
+    try {
+      await fetch(apiUrl('/api/reading/progress'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          library_id:           libraryId,
+          manga_id:             mangaId,
+          chapter_id:           visibleChapterId,
+          page:                 currentPage,
+          completed_chapter_id: completedChapterId,
+        }),
+        keepalive: true,
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (_) {
+      // Swallowed -- see the timeout comment above.
+    }
   }
 
   function getCurrentPageIdx() {
