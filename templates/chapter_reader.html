@@ -3518,6 +3518,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   let spCurrentIdx = 0; // index into manifest for current chapter pages
   const spManifest = manifest.filter(e => e.chapterId === chapterId);
   let lastSeenChapterId = chapterId;
+  // Guards checkChapterCompletion's multi-chapter catch-up loop against
+  // re-entrancy: it awaits its saves sequentially (see that function), but it
+  // runs on every throttled scroll tick (~80ms) via scheduleProgressSave, and
+  // a slow network can easily make one catch-up pass take longer than that.
+  // Without this, a second call landing mid-loop would re-read the still-
+  // stale lastSeenChapterId and fire its own overlapping save sequence for
+  // the same chapters -- concurrent requests racing to read-modify-write the
+  // same per-user JSON file (auth.save_user_data has no lock), where the
+  // last one to finish silently wins and can wipe out completions the other
+  // one just saved.
+  let _creditingInFlight = false;
 
   const SP_SLOT_COUNT  = 12; // materialized slots at any time -- much smaller
                               // than #reader's SLOT_COUNT=80: scroll-snap-stop:
@@ -4412,8 +4423,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return idx;
   }
 
-  function checkChapterCompletion() {
+  async function checkChapterCompletion() {
     if (readerSettings.mode !== 'long-strip') return;
+    if (_creditingInFlight) return;
     const midY = currentTrackingY();
 
     let visibleChapterId = chapterId;
@@ -4424,17 +4436,38 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     if (visibleChapterId !== lastSeenChapterId) {
       const newChapEntries = manifest.filter(e => e.chapterId === visibleChapterId);
-      if (newChapEntries.length >= 2) {
-        if (virtualY >= newChapEntries[1].globalY) {
-          saveReadingProgress(lastSeenChapterId);
-          lastSeenChapterId = visibleChapterId;
-          return;
+      const readyToCredit = newChapEntries.length < 2 || virtualY >= newChapEntries[1].globalY;
+      if (!readyToCredit) return;
+
+      // A big jump (a fast fling, or resuming after the app/WebView was
+      // suspended and its tracked scroll position desynced from the real
+      // one) can land visibleChapterId several chapters past
+      // lastSeenChapterId in a single check -- crediting only
+      // lastSeenChapterId would silently leave every chapter strictly in
+      // between permanently unmarked, even though landing past
+      // visibleChapterId means their content was necessarily scrolled past
+      // too. Credit the whole skipped range, not just the one adjacent
+      // chapter. Falls back to the original single-chapter credit if either
+      // id can't be located in chapterList, or visibleChapterId is actually
+      // BEHIND lastSeenChapterId (scrolling backward past a boundary) --
+      // same as this always did before.
+      //
+      // Awaited sequentially (not fired concurrently) and guarded by
+      // _creditingInFlight -- see that flag's own comment for why.
+      _creditingInFlight = true;
+      try {
+        const fromIdx = chapterList.findIndex(c => c.id === lastSeenChapterId);
+        const toIdx   = chapterList.findIndex(c => c.id === visibleChapterId);
+        if (fromIdx !== -1 && toIdx > fromIdx) {
+          for (let i = fromIdx; i < toIdx; i++) await saveReadingProgress(chapterList[i].id);
+        } else {
+          await saveReadingProgress(lastSeenChapterId);
         }
-      } else {
-        saveReadingProgress(lastSeenChapterId);
         lastSeenChapterId = visibleChapterId;
-        return;
+      } finally {
+        _creditingInFlight = false;
       }
+      return;
     }
   }
 
