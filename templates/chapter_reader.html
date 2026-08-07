@@ -1547,8 +1547,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     body:    JSON.stringify({ manga_name: _readingMangaName, library_id: String(libraryId) }),
   }).catch(() => {});
 
+  // A tick only counts toward reading time if there was real activity
+  // (scroll/tap/key) at some point in that minute -- previously this fired
+  // on a blind 60s timer regardless of whether anyone was actually reading,
+  // so a locked screen or an abandoned-but-still-open tab kept accumulating
+  // "reading time" for as long as the JS timer itself survived. Listeners
+  // are on `document` in the CAPTURE phase specifically so an inner
+  // handler's stopPropagation() (several exist in this reader, e.g. the
+  // bottombar menus) can't hide activity from this before it's recorded.
+  let _lastActivityTs = Date.now();
+  const _markActivity = () => { _lastActivityTs = Date.now(); };
+  ['scroll', 'touchstart', 'touchmove', 'mousedown', 'keydown', 'wheel'].forEach(evt =>
+    document.addEventListener(evt, _markActivity, { passive: true, capture: true })
+  );
+  const ACTIVITY_TIMEOUT_MS = 90000; // a bit over the 60s tick interval, so a slow
+  // read of one dense page (no scrolling needed for a while) doesn't itself
+  // look idle -- only a genuine pause (locked screen, walked away) does.
+
   let _tickSent = false;
   const _tickInterval = setInterval(() => {
+    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // paused -- don't count this minute
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
   }, 60000);
 
@@ -1556,7 +1574,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (_tickSent) return;
     _tickSent = true;
     clearInterval(_tickInterval);
-    navigator.sendBeacon('/api/reading/session/tick');
+    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle when leaving -- nothing to credit
+    // keepalive fetch, not sendBeacon -- sendBeacon can't carry the apiUrl()
+    // server base (this call was a bare relative path before, which only
+    // ever worked in browser-served mode; on the native app, whose WebView
+    // runs on its own separate local origin, it silently went nowhere) and
+    // can't carry whatever auth the native app relies on either. keepalive
+    // fetch behaves like a normal authenticated request but is guaranteed to
+    // survive the page unloading -- same fix already used for
+    // saveReadingProgress()'s own true-last-chapter completion save.
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
   }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') _sendFinalTick();
