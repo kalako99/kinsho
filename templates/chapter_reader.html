@@ -194,6 +194,18 @@
       height: 100%;
       /* object-fit: fill keeps the image at exactly the precomputed ratio */
       object-fit: fill;
+      /* <img> is natively draggable by default -- nothing here previously
+         stopped the browser's own long-press-and-drag-image gesture
+         (the same one used to drag an image into another app), which a
+         scroll gesture that starts or lingers on an image can be
+         misread as. That native drag path pulls the image into a
+         separate drag-preview compositing flow, a plausible source of
+         exactly the kind of transient boundary artifact seen during
+         scroll (2026-08-08). -webkit-user-drag disables it directly;
+         user-select stops a long-press from starting a text/image
+         selection instead, the same class of native gesture hijack. */
+      -webkit-user-drag: none;
+      user-select: none;
     }
 
     /* ── PROGRESS BAR ── */
@@ -694,6 +706,8 @@
       max-height: 100%;
       object-fit: contain;
       display: block;
+      -webkit-user-drag: none;
+      user-select: none;
     }
 
     /* ── BOOKMARK PANEL ── */
@@ -2240,6 +2254,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     img.style.width     = '100%';
     img.style.height    = '100%';
     img.style.objectFit = 'fill';
+    img.draggable = false; // see .page-slot img's -webkit-user-drag comment
     el.appendChild(img);
     return { el, img };
   }
@@ -3686,6 +3701,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     el.className = 'sp-slot';
     const img = document.createElement('img');
     img.alt = 'Page';
+    img.draggable = false; // see .page-slot img's -webkit-user-drag comment
     el.appendChild(img);
     return { el, img };
   }
