@@ -1491,6 +1491,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   let barVisible     = false;
   let leftHoveredIdx = null;
+  let pendingShowTimer = null;
   document.addEventListener('click', e => {
     if (touchMoved) { touchMoved = false; return; } // was a drag, not a tap
     if (backBtn.contains(e.target)) return;
@@ -1500,7 +1501,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       clearTimeout(barTimer);
       hideAll();
     } else {
-      showAll();
+      // A fast, short flick can stay under TOUCH_TAP_THRESHOLD in net
+      // displacement (so touchMoved never flips true) yet still hand off
+      // real momentum scrolling to the browser once released -- that read
+      // as a tap here and flashed the bars mid-scroll. Wait briefly and
+      // bail if #reader actually starts scrolling before committing to
+      // showing them.
+      clearTimeout(pendingShowTimer);
+      let scrolledDuringGrace = false;
+      const onGraceScroll = () => { scrolledDuringGrace = true; };
+      reader.addEventListener('scroll', onGraceScroll, { passive: true });
+      pendingShowTimer = setTimeout(() => {
+        reader.removeEventListener('scroll', onGraceScroll);
+        if (!scrolledDuringGrace) showAll();
+      }, 500);
     }
   });
 
