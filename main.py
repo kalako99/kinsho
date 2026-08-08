@@ -1862,7 +1862,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     any_subfolder_changed = True
                     break
 
-        if folder_unchanged and not any_subfolder_changed:
+        if folder_unchanged and not any_subfolder_changed and _dims_paths_valid(manga_name):
             print(f"[ScanLib] Skipping unchanged loose: {manga_name}")
             if existing.get("path") and existing["path"] != manga_path:
                 relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
