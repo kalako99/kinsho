@@ -2346,7 +2346,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       targetGlobalY - SAFE_PHYSICAL_HEIGHT / 2,
       Math.max(0, cursorY - SAFE_PHYSICAL_HEIGHT)
     ));
-
     const frag = document.createDocumentFragment();
     for (let i = windowLo; i <= windowHi; i++) {
       const { el, img } = _makeSlotEl();
