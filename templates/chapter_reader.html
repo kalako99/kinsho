@@ -1755,10 +1755,39 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // slots -- otherwise a long continuous scroll can hit a genuine native
   // scrollTop ceiling well before the real end of the chapter (the "scroll
   // stops after ~40 pages" bug). topSpacer/bottomSpacer are permanent
-  // fixtures flanking the slot pool that make up the difference: their
-  // combined height plus the materialized slots' heights always equals
-  // cursorY exactly, so reader.scrollTop is always numerically identical to
-  // virtualY (see syncScrollPosition below) -- no offset arithmetic needed.
+  // fixtures flanking the slot pool that make up the difference.
+  //
+  // COORDINATE REBASING (2026-08-08): cursorY/globalY for a long enough
+  // series (confirmed live: a 104-chapter webtoon with tall pages) can
+  // reach tens of millions of px -- plain JS numbers handle that fine, but
+  // the browser's own scrollable-element height does not. Bisected against
+  // the real device: this WebView silently caps a scrollable element's
+  // rendered height at ~19.17M px, past which scrollTop can no longer
+  // advance at all -- a hard, invisible wall partway through the manifest,
+  // confirmed live at chapter 99/104. (The same ever-growing-coordinate
+  // territory is also the leading suspect for the still-open "visible
+  // seams deep into a long scroll" bug -- rebasing may improve that too,
+  // though it hasn't been confirmed as the same root cause.)
+  //
+  // Fixed by decoupling the TRUE logical position (virtualY/cursorY/
+  // globalY -- unbounded, never rebased, everything outside this section
+  // keeps using these exactly as before: progress bar, chapter-completion,
+  // bookmarks, the page slider) from the PHYSICAL DOM coordinates the
+  // browser actually has to lay out (reader.scrollTop, spacer heights).
+  // coordOffset is the logical position that maps to physical 0; every
+  // physical quantity is (logical value - coordOffset), always kept within
+  // SAFE_PHYSICAL_HEIGHT (well under half the measured ceiling). Whenever
+  // the current position gets within COORD_REBASE_MARGIN of either edge of
+  // that safe window, recenterConveyor forces a full _rebuildConveyorWindow
+  // (never a cheap _shiftConveyorWindow, which never touches coordOffset),
+  // which picks a fresh, re-centered coordOffset as part of its existing
+  // atomic rebuild -- same "no visible jump" guarantee a chapter-jump
+  // rebuild already had, just now also triggered by approaching the
+  // coordinate ceiling, not only the materialized-slot-window edge.
+  const SAFE_PHYSICAL_HEIGHT = 8_000_000;
+  const COORD_REBASE_MARGIN  = SAFE_PHYSICAL_HEIGHT / 4;
+  let coordOffset = 0;
+
   const topSpacer = document.createElement('div');
   const bottomSpacer = document.createElement('div');
   topSpacer.className = bottomSpacer.className = 'reader-spacer';
@@ -1771,14 +1800,21 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       bottomSpacer.style.height = '0px';
       return;
     }
-    topSpacer.style.height = manifest[windowLo].globalY + 'px';
+    topSpacer.style.height = (manifest[windowLo].globalY - coordOffset) + 'px';
     const windowEndY = manifest[windowHi].globalY + manifest[windowHi].scaledH;
-    bottomSpacer.style.height = Math.max(0, cursorY - windowEndY) + 'px';
+    // Bottom spacer reaches to the nearer of the true end of the manifest
+    // or the edge of the current safe coordinate window -- never the full
+    // true remaining distance, which is exactly what let this grow past
+    // the browser's real limit before.
+    const safeWindowEndY = Math.min(cursorY, coordOffset + SAFE_PHYSICAL_HEIGHT);
+    bottomSpacer.style.height = Math.max(0, safeWindowEndY - windowEndY) + 'px';
   }
 
   // ── VIRTUAL SCROLL STATE ──
-  // virtualY is the only source of truth for scroll position.
-  // No window.scrollY, no window.scrollTo, no browser scroll events.
+  // virtualY is the only source of truth for TRUE logical scroll position
+  // (unbounded -- see coordOffset above for how this maps to the browser's
+  // own physical reader.scrollTop). No window.scrollY, no window.scrollTo,
+  // no browser scroll events.
   let virtualY = 0;
   const viewH  = window.innerHeight;
 
@@ -2300,6 +2336,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     windowLo = Math.max(0, Math.min(newWindowLo, manifest.length - count));
     windowHi = windowLo + count - 1;
 
+    // Every full rebuild re-centers coordOffset on where we're actually
+    // landing (targetGlobalY), same "center a window on the current
+    // position, clamped to the manifest's own bounds" shape as windowLo
+    // just above -- keeps a freshly-rebuilt window comfortably far from
+    // the coordinate ceiling regardless of why this rebuild was triggered
+    // (chapter jump, bookmark, or the coordinate-margin check below).
+    coordOffset = Math.max(0, Math.min(
+      targetGlobalY - SAFE_PHYSICAL_HEIGHT / 2,
+      Math.max(0, cursorY - SAFE_PHYSICAL_HEIGHT)
+    ));
+
     const frag = document.createDocumentFragment();
     for (let i = windowLo; i <= windowHi; i++) {
       const { el, img } = _makeSlotEl();
@@ -2311,10 +2358,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     readerInner.insertBefore(frag, bottomSpacer);
 
     // topSpacer must be sized BEFORE reader.scrollTop is set below, since
-    // its height is what makes targetGlobalY and scrollTop numerically
-    // equal (see the FULL-HEIGHT SPACERS comment above).
+    // its height is what makes targetGlobalY and scrollTop consistent
+    // (physical = logical - coordOffset, see FULL-HEIGHT SPACERS above).
     _syncSpacers();
-    reader.scrollTop = targetGlobalY;
+    reader.scrollTop = targetGlobalY - coordOffset;
 
     // Load the slot images CENTER-OUT from the page actually at the
     // viewport top — not in windowLo→windowHi DOM order. All ~SLOT_COUNT
@@ -2443,8 +2490,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const count  = Math.min(SLOT_COUNT, manifest.length);
     const target = Math.max(0, Math.min(currentIdx - Math.floor(count / 2), manifest.length - count));
     const delta  = target - windowLo;
-    if (delta === 0) return;
-    if (Math.abs(delta) >= count) {
+    // Getting close to either edge of the current safe coordinate window
+    // (see COORDINATE REBASING above) -- must go through a full rebuild
+    // even if the slot window itself doesn't otherwise need to move,
+    // since only a rebuild picks a fresh coordOffset. Checked ahead of the
+    // delta===0 early-return below for exactly that reason: the slot
+    // window can be perfectly centered while still approaching the
+    // coordinate ceiling (they're independent quantities -- one's in
+    // manifest entries, the other's in raw px).
+    const needsRebase =
+      virtualY - coordOffset < COORD_REBASE_MARGIN ||
+      (coordOffset + SAFE_PHYSICAL_HEIGHT) - virtualY < COORD_REBASE_MARGIN;
+    if (delta === 0 && !needsRebase) return;
+    if (needsRebase || Math.abs(delta) >= count) {
       _rebuildConveyorWindow(target, virtualY);
     } else {
       _shiftConveyorWindow(delta);
@@ -2497,7 +2555,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   function syncScrollPosition() {
     if (manifest.length === 0) return;
-    virtualY = reader.scrollTop;
+    // physical -> logical (see COORDINATE REBASING above): reader.scrollTop
+    // is only ever the TRUE position minus coordOffset now, not the TRUE
+    // position itself.
+    virtualY = reader.scrollTop + coordOffset;
     throttledScrollBookkeeping();
     // True end-of-manifest bound (matches momentumLoop's own check below) --
     // NOT reader.scrollHeight, which is now always the full cursorY thanks
