@@ -1891,9 +1891,11 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
 
         if manga_type == "case1":
             # Content subfolders are chapters
+            valid_chapter_ids = set()
             for dirname in classification["content_subfolders"]:
                 chapter_full_path = os.path.join(manga_path, dirname)
                 chapter_id        = make_id(manga_name + ":" + dirname)
+                valid_chapter_ids.add(chapter_id)
                 chapter_mtime     = os.path.getmtime(chapter_full_path)
                 existing_chapter  = dims["chapters"].get(chapter_id, {})
 
@@ -1925,14 +1927,32 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     "filenames": files,
                 }
 
+            # Prune chapters whose backing subfolder is no longer present
+            # under this name -- renamed or deleted. The loop above always
+            # visits every CURRENTLY existing subfolder (unchanged ones
+            # included, via `continue`), so anything left in dims["chapters"]
+            # outside valid_chapter_ids at this point is genuinely gone, not
+            # just not-yet-rescanned. Only reached when something in this
+            # manga actually changed (see the early `return` above) -- a
+            # pass where truly nothing changed can't have lost a chapter
+            # either, since renaming/removing a direct subfolder always
+            # bumps this manga's own top folder mtime, which is what that
+            # early return is keyed on.
+            for stale_id in set(dims["chapters"]) - valid_chapter_ids:
+                stale_name = dims["chapters"][stale_id].get("name", stale_id)
+                print(f"[ScanLib] Removing chapter no longer on disk: {stale_name}")
+                del dims["chapters"][stale_id]
+
         else:
             # manga_type == "case2": content subfolders are volumes
             if "volumes" not in dims:
                 dims["volumes"] = {}
 
+            valid_vol_ids = set()
             for dirname in classification["content_subfolders"]:
                 vol_full_path = os.path.join(manga_path, dirname)
                 vol_id        = make_id(manga_name + ":vol:" + dirname)
+                valid_vol_ids.add(vol_id)
                 vol_mtime     = os.path.getmtime(vol_full_path)
                 existing_vol  = dims["volumes"].get(vol_id, {})
 
@@ -1982,6 +2002,14 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     "source":      "loose",
                     "filenames":   files,
                 }
+
+            # Prune volumes whose backing subfolder is no longer present
+            # under this name -- same reasoning as the case1 chapter prune
+            # above.
+            for stale_id in set(dims["volumes"]) - valid_vol_ids:
+                stale_name = dims["volumes"][stale_id].get("name", stale_id)
+                print(f"[ScanLib] Removing volume no longer on disk: {stale_name}")
+                del dims["volumes"][stale_id]
 
                 if mangas[manga_path].get("cover") is None and cover_fname is not None:
                     mangas[manga_path]["cover"] = cover_fname
