@@ -175,6 +175,17 @@
       background: #000;
       /* height set per-entry in JS from dims.json; normal block flow */
       margin-bottom: var(--page-gap, 0px);
+      /* Isolates this slot's own layout/paint from its siblings -- without
+         this, inserting/removing a DIFFERENT slot (every conveyor shift,
+         which fires repeatedly during any sustained scroll) can force the
+         browser to reflow/repaint this one too, even though nothing about
+         it actually changed. For a frame or two the browser can show this
+         element's own background underneath before recompositing the
+         already-loaded image back on top -- a real black flash confirmed
+         live (2026-08-08) over an already-correctly-loaded page, whose
+         size scaled with scroll speed (more shifts per second = more
+         churn = more visible flicker), not a loading-latency gap. */
+      contain: layout paint;
     }
 
     .page-slot img {
