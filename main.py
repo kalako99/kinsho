@@ -532,6 +532,50 @@ def manga_pages_read(dims: dict, history_entry: dict, is_volume_manga: bool) -> 
     furthest_idx = ordered_ids.index(furthest_id) + 1
     return sum(len(buckets[k].get("pages", [])) for k in ordered_ids[:furthest_idx])
 
+def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, stale_ids: set) -> None:
+    """
+    A chapter/volume pruned from dims.json (see the loose-manga prune logic
+    in _register_loose_manga) can still be sitting in some user's reading
+    history, marked completed from before it was removed -- completed_chapter_count
+    keeps counting it while total_chapters (a live len(dims.get("chapters"))
+    read) shrinks by one, so "X of Y read" can end up over 100% forever with
+    no rescan ever able to fix it, since the stale id is gone from dims and
+    would never again match anything found on disk. Strips exactly the
+    pruned ids from every user's own chapters map for this manga and
+    recomputes furthest_chapter/furthest_chapter_name from what's left,
+    same "highest position still marked completed, walked in current dims
+    order" convention save_reading_progress itself uses.
+    """
+    if not stale_ids:
+        return
+    lib_key = str(library_id)
+    source_dict = dims.get("chapters") or dims.get("volumes", {})
+    ordered_ids = sorted(
+        source_dict.keys(),
+        key=lambda cid: natural_sort_key(source_dict[cid].get("name", cid))
+    )
+    for user in auth._load_users().get("users", []):
+        username = user.get("username")
+        if not username:
+            continue
+        user_data = auth.load_user_data(username)
+        entry = user_data.get("reading_history", {}).get(lib_key, {}).get(manga_id)
+        if not entry or not entry.get("chapters"):
+            continue
+        removed = [cid for cid in stale_ids if cid in entry["chapters"]]
+        if not removed:
+            continue
+        for cid in removed:
+            del entry["chapters"][cid]
+        furthest, furthest_name = None, None
+        for cid in ordered_ids:
+            if entry["chapters"].get(cid, {}).get("completed"):
+                furthest, furthest_name = cid, source_dict[cid].get("name")
+        entry["furthest_chapter"]      = furthest
+        entry["furthest_chapter_name"] = furthest_name
+        print(f"[ScanLib] Pruned {len(removed)} stale completed-chapter record(s) from {username}'s reading history for {manga_id}")
+        auth.save_user_data(username, user_data)
+
 def completed_chapter_count(history_entry: dict) -> int:
     """How many chapters/volumes this user has actually marked completed
     for one manga -- a plain count, independent of order or gaps. This is
@@ -1938,7 +1982,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             # either, since renaming/removing a direct subfolder always
             # bumps this manga's own top folder mtime, which is what that
             # early return is keyed on.
-            for stale_id in set(dims["chapters"]) - valid_chapter_ids:
+            stale_ids = set(dims["chapters"]) - valid_chapter_ids
+            for stale_id in stale_ids:
                 stale_name = dims["chapters"][stale_id].get("name", stale_id)
                 print(f"[ScanLib] Removing chapter no longer on disk: {stale_name}")
                 del dims["chapters"][stale_id]
@@ -2006,7 +2051,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             # Prune volumes whose backing subfolder is no longer present
             # under this name -- same reasoning as the case1 chapter prune
             # above.
-            for stale_id in set(dims["volumes"]) - valid_vol_ids:
+            stale_ids = set(dims["volumes"]) - valid_vol_ids
+            for stale_id in stale_ids:
                 stale_name = dims["volumes"][stale_id].get("name", stale_id)
                 print(f"[ScanLib] Removing volume no longer on disk: {stale_name}")
                 del dims["volumes"][stale_id]
@@ -2015,6 +2061,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     mangas[manga_path]["cover"] = cover_fname
 
         save_manga_dims(library_id, manga_name, dims)
+        _prune_stale_reading_history(library_id, manga_id, dims, stale_ids)
 
     def _register_oneshot_manga(manga_path: str):
         """
