@@ -2033,11 +2033,39 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // here would immediately re-dispatch a fresh request for a page we
       // just freed a connection slot for, defeating the whole point of
       // cancelling it. Same guard, same reasoning, as loadEntryTier1 below.
-      if (img._cancelled) return;
+      //
+      // _realDispatched must still be cleared here even though we're not
+      // retrying -- confirmed live (2026-08-08): a materialization wide
+      // enough to dispatch real fetches beyond prefetchAroundIndex's own
+      // (much narrower) tier2 radius has those fetches cancelled by that
+      // same call's cancelStalePrefetches sweep almost immediately, often
+      // before decode() resolves either way. Leaving the flag set left
+      // loadEntryTier3 permanently refusing to backfill even a thumbnail
+      // for that slot (its own guard is exactly "skip if a real fetch is
+      // pending or already succeeded") -- a real fetch that was cancelled
+      // is neither, so the slot was stuck fully blank forever, not just
+      // stuck at low-res.
+      entry._realDispatched = false;
+      if (img._cancelled) {
+        // Cancelled, not a genuine failure -- retrying immediately would
+        // just re-request a page we deliberately freed a connection for.
+        // But clearing the flag alone isn't enough either: nothing else is
+        // guaranteed to ever revisit this exact slot again (the tier3
+        // sweep that would normally backfill it only runs as part of a
+        // FUTURE prefetchAroundIndex call, which never comes if the user
+        // just stays put reading right here) -- confirmed live, this is
+        // what actually left slots blank forever even after the flag-clear
+        // fix above. Attempt the thumbnail fallback right now instead of
+        // hoping something else notices later.
+        loadEntryTier3(entry);
+        return;
+      }
       if (retriesLeft > 0) {
         setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
       } else {
-        entry._realDispatched = false;
+        // Genuine failure, out of retries -- same reasoning as above, fall
+        // through to a thumbnail now rather than leaving the slot blank.
+        loadEntryTier3(entry);
       }
     });
   }
