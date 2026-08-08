@@ -1820,13 +1820,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // up once a page falls outside even the widest (tier2) prefetch range.
   const inFlightPrefetchImages = new Map();
 
+  // Cancels one entry's in-flight detached predecode (if any) by its exact
+  // manifest index -- used both by cancelStalePrefetches' radius sweep below
+  // and, directly, by every conveyor slot-vacate site (_clearSlotPool,
+  // _shiftConveyorWindow) for the entry whose slot is being torn down right
+  // now. The vacate sites already know the exact index leaving the window,
+  // so there's no need to wait for a later radius-based sweep to catch it.
+  function cancelInFlightPredecode(idx) {
+    const img = inFlightPrefetchImages.get(idx);
+    if (!img) return;
+    img._cancelled = true;
+    img.src = '';
+    inFlightPrefetchImages.delete(idx);
+  }
+
   function cancelStalePrefetches(keepLo, keepHi) {
-    for (const [idx, img] of inFlightPrefetchImages) {
-      if (idx < keepLo || idx > keepHi) {
-        img._cancelled = true;
-        img.src = '';
-        inFlightPrefetchImages.delete(idx);
-      }
+    for (const idx of inFlightPrefetchImages.keys()) {
+      if (idx < keepLo || idx > keepHi) cancelInFlightPredecode(idx);
     }
   }
 
@@ -1873,41 +1883,88 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // entry.loaded is only set once the browser confirms the image actually
-  // finished loading (onload), not the moment .src is assigned -- previously
-  // set unconditionally right there, so a stalled/dropped request (more
-  // likely during fast scrolling, which fires many concurrent slot loads at
-  // once and can exceed the browser's per-origin connection cap) left that
-  // page permanently stuck at whatever partial state it reached: every
-  // loader early-returns on entry.loaded, so nothing ever retried it. The
-  // only "fix" was the accidental side effect of a manual page jump's
-  // _rebuildConveyorWindow resetting loaded=false for the whole window.
-  // onerror now retries a couple of times (short flat delay, not exponential
-  // -- default retriesLeft=2 already bounds this to 3 attempts total) before
+  // finished loading (decode(), see below), not the moment .src is assigned
+  // -- previously set unconditionally right there, so a stalled/dropped
+  // request (more likely during fast scrolling, which fires many concurrent
+  // slot loads at once and can exceed the browser's per-origin connection
+  // cap) left that page permanently stuck at whatever partial state it
+  // reached: every loader early-returns on entry.loaded, so nothing ever
+  // retried it. The only "fix" was the accidental side effect of a manual
+  // page jump's _rebuildConveyorWindow resetting loaded=false for the whole
+  // window. Retries a couple of times (short flat delay, not exponential --
+  // default retriesLeft=2 already bounds this to 3 attempts total) before
   // giving up; if retries are exhausted, entry.loaded simply stays false so
   // a later pass (scrolling back over it, a fresh conveyor rebuild) can
   // still pick it up naturally instead of being marked done-but-broken.
+  //
+  // Predecodes off-DOM (a detached Image() + .decode()) before ever touching
+  // the real slot's <img> -- this is the function EVERY slot in the conveyor
+  // actually goes through the moment it's materialized (called directly from
+  // _rebuildConveyorWindow/_shiftConveyorWindow, independently of the
+  // tier1/tier2/tier3 prefetch system below), so it was the real source of a
+  // black-flash-during-fast-scroll bug live-confirmed on real hardware
+  // (2026-08-07/08): the 2026-07-28 predecode fix only ever touched
+  // loadEntryTier1, which this function's own synchronous dispatch always
+  // wins the race against for any freshly-materializing slot -- assigning
+  // straight to the real, already-visible <img> forces the browser to decode
+  // on the critical rendering path, showing the slot's plain black
+  // background underneath for a moment, exactly like the loose-image case
+  // loadEntryTier1 was already fixed for. Confirmed on real hardware that
+  // this isn't about network latency (a page can flash black with no
+  // request anywhere near that moment in the server log -- an
+  // already-cached image still has to be decoded before it can paint,
+  // decode() just moves that off the critical rendering path). Tracked in
+  // inFlightPrefetchImages exactly like loadEntryTier1's own detached
+  // Image() -- see that map's comment -- since a slot torn down mid-decode
+  // (fast scroll shifting the window again before this resolves) would
+  // otherwise leak its connection indefinitely; every vacate site
+  // (_clearSlotPool, both branches of _shiftConveyorWindow) cancels this by
+  // exact index.
   function _applyUrlToSlot(entry, retriesLeft = 2) {
     if (!entry.url) return;
     const globalIdx = manifest.indexOf(entry);
-    const si = assignedSlot[globalIdx];
-    if (si === -1) return;
-    const imgEl = slotPool[si].img;
+    if (assignedSlot[globalIdx] === -1) return;
     // Marks this entry as having a real (non-thumbnail) fetch in flight or
     // complete for its currently-assigned slot -- loadEntryTier3 checks
     // this before overwriting the slot with a thumbnail, so it doesn't
     // abort a real fetch that's simply still loading. Cleared once retries
     // are exhausted so a genuinely failed fetch still gets a thumbnail
     // fallback instead of a permanently broken image.
+    //
+    // (loadEntryTier1 doesn't check this flag to skip its own predecode --
+    // it's also used by single-page mode's _upgradeSpSlot for the same
+    // manifest entries, so deferring to _realDispatched here could leave a
+    // single-page slot waiting on an upgrade that only ever assigns into
+    // the long-strip conveyor's own slotPool. The two tiers can end up
+    // predecoding the same URL independently at the boundary between them
+    // -- a little redundant work, not a correctness issue.)
     entry._realDispatched = true;
-    imgEl.onload = () => { entry.loaded = true; };
-    imgEl.onerror = () => {
+    const img = new Image();
+    inFlightPrefetchImages.set(globalIdx, img);
+    img.src = entry.url;
+    img.decode().then(() => {
+      inFlightPrefetchImages.delete(globalIdx);
+      // Re-resolve the slot at paint time, not the assignedSlot value read
+      // above -- the conveyor can shift while this decode is in flight,
+      // moving (or removing) this entry's slot in the meantime.
+      const curSi = assignedSlot[manifest.indexOf(entry)];
+      if (curSi === -1) return;
+      slotPool[curSi].img.src = entry.url;
+      entry.loaded = true;
+    }).catch(() => {
+      inFlightPrefetchImages.delete(globalIdx);
+      // A deliberate cancelInFlightPredecode() (this slot was vacated while
+      // still decoding) also rejects this same decode() promise -- retrying
+      // here would immediately re-dispatch a fresh request for a page we
+      // just freed a connection slot for, defeating the whole point of
+      // cancelling it. Same guard, same reasoning, as loadEntryTier1 below.
+      if (img._cancelled) return;
       if (retriesLeft > 0) {
         setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
       } else {
         entry._realDispatched = false;
       }
-    };
-    imgEl.src = entry.url;
+    });
   }
 
   // Tier 1: full-res + forced decode, then paint into slot
@@ -2150,16 +2207,24 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // bottomSpacer in place as permanent fixtures -- reader.replaceChildren()
   // would also wipe the spacers, which must never happen.
   function _clearSlotPool() {
-    // Clearing src before removal aborts any still-in-flight fetch
-    // loadEntry() dispatched directly onto this slot's <img> -- otherwise
-    // it keeps running in the background after the element is detached
-    // (removal alone doesn't cancel a request, only losing the last
-    // reference via GC does, which isn't immediate), needlessly occupying
-    // one of the browser's handful of per-origin connections for a page
-    // nobody's looking at anymore. Same reasoning as cancelStalePrefetches,
-    // just for loadEntry's direct slot fetches instead of the tier1/tier2
-    // detached-Image() registry.
-    for (const { el, img } of slotPool) { img.src = ''; el.remove(); }
+    // Clearing src before removal aborts any still-in-flight fetch on the
+    // slot's own <img> element -- but since _applyUrlToSlot now predecodes
+    // via a separate, detached Image() before ever touching the real slot
+    // (see its own comment), the actual in-flight fetch for a still-loading
+    // entry usually lives there instead, out of this element's reach
+    // entirely. cancelInFlightPredecode closes that gap by exact index, same
+    // as both branches of _shiftConveyorWindow below -- without it, every
+    // slot torn down mid-load would leak its detached predecode's connection
+    // indefinitely, the exact "abandoned request" bug class
+    // cancelStalePrefetches was built to prevent for tier1/tier2, just at
+    // the much larger scale of the whole conveyor window instead of a
+    // narrow prefetch radius.
+    for (let k = 0; k < slotPool.length; k++) {
+      const { el, img } = slotPool[k];
+      img.src = '';
+      el.remove();
+      cancelInFlightPredecode(windowLo + k);
+    }
     slotPool.length = 0;
   }
 
@@ -2259,6 +2324,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // _clearSlotPool's comment for why this matters.
         slotPool[k].img.src = '';
         slotPool[k].el.remove();
+        cancelInFlightPredecode(oldIdx);
 
         const newIdx = windowHi + 1 + k;
         const { el } = _makeSlotEl();
@@ -2286,6 +2352,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         assignedSlot[oldIdx] = -1;
         slotPool[slotPool.length - 1 - k].img.src = '';
         slotPool[slotPool.length - 1 - k].el.remove();
+        cancelInFlightPredecode(oldIdx);
       }
       windowLo -= n;
       windowHi -= n;
@@ -4363,13 +4430,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (readerSettings.mode === 'single-page') {
       return (spManifest[spCurrentIdx] || {}).chapterId || chapterId;
     }
+    if (manifest.length === 0) return chapterId;
+    // Binary search (firstIndexAfter, already used everywhere else in this
+    // file for "which manifest entry is at position Y"), not a linear scan
+    // from index 0 -- this is called from isOnLastChapter(), itself called
+    // UNTHROTTLED on every native scroll event via syncScrollPosition(). A
+    // linear scan here costs O(current depth into the manifest), so deep
+    // into a long series (confirmed live: 88 chapters, 1000+ pages) every
+    // single scroll event during a gesture was doing a four-figure loop --
+    // a real, measurable source of main-thread jank, most perceptible (per
+    // live testing) during the slow, precise motion of a gesture's
+    // acceleration/deceleration phase, where a dropped frame is far more
+    // visually obvious than during fast/blurry mid-flick motion.
     const midY = currentTrackingY();
-    let visibleChapterId = chapterId;
-    for (const entry of manifest) {
-      if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
-      else break;
-    }
-    return visibleChapterId;
+    return manifest[firstIndexAfter(midY)].chapterId;
   }
 
   // currentChapIdx is a const frozen to the chapter the reader was *opened*
