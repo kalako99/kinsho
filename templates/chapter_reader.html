@@ -2090,13 +2090,32 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       entry.url = url;
       // Same stale-prefetch tracking/cancellation as loadEntryTier1 above --
       // see that function's comment and cancelStalePrefetches for why.
+      //
+      // Also calls decode(), not just src (previously relied on onload/
+      // onerror alone, which only warms the HTTP byte cache) -- confirmed
+      // live (2026-08-08) that a page which only ever reached tier2 sat
+      // with its bytes cached but never decoded, so materializing it later
+      // (loadEntryTier1/_applyUrlToSlot, each of which decodes a
+      // *different*, throwaway Image() for the same URL) paid the real
+      // decode cost right there on the critical path instead -- visible as
+      // a brief black flash on an ordinary flick even though nothing
+      // needed fetching over the network. decode() here warms the same
+      // shared decoded-pixel cache (keyed by URL, see _applyUrlToSlot's
+      // comment) well ahead of when the page is actually needed.
       const img = new Image();
       const idx = manifest.indexOf(entry);
       inFlightPrefetchImages.set(idx, img);
-      const cleanup = () => inFlightPrefetchImages.delete(idx);
-      img.onload = cleanup;
-      img.onerror = cleanup;
       img.src = url;
+      img.decode().then(() => {
+        inFlightPrefetchImages.delete(idx);
+      }).catch(() => {
+        inFlightPrefetchImages.delete(idx);
+        // A cancelled prefetch (page fell back out of even tier2 range)
+        // also rejects here via cancelInFlightPredecode's img.src = '' --
+        // nothing further to do either way; tier2 never retries a failure,
+        // a later pass will naturally re-attempt if the page is still
+        // needed once it's back in range.
+      });
     });
   }
 
