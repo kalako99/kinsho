@@ -1539,7 +1539,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       pendingShowTimer = setTimeout(() => {
         reader.removeEventListener('scroll', onGraceScroll);
         if (!scrolledDuringGrace) showAll();
-      }, 500);
+      }, 200);
     }
   });
 
@@ -1910,7 +1910,30 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function cancelStalePrefetches(keepLo, keepHi) {
+    // Never cancel a fetch for a slot that's still actually materialized
+    // (within [windowLo, windowHi]) -- this radius-based sweep is meant
+    // only for genuine lookahead-only prefetches (tier1/tier2 dispatches
+    // for indices not yet materialized at all), not for a materialized
+    // slot's own real-image fetch. Without this guard, every conveyor
+    // rebuild/shift immediately cancelled its OWN just-dispatched fetch for
+    // any materialized slot outside the much narrower tier2 radius
+    // (keepLo/keepHi is only +-TIER2_RADIUS, while the materialized window
+    // is +-SLOT_COUNT/2) -- _rebuildConveyorWindow/_shiftConveyorWindow call
+    // loadEntry() for the whole ~80-wide window and then call
+    // prefetchAroundIndex(), which calls this, in the very same synchronous
+    // pass. Diagnosed 2026-08-09 (code review, not yet live-verified): this
+    // makes roughly half of every freshly materialized window fall back to
+    // a thumbnail immediately regardless of scroll speed -- "the buffer
+    // loses its center" -- most
+    // visible during fast/sustained scrolling since the eye reaches those
+    // thumbnail'd slots before a later shift's prefetch cycle happens to
+    // bring them back within the tier2 radius. A slot actually LEAVING the
+    // materialized window is still cancelled correctly elsewhere, at the
+    // exact moment it's vacated (_clearSlotPool, both branches of
+    // _shiftConveyorWindow) -- this sweep only needs to catch lookahead
+    // prefetches now.
     for (const idx of inFlightPrefetchImages.keys()) {
+      if (idx >= windowLo && idx <= windowHi) continue;
       if (idx < keepLo || idx > keepHi) cancelInFlightPredecode(idx);
     }
   }
@@ -2108,7 +2131,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // underlying bug, same fix shape). onFail retries a couple of times
       // before giving up and leaving entry.loaded false for a later pass.
       const globalIdx = manifest.indexOf(entry);
-      const si = assignedSlot[globalIdx];
       const onSuccess = () => {
         if (signal?.aborted) return;
         entry.loaded = true;
@@ -2127,7 +2149,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // that decode, showing the slot's plain black background underneath
       // for a moment. img.decode() warms the browser's decoded-pixel cache,
       // which is keyed by URL, not by element, so the later
-      // `slotPool[si].img.src = url` reuses that decode and paints
+      // `slotPool[curSi].img.src = url` reuses that decode and paints
       // immediately regardless of source type.
       // Tracked in inFlightPrefetchImages (keyed by this entry's global
       // index) so a later prefetchAroundIndex call -- once the conveyor has
@@ -2149,7 +2171,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       img.src = url;
       img.decode().then(() => {
         inFlightPrefetchImages.delete(globalIdx);
-        if (si !== -1) slotPool[si].img.src = url;
+        // Re-resolve the slot fresh here, not a value captured before this
+        // decode started -- the conveyor can shift (or fully rebuild
+        // slotPool from scratch) while this decode is in flight, which
+        // would otherwise paint this entry's image into whatever now
+        // occupies a stale slot position (found 2026-08-09 via code review,
+        // not yet live-verified: the exact stale-slot race _applyUrlToSlot's
+        // own comment already warns about, just missed here -- matches the
+        // reported "wrong image in the wrong container" bug). globalIdx
+        // itself stays valid across shifts
+        // (manifest order is static); only which slot it currently occupies
+        // can change.
+        const curSi = assignedSlot[globalIdx];
+        if (curSi !== -1) slotPool[curSi].img.src = url;
         onSuccess();
       }).catch(() => {
         inFlightPrefetchImages.delete(globalIdx);
