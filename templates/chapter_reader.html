@@ -2698,8 +2698,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // window's already correctly centered.
   const supportsScrollEnd = 'onscrollend' in window;
 
+  // Batched onto requestAnimationFrame rather than calling syncScrollPosition
+  // directly from the scroll listener -- native touch/stylus fling can run
+  // entirely on the compositor thread since every listener here is passive,
+  // but syncScrollPosition's own work (recenterConveyor's DOM mutation on an
+  // edge crossing) still has to happen on the main thread, and doing that
+  // synchronously inside the scroll event's own dispatch competes with the
+  // browser's compositing work for the same frame -- most visible exactly
+  // during a gesture's acceleration/deceleration phases, where a dropped
+  // frame is easiest to perceive (2026-08-09). Coalesces any scroll events
+  // that fire faster than once per frame into a single check per frame, and
+  // lets the browser schedule that check relative to its own paint work
+  // instead of forcing it inline. _syncRafPending guards against queuing more
+  // than one pending frame; the callback reads reader.scrollTop fresh at
+  // execution time (via syncScrollPosition itself), so a burst of events
+  // collapsing into one check still uses the latest position, not a stale one.
+  let _syncRafPending = false;
+  function scheduleSyncScrollPosition() {
+    if (_syncRafPending) return;
+    _syncRafPending = true;
+    requestAnimationFrame(() => {
+      _syncRafPending = false;
+      syncScrollPosition();
+    });
+  }
+
   reader.addEventListener('scroll', () => {
-    syncScrollPosition();
+    scheduleSyncScrollPosition();
     if (!supportsScrollEnd) scheduleSettledCheck();
   }, { passive: true });
 
@@ -4656,7 +4681,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // Binary search (firstIndexAfter, already used everywhere else in this
     // file for "which manifest entry is at position Y"), not a linear scan
     // from index 0 -- this is called from isOnLastChapter(), itself called
-    // UNTHROTTLED on every native scroll event via syncScrollPosition(). A
+    // from syncScrollPosition() on every rAF-batched scroll check (see
+    // scheduleSyncScrollPosition -- at most once per animation frame, but
+    // still every frame during a sustained gesture). A
     // linear scan here costs O(current depth into the manifest), so deep
     // into a long series (confirmed live: 88 chapters, 1000+ pages) every
     // single scroll event during a gesture was doing a four-figure loop --
