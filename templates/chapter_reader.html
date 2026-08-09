@@ -1776,16 +1776,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // browser actually has to lay out (reader.scrollTop, spacer heights).
   // coordOffset is the logical position that maps to physical 0; every
   // physical quantity is (logical value - coordOffset), always kept within
-  // SAFE_PHYSICAL_HEIGHT (well under half the measured ceiling). Whenever
-  // the current position gets within COORD_REBASE_MARGIN of either edge of
-  // that safe window, recenterConveyor forces a full _rebuildConveyorWindow
-  // (never a cheap _shiftConveyorWindow, which never touches coordOffset),
-  // which picks a fresh, re-centered coordOffset as part of its existing
-  // atomic rebuild -- same "no visible jump" guarantee a chapter-jump
-  // rebuild already had, just now also triggered by approaching the
-  // coordinate ceiling, not only the materialized-slot-window edge.
-  const SAFE_PHYSICAL_HEIGHT = 8_000_000;
-  const COORD_REBASE_MARGIN  = SAFE_PHYSICAL_HEIGHT / 4;
+  // SAFE_PHYSICAL_HEIGHT (well under half the measured ceiling). Whenever the
+  // current position gets within margin of either edge of that safe window,
+  // recenterConveyor rebases coordOffset -- via the cheap _rebaseCoordinates
+  // path (just resizes spacers + adjusts scrollTop, no slot teardown) unless
+  // the materialized window itself also needs to move far enough to force a
+  // full _rebuildConveyorWindow anyway.
+  //
+  // Two margins, not one (2026-08-09): a rebase writes reader.scrollTop,
+  // which competes with the browser's own compositor-driven touch/stylus
+  // fling for the same frame if it fires mid-gesture -- a real, if small,
+  // source of the accel/decel jank this margin split exists to avoid.
+  // COORD_REBASE_MARGIN (a full quarter of the safe window) is used once
+  // scrolling has actually settled (scrollend / the settle-poll fallback),
+  // where a scrollTop write can't interfere with anything -- generous on
+  // purpose, so a rebase happens opportunistically on nearly every natural
+  // pause rather than being saved up. COORD_REBASE_EMERGENCY_MARGIN is the
+  // real safety floor, checked mid-gesture too: even the fastest realistic
+  // sustained scroll (BLE-scroller "hold to scroll" included) needs minutes
+  // of perfectly continuous, zero-pause movement to close a 2,000,000px
+  // margin, let alone this much smaller one, so in practice this branch
+  // should almost never fire -- it exists purely so a pathological
+  // long-held scroll still can't reach the real coordinate ceiling (the
+  // "wall" bug this whole mechanism was built to fix) just because it
+  // never happened to settle.
+  const SAFE_PHYSICAL_HEIGHT          = 8_000_000;
+  const COORD_REBASE_MARGIN           = SAFE_PHYSICAL_HEIGHT / 4;
+  const COORD_REBASE_EMERGENCY_MARGIN = SAFE_PHYSICAL_HEIGHT / 16;
   let coordOffset = 0;
 
   const topSpacer = document.createElement('div');
@@ -2575,9 +2592,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
   }
 
-  // ── RECENTER: called on scroll-stop. Re-centers the materialized window
-  // on the entry at the top of the viewport, as close as edges allow. ──
-  function recenterConveyor() {
+  // ── RECENTER: called on every conveyor-window edge crossing (mid-gesture)
+  // and again on scroll-stop. Re-centers the materialized window on the
+  // entry at the top of the viewport, as close as edges allow. ──
+  // isSettled distinguishes the two call contexts for the coordinate-rebase
+  // margin only (see COORD_REBASE_MARGIN/COORD_REBASE_EMERGENCY_MARGIN above)
+  // -- conveyor window shifting itself is unaffected either way.
+  function recenterConveyor(isSettled = false) {
     if (manifest.length === 0) return;
     const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
     const count  = Math.min(SLOT_COUNT, manifest.length);
@@ -2588,9 +2609,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // window itself needs to move at all (they're different quantities,
     // one in manifest entries, one in raw px), so checked unconditionally
     // rather than folded into the delta-based branches below.
+    const rebaseMargin = isSettled ? COORD_REBASE_MARGIN : COORD_REBASE_EMERGENCY_MARGIN;
     const needsRebase =
-      virtualY - coordOffset < COORD_REBASE_MARGIN ||
-      (coordOffset + SAFE_PHYSICAL_HEIGHT) - virtualY < COORD_REBASE_MARGIN;
+      virtualY - coordOffset < rebaseMargin ||
+      (coordOffset + SAFE_PHYSICAL_HEIGHT) - virtualY < rebaseMargin;
     if (delta === 0 && !needsRebase) return;
     if (Math.abs(delta) >= count) {
       // Materialized content itself needs to change wholesale regardless
@@ -2729,7 +2751,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }, { passive: true });
 
   if (supportsScrollEnd) {
-    reader.addEventListener('scrollend', recenterConveyor, { passive: true });
+    reader.addEventListener('scrollend', () => recenterConveyor(true), { passive: true });
   }
 
   let _settledRaf   = null;
@@ -2745,7 +2767,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const cur = reader.scrollTop;
     if (cur === _settledLast) {
       _settledTicks++;
-      if (_settledTicks >= 2) { _settledRaf = null; recenterConveyor(); return; }
+      if (_settledTicks >= 2) { _settledRaf = null; recenterConveyor(true); return; }
     } else {
       _settledTicks = 0;
       _settledLast  = cur;
