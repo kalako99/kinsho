@@ -184,8 +184,34 @@
          already-loaded image back on top -- a real black flash confirmed
          live (2026-08-08) over an already-correctly-loaded page, whose
          size scaled with scroll speed (more shifts per second = more
-         churn = more visible flicker), not a loading-latency gap. */
+         churn = more visible flicker), not a loading-latency gap.
+         `contain` alone gives layout/paint containment but doesn't
+         guarantee this element gets promoted to its own independent
+         compositor layer -- confirmed live (2026-08-09) that contain
+         alone did NOT fully fix a related black-flash report. will-change
+         is the stronger, more direct lever: it forces GPU layer promotion,
+         so a sibling's DOM churn -- or this slot's own region simply not
+         having been rasterized recently after sitting off-screen -- can't
+         force a synchronous repaint of this slot into the shared page
+         surface the instant it scrolls back into view. NOT applied here
+         unconditionally -- see .page-slot-near below (2026-08-10/11). */
       contain: layout paint;
+    }
+
+    /* Scoped subset of .page-slot's own materialized window (up to
+       SLOT_COUNT=80 wide) that's within TIER1_RADIUS of the CURRENT
+       reading position right now -- kept in sync continuously via
+       updateNearSlots(), not just at window shift/rebuild boundaries,
+       since the black-flash report this targets happens on ordinary small
+       flicks during real reading, not big fast scrolls (those move
+       position by roughly a page at most, never far enough to even
+       approach the conveyor window's own edges). will-change here, not on
+       plain .page-slot, deliberately: promoting all 80 materialized slots
+       to their own GPU compositor layer at once has a real memory cost on
+       mobile, so this is scoped to only the handful of slots actually
+       near where the user is reading (2026-08-11). */
+    .page-slot-near {
+      will-change: transform;
     }
 
     .page-slot img {
@@ -2436,6 +2462,40 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     reader.scrollTop += delta;
   }
 
+  // ── WILL-CHANGE LAYER PROMOTION, SCOPED TO ±TIER1_RADIUS ──
+  // Applies .page-slot-near (see its own CSS comment) to only the slots
+  // within TIER1_RADIUS of centerIdx, removing it from everything else --
+  // deliberately NOT all SLOT_COUNT (80) materialized slots, since GPU
+  // layer promotion has a real memory cost per element. Called from every
+  // window rebuild/shift AND on every syncScrollPosition tick (not just
+  // shift boundaries) -- the black-flash report this targets happens on
+  // ordinary small flicks during real reading, which move the true
+  // position continuously and never get anywhere near a window-shift
+  // boundary, so this has to track centerIdx directly, not piggyback on
+  // the rarer shift/rebuild events the way fetchPriority does (2026-08-11).
+  let _nearSlotIndices = new Set();
+  function updateNearSlots(centerIdx) {
+    const lo = Math.max(windowLo, centerIdx - TIER1_RADIUS);
+    const hi = Math.min(windowHi, centerIdx + TIER1_RADIUS);
+    const next = new Set();
+    for (let i = lo; i <= hi; i++) {
+      if (assignedSlot[i] !== -1) next.add(i);
+    }
+    for (const i of _nearSlotIndices) {
+      if (!next.has(i)) {
+        const si = assignedSlot[i];
+        if (si !== -1) slotPool[si].el.classList.remove('page-slot-near');
+      }
+    }
+    for (const i of next) {
+      if (!_nearSlotIndices.has(i)) {
+        const si = assignedSlot[i];
+        if (si !== -1) slotPool[si].el.classList.add('page-slot-near');
+      }
+    }
+    _nearSlotIndices = next;
+  }
+
   function _rebuildConveyorWindow(newWindowLo, targetGlobalY) {
     for (let i = windowLo; i <= windowHi; i++) {
       manifest[i].loaded = false;
@@ -2522,6 +2582,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       }
     }
     prefetchAroundIndex(centerIdx);
+    updateNearSlots(centerIdx);
   }
 
   // ── INCREMENTAL SHIFT: moves the window by `delta` entries by dropping
@@ -2589,7 +2650,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       k++;
     }
     _syncSpacers();
-    prefetchAroundIndex(Math.floor((windowLo + windowHi) / 2));
+    const shiftCenterIdx = Math.floor((windowLo + windowHi) / 2);
+    prefetchAroundIndex(shiftCenterIdx);
+    updateNearSlots(shiftCenterIdx);
   }
 
   // ── RECENTER: called on every conveyor-window edge crossing (mid-gesture)
@@ -2703,6 +2766,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       }
     }
     const idxAtTop = firstIndexAfter(virtualY);
+    updateNearSlots(idxAtTop);
     if (idxAtTop - windowLo < EDGE_MARGIN || windowHi - idxAtTop < EDGE_MARGIN) {
       recenterConveyor();
     }
