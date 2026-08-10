@@ -1331,7 +1331,7 @@
     </div>
   </div>
 
-  <!-- Preload radius (compressed sources only) -->
+  <!-- Preload radius (all source types) -->
   <div id="settingsPreloadWrap" style="display:none">
     <div class="settings-section-title">Preload</div>
     <div class="settings-preload">
@@ -3698,9 +3698,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     settingsPaddingToggle.checked = !!readerSettings.padding;
     settingsDirLTR.classList.toggle('active', readerSettings.direction === 'ltr');
     settingsDirRTL.classList.toggle('active', readerSettings.direction === 'rtl');
-    // Preload slider: only show for compressed sources
+    // Preload slider: shown for every source type. Was gated to compressed
+    // sources only (isCompressed) from when this setting was introduced --
+    // stale since the 2026-07-28 predecode fix unified loose and compressed
+    // sources onto the same tier1/tier2/tier3 loading path (TIER1_RADIUS/
+    // TIER2_RADIUS have never branched on source type), so loose-image manga
+    // -- exactly the case that needs tuning most on a slow/high-latency
+    // connection -- had no way to reach this control at all (2026-08-10).
     const preloadWrap = document.getElementById('settingsPreloadWrap');
-    if (preloadWrap) preloadWrap.style.display = isCompressed ? '' : 'none';
+    if (preloadWrap) preloadWrap.style.display = '';
     const r = readerSettings.preloadRadius ?? 7;
     document.getElementById('settingsPreloadValue').textContent = `±${r}`;
     document.getElementById('settingsPreloadRange').value = r;
