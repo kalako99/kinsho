@@ -313,6 +313,24 @@
       box-shadow: 0 2px 8px rgba(0,0,0,0.25);
       margin-bottom: 6px;
       transition: background 0.15s, box-shadow 0.15s;
+      /* Chapter lists have no cap (a long-running webtoon can be 100+ rows) and
+         this list isn't its own scroll container -- it scrolls with the whole
+         page, unvirtualized. Each row's own live backdrop-filter has to
+         re-sample and re-blur whatever's behind it continuously as it moves
+         during scroll -- unlike a plain box-shadow (self-contained, cheap to
+         translate) or a single fixed background layer (computed once), this
+         cost multiplies by however many rows are simultaneously in the DOM.
+         content-visibility skips paint (including backdrop-filter) entirely
+         for rows currently off-screen, so only the handful actually visible
+         ever pay this cost -- zero visual change for anything on screen,
+         since visible rows render exactly as before (2026-08-11).
+         contain-intrinsic-size gives the browser a placeholder size for
+         off-screen rows so the page's scroll height doesn't jump; "auto"
+         lets it self-correct to the real measured height after first paint,
+         the ~58px is just a reasonable starting estimate from this row's own
+         padding/line-height. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 58px;
     }
     .mchap-item:hover {
       background: color-mix(in srgb, var(--color-secondary, #1a1a1a) 70%, white 30%);
