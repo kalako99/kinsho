@@ -1635,23 +1635,43 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
   }, 60000);
 
+  // keepalive fetch, not sendBeacon -- sendBeacon can't carry the apiUrl()
+  // server base (this call was a bare relative path before, which only
+  // ever worked in browser-served mode; on the native app, whose WebView
+  // runs on its own separate local origin, it silently went nowhere) and
+  // can't carry whatever auth the native app relies on either. keepalive
+  // fetch behaves like a normal authenticated request but is guaranteed to
+  // survive the page unloading -- same fix already used for
+  // saveReadingProgress()'s own true-last-chapter completion save.
   function _sendFinalTick() {
     if (_tickSent) return;
     _tickSent = true;
     clearInterval(_tickInterval);
     if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle when leaving -- nothing to credit
-    // keepalive fetch, not sendBeacon -- sendBeacon can't carry the apiUrl()
-    // server base (this call was a bare relative path before, which only
-    // ever worked in browser-served mode; on the native app, whose WebView
-    // runs on its own separate local origin, it silently went nowhere) and
-    // can't carry whatever auth the native app relies on either. keepalive
-    // fetch behaves like a normal authenticated request but is guaranteed to
-    // survive the page unloading -- same fix already used for
-    // saveReadingProgress()'s own true-last-chapter completion save.
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
+  }
+  // A courtesy tick for merely being BACKGROUNDED (screen lock, switching
+  // apps briefly), as opposed to _sendFinalTick's "actually leaving for
+  // good" -- deliberately does NOT clear _tickInterval or set _tickSent.
+  // visibilitychange -> 'hidden' also fires on a plain screen lock, not
+  // just on really leaving; wiring it to _sendFinalTick (as this used to)
+  // permanently killed the 60s tick loop the FIRST time the screen was
+  // ever locked during a reading session, silently freezing both the
+  // manga's and the overall reading-time totals for the rest of that page
+  // load even though the user came right back and kept reading for many
+  // more minutes -- confirmed live (2026-08-11): 13+ minutes of real
+  // reading, including crossing two chapters, credited zero additional
+  // minutes after the first lock. Still worth sending a real tick here
+  // (not just skipping it) -- on mobile, backgrounding can end in the OS
+  // killing the process outright with no clean beforeunload ever firing,
+  // which would otherwise lose up to a minute of genuine reading credited
+  // to nothing.
+  function _sendHiddenTick() {
+    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle -- nothing to credit
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
   }
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') _sendFinalTick();
+    if (document.visibilityState === 'hidden') _sendHiddenTick();
   });
   window.addEventListener('beforeunload', _sendFinalTick);
 
