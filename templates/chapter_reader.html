@@ -2818,6 +2818,34 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     reader.addEventListener('scrollend', () => recenterConveyor(true), { passive: true });
   }
 
+  // Screen lock/unlock (or any other backgrounding of the WebView) can leave
+  // this whole pipeline silently stalled: native, compositor-driven scrolling
+  // keeps working the instant the screen unlocks (it never depended on this
+  // app's own JS), but reading position/progress-saving/chapter-completion --
+  // and even the conveyor's own slot virtualization -- ALL live downstream of
+  // syncScrollPosition(), which only ever re-enters via requestAnimationFrame
+  // from inside the native 'scroll' listener above. If a rAF queued right as
+  // the screen locked is dropped rather than merely deferred (or the WebView
+  // is simply slow to resume dispatching real 'scroll' events after resume),
+  // nothing re-primes the chain until the user happens to scroll -- read live
+  // as "chapter completion and the last-read page both silently stop
+  // updating after locking mid-chapter." Force one synchronous resync
+  // directly (not through scheduleSyncScrollPosition/rAF, in case rAF itself
+  // is what's stuck) the moment the page becomes visible again, so reading
+  // can never resume with this pipeline dark. Harmless to call redundantly
+  // when nothing was actually stuck -- syncScrollPosition() itself no-ops
+  // past its own throttle/edge checks when nothing changed. Long-strip only,
+  // matching checkChapterCompletion's own scope (its very first line) --
+  // single-page mode's progress save is driven by its own per-flip settle
+  // handler (spGotoIdx's spProgressSaveTimer), not this scroll/rAF chain, and
+  // #reader isn't even the active scroll surface there.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') return;
+    if (readerSettings.mode !== 'long-strip') return;
+    _syncRafPending = false;
+    syncScrollPosition();
+  });
+
   let _settledRaf   = null;
   let _settledLast  = 0;
   let _settledTicks = 0;
