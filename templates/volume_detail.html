@@ -1191,6 +1191,7 @@
                 placeholder="Search or create collection…"
                 ref="collectionSearchRef"
                 @keyup.enter="onCollectionSearchEnter"
+                @input="liveCollectionSearch = $event.target.value"
               />
               <div class="list-options">
                 <template v-if="filteredCollections.length > 0">
@@ -1210,15 +1211,15 @@
                 </template>
                 <div
                   class="list-create-option"
-                  v-if="collectionSearch.trim() && !exactCollectionMatch"
+                  v-if="liveCollectionSearch.trim() && !exactCollectionMatch"
                   @click="createAndAddToCollection"
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
                   </svg>
-                  Create "{{ collectionSearch.trim() }}"
+                  Create "{{ liveCollectionSearch.trim() }}"
                 </div>
-                <div v-if="filteredCollections.length === 0 && !collectionSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No collections yet.</div>
+                <div v-if="filteredCollections.length === 0 && !liveCollectionSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No collections yet.</div>
               </div>
             </div>
           </div>
@@ -1672,6 +1673,15 @@ createApp({
       allCollections:       [],
       showCollectionDropdown: false,
       collectionSearch:     '',
+      // Mirrors collectionSearch, updated straight from the input's native
+      // 'input' event -- see the matching comment in search_page.html for
+      // why (v-model skips updating while an IME composition is active,
+      // which made this feel like it needed Enter to search). Read by
+      // filteredCollections/exactCollectionMatch/the template's live
+      // "Create X" label; collectionSearch itself stays the source of truth
+      // for anything that actually saves (createAndAddToCollection), since
+      // Enter always ends composition first anyway (2026-08-11).
+      liveCollectionSearch: '',
       // fetch metadata popup
       showMetadataPopup:      false,
       metaSearch:             '',
@@ -1720,12 +1730,12 @@ createApp({
     },
 
     filteredCollections() {
-      const q = this.collectionSearch.trim().toLowerCase();
+      const q = this.liveCollectionSearch.trim().toLowerCase();
       return this.allCollections.filter(c => !q || c.name.toLowerCase().includes(q));
     },
 
     exactCollectionMatch() {
-      const q = this.collectionSearch.trim().toLowerCase();
+      const q = this.liveCollectionSearch.trim().toLowerCase();
       return this.allCollections.some(c => c.name.toLowerCase() === q);
     },
 
@@ -1903,6 +1913,7 @@ createApp({
     closeCollectionDropdown() {
       this.showCollectionDropdown = false;
       this.collectionSearch = '';
+      this.liveCollectionSearch = '';
     },
 
     async _removeFromCollection(collectionId) {
@@ -1944,6 +1955,7 @@ createApp({
         await this._addToCollection(data.id);
       }
       this.collectionSearch = '';
+      this.liveCollectionSearch = '';
       await this.loadCollections();
     },
 
