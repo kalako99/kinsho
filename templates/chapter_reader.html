@@ -4729,6 +4729,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
           scrollerConnectBtn.style.display = 'none';
           scrollerDisconnectBtn.style.display = '';
           localStorage.setItem(KINSHO_AUTOCONNECT_KEY, '1');
+          // Close the popup once a connection actually succeeds -- the user
+          // opened it to connect, not to keep watching it; the small topbar
+          // dot already reflects connected status from here on. Only this
+          // branch closes it -- the silent auto-reconnect path below never
+          // opens the popup in the first place, so there's nothing to close
+          // there, and every other state (scanning/disconnected/error)
+          // should keep the popup open so the user can see what's happening
+          // or retry (2026-08-11).
+          scrollerPanel.classList.remove('open');
         } else if (state === 'disconnected') {
           scrollerSetStatus('', 'Not connected');
           scrollerConnectBtn.style.display = '';
