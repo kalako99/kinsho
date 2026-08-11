@@ -314,7 +314,7 @@
       v-model="query"
       placeholder="Search manga…"
       ref="searchInput"
-      @input="onInput"
+      @input="onInput($event)"
     />
   </div>
 
@@ -438,6 +438,20 @@ createApp({
       allTags:        [],
       selectedGenres: preGenre ? [preGenre] : [],
       selectedTags:   preTag   ? [preTag]   : [],
+      // Mirrors `query`, but updated straight from the input's own native
+      // 'input' event instead of through v-model -- Vue's v-model
+      // deliberately skips updating its bound value while an IME
+      // composition is active (target.composing), so it doesn't clobber a
+      // user's Chinese/Japanese/Korean input mid-composition. Android's
+      // default keyboards (Gboard, Samsung Keyboard) run ordinary English
+      // typing through composition sessions too when predictive text is on,
+      // which made this search feel like it only updated once a word ended
+      // or Enter was pressed, even though it was already wired to filter
+      // live. filteredMangas reads from this instead of `query` so results
+      // update on every keystroke regardless of composition state, while
+      // `query` (still v-model-bound to the input itself) stays untouched
+      // and IME-safe for what's actually displayed in the box (2026-08-11).
+      liveQuery:      '',
       // Collapsed to one row by default (see .pills-row.collapsed) --
       // starts expanded when arriving with a specific genre/tag already
       // selected (from a manga/collection page's click-to-search link) so
@@ -458,7 +472,7 @@ createApp({
 
   computed: {
     filteredMangas() {
-      const q = this.query.trim().toLowerCase();
+      const q = this.liveQuery.trim().toLowerCase();
       return this.mangas.filter(m => {
         if (q && !m.title.toLowerCase().includes(q)) return false;
         if (this.selectedGenres.length > 0) {
@@ -594,7 +608,7 @@ createApp({
       window.kinshoGoBack('/');
     },
 
-    onInput() {},
+    onInput(e) { this.liveQuery = e.target.value; },
   },
 }).directive('click-outside', {
   mounted(el, binding) {
