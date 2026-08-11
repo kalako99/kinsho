@@ -1503,7 +1503,28 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   let barTimer = null;
   function showBar() { showAll(); } // kept for compat
 
+  // Any popup that can be sitting open independently of the topbar/bottombar
+  // themselves -- if one of these is open when the auto-hide timer would
+  // otherwise fire, hiding the cursor along with everything else leaves the
+  // user unable to see their own pointer while still looking at an open
+  // bookmark panel/modal, settings panel, or scroller panel (2026-08-11).
+  function isAnyPopupOpen() {
+    const sp  = document.getElementById('settingsPanel');
+    const scp = document.getElementById('scrollerPanel');
+    const bp  = document.getElementById('bookmarkPanel');
+    const bmo = document.getElementById('bmModalOverlay');
+    return (sp  && sp.classList.contains('open')) ||
+           (scp && scp.classList.contains('open')) ||
+           (bp  && bp.classList.contains('open')) ||
+           (bmo && bmo.style.display === 'flex');
+  }
+
   function hideAll() {
+    // Don't hide anything (bars, cursor) while a popup is still open --
+    // keep re-checking on the same cadence instead, so it hides normally
+    // the moment the popup actually closes without needing a fresh
+    // interaction to re-arm the timer.
+    if (isAnyPopupOpen()) { scheduleAutoHide(); return; }
     topbar.classList.remove('visible');
     fragProgress.classList.remove('visible');
     document.getElementById('bottombar').classList.remove('visible');
@@ -1520,6 +1541,35 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     document.body.classList.add('cursor-hidden');
   }
 
+  // Schedules (or reschedules) the 3s auto-hide -- shared by showAll() and
+  // by any later interaction with the reader's own UI chrome (see
+  // isInReaderChrome below), so opening Settings/Bookmarks etc. keeps
+  // pushing the deadline out instead of the original showAll() timer
+  // silently ticking down in the background regardless of what the user
+  // does next (2026-08-11).
+  function scheduleAutoHide() {
+    clearTimeout(barTimer);
+    barTimer = setTimeout(() => {
+      if (stripVisible) return; // don't hide while thumb strip is active
+      if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
+      hideAll();
+    }, 3000);
+  }
+
+  // Every overlay/popup that lives on top of the reader (not #reader's own
+  // scrollable content) -- interacting with any of these should never
+  // count as "tap the page to hide the bars", and should keep the bars on
+  // screen rather than letting a stale timer yank them away mid-interaction.
+  function isInReaderChrome(target) {
+    return topbar.contains(target) ||
+      fragProgress.contains(target) ||
+      document.getElementById('bottombar').contains(target) ||
+      document.getElementById('settingsPanel').contains(target) ||
+      document.getElementById('scrollerPanel').contains(target) ||
+      document.getElementById('bookmarkPanel').contains(target) ||
+      document.getElementById('bmModalOverlay').contains(target);
+  }
+
   function showAll() {
     topbar.classList.add('visible');
     fragProgress.classList.add('visible');
@@ -1527,12 +1577,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     barVisible = true;
     document.body.classList.remove('cursor-hidden');
     if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
-    clearTimeout(barTimer);
-    barTimer = setTimeout(() => {
-      if (stripVisible) return; // don't hide while thumb strip is active
-      if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
-      hideAll();
-    }, 3000);
+    scheduleAutoHide();
     // updateProgressBar() was skipped while barVisible was false (see its
     // own comment) — barVisible is now true above, so this call rebuilds
     // whatever went stale (frag segments, chapter label, page slider) and
@@ -1543,11 +1588,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   let barVisible     = false;
   let leftHoveredIdx = null;
   let pendingShowTimer = null;
+
+  // Capture phase so this fires even for a popup's own click handler that
+  // calls stopPropagation() in the bubble phase (settingsPanel/scrollerPanel/
+  // bookmarkPanel all do, further down) -- a bubble-phase-only listener would
+  // never see those clicks at all once stopped. Resets (not just clears) the
+  // auto-hide timer on every interaction with the reader's own chrome, so
+  // choosing a setting or working with a bookmark never gets cut short by a
+  // deadline that started counting down before the user even opened the
+  // panel (2026-08-11).
+  document.addEventListener('click', e => {
+    if (!barVisible) return;
+    if (isInReaderChrome(e.target)) scheduleAutoHide();
+  }, { capture: true });
+
   document.addEventListener('click', e => {
     if (touchMoved) { touchMoved = false; return; } // was a drag, not a tap
-    if (backBtn.contains(e.target)) return;
-    if (fragProgress.contains(e.target)) return;
-    if (document.getElementById('bottombar').contains(e.target)) return;
+    if (isInReaderChrome(e.target)) return;
     if (barVisible) {
       clearTimeout(barTimer);
       hideAll();
