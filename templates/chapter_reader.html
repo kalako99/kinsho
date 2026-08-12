@@ -174,7 +174,10 @@
       width: 100%;
       background: #000;
       /* height set per-entry in JS from dims.json; normal block flow */
-      margin-bottom: var(--page-gap, 0px);
+      /* 1px LESS than the logical gap -- see PAGE_OVERLAP_PX in the script
+         below for why this deliberate overlap exists and how the geometry
+         math (_syncSpacers) compensates for it. */
+      margin-bottom: calc(var(--page-gap, 0px) - 1px);
       /* Isolates this slot's own layout/paint from its siblings -- without
          this, inserting/removing a DIFFERENT slot (every conveyor shift,
          which fires repeatedly during any sustained scroll) can force the
@@ -1753,6 +1756,43 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // Gap in px between pages when padding is enabled (applied during rebuild)
   const PAGE_GAP = 16;
 
+  // Deliberate 1px overlap between adjacent .page-slot elements (2026-08-12),
+  // real, confirmed on real devices/videos: a thin horizontal line, showing
+  // the slot's own black background, intermittently appears exactly at the
+  // boundary between two adjacent images during scroll -- worse right at a
+  // seam between two pieces of a single source image that was manually
+  // sliced into multiple files (tall webtoon pages split by an external
+  // tool), confirmed by a full slot-pool rebuild (toggling the padding
+  // setting) reliably making it disappear. Root cause: .page-slot has
+  // `contain: layout paint` (and nearby slots also get `will-change:
+  // transform`), which promotes each slot to its own independently
+  // GPU-rasterized layer -- two adjacent layers only look seamless if their
+  // shared edge lands on the same physical device pixel, and the reader's
+  // scrollTop is essentially never a whole multiple of the device pixel
+  // grid, so each layer's independent rasterizer can round that shared edge
+  // in different directions depending on the exact scroll position, leaving
+  // a real (if tiny) unpainted gap that exposes the black background behind
+  // it. This is a well-known class of browser rendering bug for adjacent
+  // independently-composited elements; the standard fix -- used here -- is
+  // a small deliberate overlap so a rounding gap has real image content
+  // behind it instead of bare background, regardless of which way the
+  // rounding goes. Applied via CSS (.page-slot's margin-bottom, see its own
+  // comment) rather than by shrinking each slot's own height, so contain:
+  // paint (which would otherwise clip an overflowing child) never comes
+  // into play -- the NEXT slot's own box simply starts 1px earlier and
+  // paints its own real content there, covering whatever the previous
+  // slot's own rasterizer did or didn't manage to paint in that shared row.
+  // _syncSpacers() compensates bottomSpacer's height by this same amount
+  // per boundary in the current materialized window, so the reader's real
+  // scrollable height stays correct -- globalY/cursorY themselves are left
+  // completely untouched (still assume zero/PAGE_GAP spacing exactly as
+  // before), since the overlap is a purely visual, bounded-and-self-
+  // resetting adjustment (at most SLOT_COUNT-1 px of slack within whatever
+  // window is currently materialized, corrected fresh on every rebuild/
+  // shift) that has no business leaking into the precise logical scroll
+  // position bookmarks/progress/chapter-completion all rely on.
+  const PAGE_OVERLAP_PX = 1;
+
   // Drives the actual visible gap between .page-slot elements (see its CSS
   // rule: margin-bottom: var(--page-gap, 0px)). PAGE_GAP alone only ever
   // fed into globalY/cursorY -- the virtual scroll-position math -- with
@@ -1927,7 +1967,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // true remaining distance, which is exactly what let this grow past
     // the browser's real limit before.
     const safeWindowEndY = Math.min(cursorY, coordOffset + SAFE_PHYSICAL_HEIGHT);
-    bottomSpacer.style.height = Math.max(0, safeWindowEndY - windowEndY) + 'px';
+    // +overlapSlack: the materialized slots between the spacers render
+    // PAGE_OVERLAP_PX shorter than windowEndY assumes at every one of their
+    // (windowHi - windowLo) shared boundaries (see PAGE_OVERLAP_PX above) --
+    // make up the difference here so the reader's real scrollable height
+    // still matches the logical model exactly, without needing to touch
+    // globalY/cursorY themselves at all.
+    const overlapSlack = (windowHi - windowLo) * PAGE_OVERLAP_PX;
+    bottomSpacer.style.height = Math.max(0, safeWindowEndY - windowEndY + overlapSlack) + 'px';
   }
 
   // ── VIRTUAL SCROLL STATE ──
