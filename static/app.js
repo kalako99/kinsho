@@ -1,19 +1,15 @@
 const { createApp, defineComponent } = Vue;
 
 // ── MANGA THUMBNAIL COMPONENT ──
+// Click-vs-drag distinction for a thumb inside a drag-scrollable .manga-row
+// lives in vDragScroll below (row-level, capture-phase click suppression) --
+// this component just emits click plainly and trusts that a real drag never
+// reaches here at all.
 const MangaThumb = defineComponent({
   name: 'MangaThumb',
   props: { manga: { type: Object, required: true } },
-  data() { return { startPos: 0 }; },
-  methods: {
-    handleClick(e) {
-      if (Math.abs(e.pageX - this.startPos) < 5) this.$emit('click');
-    }
-  },
   template: `
-    <div class="manga-thumb"
-      @mousedown="startPos = $event.pageX"
-      @click="handleClick($event)">
+    <div class="manga-thumb" @click="$emit('click')">
       <div class="cover">
         <img v-if="manga.cover" :src="manga.cover" :alt="manga.title">
         <span v-else>No Cover</span>
@@ -34,17 +30,35 @@ const MangaThumb = defineComponent({
 });
 
 // ── DRAG TO SCROLL DIRECTIVE ──
-// Handles horizontal drag-scroll on rows
+// Handles horizontal drag-scroll on rows. Also owns the click-vs-drag
+// distinction for every .manga-thumb inside the row: a mousedown/mouseup
+// pair whose cursor position matches closely enough is a click (was
+// previously checked per-thumb, comparing the *click* event's own pageX
+// against the pageX recorded on that thumb's own mousedown -- fragile,
+// since mousedown and mouseup landing on two *different* thumbs during a
+// drag resolves the click's target to their nearest common ancestor
+// instead of either thumb, so it never reached either thumb's own
+// listener and the check silently never ran; a drag that happened to
+// start and end back over the *same* thumb, or moved the thumb under a
+// near-stationary cursor via the drag's 1.5x scroll multiplier below,
+// could still read as "close enough" and wrongly navigate). Tracking
+// cumulative movement here instead and suppressing the click in the
+// capture phase (fires before it reaches any child .manga-thumb's own
+// bubble-phase @click) reliably blocks it regardless of which element(s)
+// the mousedown/mouseup actually landed on.
 const vDragScroll = {
   mounted(el) {
     let isDown = false;
     let startX, scrollLeft;
+    let moved = 0;                // max cumulative |displacement| this gesture
+    const CLICK_DRAG_THRESHOLD = 5;  // px -- above this, suppress the next click
 
     el.addEventListener('dragstart', (e) => { e.preventDefault(); });
 
     el.addEventListener('mousedown', (e) => {
       e.preventDefault();
       isDown = true;
+      moved = 0;
       el.classList.add('dragging');
       startX = e.pageX - el.offsetLeft;
       scrollLeft = el.scrollLeft;
@@ -53,8 +67,16 @@ const vDragScroll = {
     el.addEventListener('mousemove', (e) => {
       if (!isDown) return;
       e.preventDefault();
-      el.scrollLeft = scrollLeft - (e.pageX - el.offsetLeft - startX) * 1.5;
+      const x = e.pageX - el.offsetLeft;
+      moved = Math.max(moved, Math.abs(x - startX));
+      el.scrollLeft = scrollLeft - (x - startX) * 1.5;
     });
+    el.addEventListener('click', (e) => {
+      if (moved > CLICK_DRAG_THRESHOLD) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true);
   }
 };
 
