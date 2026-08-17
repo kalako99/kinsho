@@ -2396,6 +2396,38 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
+  // Long-strip's page-count-based preload radius (TIER1_RADIUS, user-
+  // adjustable 3-14) has no notion of actual viewport size or how tall
+  // pages in THIS specific manga/chapter are -- a manga split into many
+  // short pages needs a much wider page-count radius than one made of a
+  // few huge splash pages to cover the same real screen distance. The
+  // long-standing black-flash/flick investigation (see CLAUDE.md) points
+  // at Chromium's own compositor tile-raster scheduling running out of
+  // lead time on a fast scroll; the most direct mitigation available here
+  // is guaranteeing real, predecoded (tier1/tier2) content covers at least
+  // a full viewport height above AND below the current position at all
+  // times -- effectively treating the "screen" as 3x taller (one viewport
+  // above, the current one, one below), independent of whatever the
+  // page-count setting happens to be tuned to. Sampled fresh around
+  // centerGlobalIdx on every call (not once at boot from a fixed global
+  // average) since page heights can vary wildly between chapters in the
+  // same manga (a dense chapter-per-page split vs. a long webtoon strip) --
+  // a global average computed once would be wrong for whichever part of
+  // the manifest the reader currently sits in. Capped well under
+  // SLOT_COUNT so a manga with pathologically short pages can't balloon
+  // this into predecoding hundreds of images at once.
+  const VIEWPORT_RADIUS_SAMPLE = 10;
+  const VIEWPORT_RADIUS_CAP    = 25;
+  function _viewportRadiusPages(centerIdx) {
+    if (!manifest.length) return 0;
+    const lo = Math.max(0, centerIdx - VIEWPORT_RADIUS_SAMPLE);
+    const hi = Math.min(manifest.length - 1, centerIdx + VIEWPORT_RADIUS_SAMPLE);
+    let sumH = 0, n = 0;
+    for (let i = lo; i <= hi; i++) { sumH += manifest[i].scaledH; n++; }
+    const avgH = n ? (sumH / n) : viewH;
+    return Math.min(VIEWPORT_RADIUS_CAP, Math.ceil(viewH / (avgH || 1)));
+  }
+
   function prefetchAroundIndex(centerGlobalIdx, signal, direction = 0) {
     // In single-page mode with a known direction, use asymmetric radii:
     // forward gets the full velocity-scaled radius, backward gets a small fixed buffer.
@@ -2403,16 +2435,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const SP_BACK_RADIUS_T1 = 2;  // tier-1 pages to keep behind in SP mode
     const SP_BACK_RADIUS_T2 = 4;  // tier-2 pages to keep behind in SP mode
 
+    // Floor this call's radii at the viewport-derived minimum -- see
+    // _viewportRadiusPages above. Only ever widens the range the existing
+    // TIER1_RADIUS/TIER2_RADIUS setting would have used, never narrows it.
+    const viewportFloorT1 = _viewportRadiusPages(centerGlobalIdx);
+    const effectiveT1 = Math.max(TIER1_RADIUS, viewportFloorT1);
+    const effectiveT2 = Math.max(TIER2_RADIUS, viewportFloorT1 * 2);
+
     let fwdT1, backT1, fwdT2, backT2;
     if (direction !== 0) {
       const fwd  = direction > 0 ? 1 : -1;
-      fwdT1  = fwd > 0 ? TIER1_RADIUS : SP_BACK_RADIUS_T1;
-      backT1 = fwd > 0 ? SP_BACK_RADIUS_T1 : TIER1_RADIUS;
-      fwdT2  = fwd > 0 ? TIER2_RADIUS : SP_BACK_RADIUS_T2;
-      backT2 = fwd > 0 ? SP_BACK_RADIUS_T2 : TIER2_RADIUS;
+      fwdT1  = fwd > 0 ? effectiveT1 : SP_BACK_RADIUS_T1;
+      backT1 = fwd > 0 ? SP_BACK_RADIUS_T1 : effectiveT1;
+      fwdT2  = fwd > 0 ? effectiveT2 : SP_BACK_RADIUS_T2;
+      backT2 = fwd > 0 ? SP_BACK_RADIUS_T2 : effectiveT2;
     } else {
-      fwdT1 = backT1 = TIER1_RADIUS;
-      fwdT2 = backT2 = TIER2_RADIUS;
+      fwdT1 = backT1 = effectiveT1;
+      fwdT2 = backT2 = effectiveT2;
     }
 
     const lo1 = Math.max(0, centerGlobalIdx - backT1);
