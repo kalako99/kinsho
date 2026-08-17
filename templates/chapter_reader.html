@@ -1648,6 +1648,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   titleEl.textContent = manga.name || manga.title || 'Manga';
 
+  // Preload this manga's large cover in the background, fire-and-forget.
+  // Reading here makes this manga the list page's "most recently read" and
+  // therefore its next ambient backdrop -- warming the browser's cache for
+  // that image now, while still on this screen, means the list page's own
+  // revalidation of it (Cache-Control: no-cache -- see get_cover_image in
+  // main.py, always a conditional GET, but a cheap 304 instead of a full
+  // download once cached) doesn't have to race everything else that page
+  // fetches on first paint. Gated on backdrop_list -- no point otherwise.
+  fetch(apiUrl('/api/settings')).then(r => r.json()).then(s => {
+    if (s && s.backdrop_list !== false && manga.cover_url_large) {
+      new Image().src = manga.cover_url_large;
+    }
+  }).catch(() => {});
+
   // ── READING SESSION TRACKING ──
   const _readingMangaName = manga.name || manga.title || 'Unknown';
   fetch(apiUrl('/api/reading/session/start'), {
