@@ -170,6 +170,14 @@
       display: flex;
       gap: 12px;
       overflow-x: auto;
+      /* overflow-x: auto with no overflow-y set makes the browser compute
+         overflow-y as auto too (not visible), which clips .manga-thumb's
+         hover translateY(-4px) lift (plus its box-shadow) at the row's own
+         top edge. The padding/margin pair below gives that lift room
+         without shifting the row's own visible position or affecting the
+         horizontal scroll. */
+      padding-top: 16px;
+      margin-top: -16px;
       padding-bottom: 10px;
       scrollbar-width: none;
       cursor: grab;
