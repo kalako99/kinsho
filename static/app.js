@@ -494,7 +494,21 @@ const app = createApp({
     // touches live display state itself, so a background call for a tab
     // the user isn't looking at can't clobber what's currently on screen.
     async loadMangas(libraryId, lastUpdatedPage) {
-      const state = await this.buildTabState(libraryId, lastUpdatedPage);
+      // The backdrop and the Last Read/Random/Favourites rows only need the
+      // FIRST of buildTabState()'s two fetch phases (mangas+settings+history)
+      // -- the second phase (paginated Last Updated grid, Collections row) is
+      // unrelated to any of them, but used to gate applying ANY of this
+      // state until the whole thing resolved, which held the backdrop behind
+      // two more full round-trips it never needed. Applying the core state
+      // the moment it's ready (active tab only -- a background prefetch has
+      // nothing on screen to update early) is what actually fixes the
+      // backdrop's late pop-in; see buildTabState's own comment for the
+      // other half (running that second phase's two fetches in parallel
+      // instead of sequentially).
+      const onCoreReady = libraryId === this.activeTab
+        ? (core) => this.applyCoreTabState(core)
+        : null;
+      const state = await this.buildTabState(libraryId, lastUpdatedPage, onCoreReady);
       if (!state) return;
       this.tabCache[libraryId] = state;
       // Also persisted to sessionStorage (not just kept in memory) so the
@@ -518,7 +532,11 @@ const app = createApp({
     // Pure: fetches + computes everything one tab's view needs, without
     // touching `this.*` — safe to run for a library the user isn't
     // currently looking at (background prefetch) as well as the active one.
-    async buildTabState(libraryId, lastUpdatedPage = 1) {
+    // onCoreReady, if given, fires with the "core" state (rows + backdrop)
+    // as soon as it's computed, before the slower Last Updated/Collections
+    // fetches below even start -- lets loadMangas() paint the backdrop and
+    // rows immediately instead of waiting on unrelated data.
+    async buildTabState(libraryId, lastUpdatedPage = 1, onCoreReady = null) {
       try {
         const [allRes, settingsRes, historyRes] = await Promise.all([
           fetch(`/api/mangas/${libraryId}?sort=alphabetical`),
@@ -608,13 +626,22 @@ const app = createApp({
           if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
         }
 
+        if (onCoreReady) {
+          onCoreReady({ lastRead, random, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
+        }
+
         // Last Updated, separately (sorted + paginated), reusing history --
         // defaults to page 1 for a fresh tab visit, but callers restoring a
         // remembered session (see mounted()) pass through whichever page the
         // user was actually on, so a back-navigation's reconciliation fetch
         // doesn't silently revert an already-restored later page back to 1.
-        const lu = await this.fetchLastUpdatedPage(libraryId, lastUpdatedPage, historyByMangaId);
-        const collectionsRow = await this.fetchCollectionsRow(libraryId);
+        // Run together, not sequentially -- neither depends on the other's
+        // result, and awaiting them one after another just adds their two
+        // round-trips instead of overlapping them.
+        const [lu, collectionsRow] = await Promise.all([
+          this.fetchLastUpdatedPage(libraryId, lastUpdatedPage, historyByMangaId),
+          this.fetchCollectionsRow(libraryId),
+        ]);
 
         return {
           lastRead, random, favourites, collectionsRow,
@@ -644,6 +671,22 @@ const app = createApp({
       this.lastUpdatedPage    = state.lastUpdatedPage;
       this.lastUpdatedTotal   = state.lastUpdatedTotal;
       this.lastUpdatedColumns = state.lastUpdatedColumns;
+    },
+
+    // Early-paint counterpart to applyTabState() -- sets just the fields
+    // buildTabState()'s onCoreReady callback provides, leaving
+    // lastUpdated/collectionsRow untouched (whatever they currently show
+    // stays put until the full state arrives moments later via the normal
+    // applyTabState() call loadMangas() already makes). bgUrlToLock isn't
+    // applied here on purpose -- loadMangas() still handles persisting a
+    // freshly-captured lock from the final, complete state, not this
+    // early/partial one.
+    applyCoreTabState(core) {
+      this.lastRead     = core.lastRead;
+      this.random        = core.random;
+      this.favourites    = core.favourites;
+      this.bgLayerStyle  = core.bgLayerStyle;
+      this.bgIsRaster    = core.bgIsRaster;
     },
 
     async persistLockedBackdrop(url) {
