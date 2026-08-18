@@ -195,6 +195,34 @@ def get_covers_dir():
     os.makedirs(covers, exist_ok=True)
     return covers
 
+def _cover_file_version(file_path: str) -> str:
+    """Cache-busting tag for a cover file, derived from its own mtime -- lets
+    cover URLs be served as long-lived immutable resources (like thumbnails
+    already are, see the /covers route) while still picking up a genuine
+    change (rescan, re-fetched metadata, admin re-pick) on the very next
+    load, since a changed file gets a different URL rather than the same one.
+    Integer, not the raw float mtime -- a decimal point here would collide
+    with deriveCoverLarge()'s dot-based extension parsing in app.js."""
+    try:
+        return str(int(os.path.getmtime(file_path)))
+    except OSError:
+        return "0"
+
+def _cover_urls_for(library_id: int, manga_name: str, cover_filename: str) -> tuple:
+    """Return (cover_url, cover_url_large) for a manga's cover filename, each
+    carrying a ?v= version tag from that specific file's own mtime."""
+    name, ext = os.path.splitext(cover_filename)
+    large_filename = name + "+" + ext
+    base = f"/covers/{library_id}/{quote(manga_name)}"
+    covers_dir = get_covers_dir()
+    manga_dir = os.path.join(covers_dir, str(library_id), manga_name) if covers_dir else None
+    small_v = _cover_file_version(os.path.join(manga_dir, cover_filename)) if manga_dir else "0"
+    large_v = _cover_file_version(os.path.join(manga_dir, large_filename)) if manga_dir else "0"
+    return (
+        f"{base}/{quote(cover_filename)}?v={small_v}",
+        f"{base}/{quote(large_filename)}?v={large_v}",
+    )
+
 def get_thumbs_dir(library_id: int, manga_name: str, source_id: str) -> Optional[str]:
     """Return the thumbs directory for a specific volume or chapter."""
     covers_dir = get_covers_dir()
@@ -245,14 +273,27 @@ def get_cover_image(request: Request, library_id: int, manga_name: str, filename
     if not os.path.isfile(file_path):
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    # Previously had no Cache-Control of its own, which the default_no_store
-    # middleware then forced to "no-store" -- every visit to the manga list
-    # re-downloaded every cover's full bytes over the network, even when
-    # nothing had changed since the last visit. ETag from the file's own
-    # mtime (not a fixed max-age window) so a cover that's genuinely
-    # regenerated (rescan, re-fetched metadata, admin picking a different
-    # cover) is picked up on the very next load -- same validator-over-
-    # fixed-window reasoning as the manga dims route above.
+    # Every cover_url/cover_url_large this app hands out (see
+    # _cover_urls_for) carries a ?v= tag derived from this exact file's own
+    # mtime -- so a request whose v matches what's on disk right now is
+    # asking for content that, by construction, can never change without
+    # also changing its own URL. That's safe to cache as hard as the
+    # thumbnails already are (immutable, no revalidation round-trip ever
+    # needed again) instead of the old always-revalidate model, which forced
+    # a fresh network round-trip for this image on literally every page that
+    # showed it, no matter how recently it had already been loaded.
+    #
+    # A request with no v, or a stale one (an old cached HTML page from
+    # before a rescan/re-fetch changed this cover), falls back to the
+    # previous validator-based behavior -- ETag from the file's own mtime,
+    # so a genuinely regenerated cover (rescan, re-fetched metadata, admin
+    # picking a different cover) is still picked up on the very next load,
+    # never served stale.
+    current_version = _cover_file_version(file_path)
+    if request.query_params.get("v") == current_version:
+        headers = {"Cache-Control": "private, max-age=31536000, immutable"}
+        return FileResponse(file_path, headers=headers)
+
     etag = f'"{os.path.getmtime(file_path)}"'
     headers = {"Cache-Control": "private, no-cache", "ETag": etag}
     if request.headers.get("if-none-match") == etag:
@@ -3511,9 +3552,10 @@ def get_mangas(
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
+            m["cover_url"], m["cover_url_large"] = _cover_urls_for(library_id, m["name"], cover_filename)
         else:
             m["cover_url"] = None
+            m["cover_url_large"] = None
         if "is_complete" not in m:
             volumes = dims.get("volumes", {})
             chapters = dims.get("chapters", {})
@@ -3568,7 +3610,7 @@ def get_mangas_for_search(request: Request, library_id: int):
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
+            m["cover_url"], _ = _cover_urls_for(library_id, m["name"], cover_filename)
         else:
             m["cover_url"] = None
         dims = _load_dims_or_flag_for_repair(library_id, m["name"])
@@ -3600,9 +3642,7 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     cover = user_covers.get(manga_id) or manga.get("cover")
     if cover:
         cover_filename = os.path.basename(cover)
-        name, ext = os.path.splitext(cover_filename)
-        manga["cover_url"]       = f"/covers/{library_id}/{quote(manga['name'])}/{quote(cover_filename)}"
-        manga["cover_url_large"] = f"/covers/{library_id}/{quote(manga['name'])}/{quote(name + '+' + ext)}"
+        manga["cover_url"], manga["cover_url_large"] = _cover_urls_for(library_id, manga["name"], cover_filename)
     else:
         manga["cover_url"]       = None
         manga["cover_url_large"] = None
@@ -3748,9 +3788,7 @@ def _resolve_member_cover_urls(username: str, library_id: int, manga_id: str) ->
     if not cover:
         return None, None
     filename = os.path.basename(cover)
-    name, ext = os.path.splitext(filename)
-    base = f"/covers/{library_id}/{quote(manga['name'])}"
-    return f"{base}/{quote(filename)}", f"{base}/{quote(name + '+' + ext)}"
+    return _cover_urls_for(library_id, manga["name"], filename)
 
 def _resolve_member_cover_url(username: str, library_id: int, manga_id: str) -> Optional[str]:
     return _resolve_member_cover_urls(username, library_id, manga_id)[0]
@@ -3760,10 +3798,7 @@ def _resolve_collection_cover_urls(username: str, collection_id: str, visible_me
     user_data = auth.load_user_data(username)
     override = user_data.get("collection_covers", {}).get(collection_id)
     if override:
-        filename = override["filename"]
-        name, ext = os.path.splitext(filename)
-        base = f"/covers/{override['library_id']}/{quote(override['manga_name'])}"
-        return f"{base}/{quote(filename)}", f"{base}/{quote(name + '+' + ext)}"
+        return _cover_urls_for(override["library_id"], override["manga_name"], override["filename"])
     if not visible_members:
         return None, None
     first = visible_members[0]
@@ -5190,7 +5225,7 @@ def get_category_list(
         cover = user_covers.get(m["id"]) or m.get("cover")
         if cover:
             cover_filename = os.path.basename(cover)
-            m["cover_url"] = f"/covers/{library_id}/{quote(m['name'])}/{quote(cover_filename)}"
+            m["cover_url"], _ = _cover_urls_for(library_id, m["name"], cover_filename)
         else:
             m["cover_url"] = None
         mangas_by_id[m["id"]] = m

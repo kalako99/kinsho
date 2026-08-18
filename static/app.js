@@ -558,7 +558,13 @@ const app = createApp({
             title:       m.name,
             path:        m.path,
             cover:       m.cover_url,
-            coverLarge:  this.deriveCoverLarge(m.cover_url),
+            // Prefer the server's own cover_url_large (carries that exact
+            // file's own cache-busting version, see _cover_urls_for in
+            // main.py) over deriving one from the small cover_url -- the
+            // small and large variants aren't guaranteed to share a version
+            // tag, so a derived URL could carry the wrong one and miss the
+            // immutable-cache fast path this exists for.
+            coverLarge:  m.cover_url_large || this.deriveCoverLarge(m.cover_url),
             chapters:    m.chapters,
             is_complete: m.is_complete || false,
             is_case2:    m.manga_type === 'case2',
