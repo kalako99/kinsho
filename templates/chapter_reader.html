@@ -1963,12 +1963,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const chDims = isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid];
     const source = chDims?.source;
     const base   = `/api/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${cid}/page`;
+    // Page images are served as long-lived immutable (Cache-Control:
+    // public, max-age=86400, immutable -- no revalidation for a whole
+    // day). A chapter/volume whose PAGE FILENAMES stay the same but whose
+    // CONTENT changed (a whole chapter folder deleted and replaced with
+    // corrected pages, same names) would otherwise keep showing whatever
+    // a browser already had cached under that exact URL, with no way to
+    // ever notice it's stale short of a hard refresh -- same reasoning
+    // cover images already use a ?v= tag for (see _cover_urls_for in
+    // main.py). mtime is stored on every chapter/volume record regardless
+    // of source type, so this applies uniformly below.
+    const v = chDims?.mtime != null ? `v=${chDims.mtime}` : '';
 
     // Archive / PDF / EPUB: URLs are sequential integers, build without network fetch.
     if (source === 'archive' || source === 'pdf' || source === 'epub') {
       const count  = chDims.page_count ?? chDims.pages?.length;
       if (count != null) {
-        const suffix = source === 'pdf' ? pdfScaleParam() : '';
+        const params = [];
+        if (source === 'pdf') params.push(`scale=${PDF_SCALES[readerSettings.pdfScale ?? 1]}`);
+        if (v) params.push(v);
+        const suffix = params.length ? `?${params.join('&')}` : '';
         const urls   = Array.from({ length: count }, (_, i) => `${base}/${i}${suffix}`);
         urlCache[cid] = Promise.resolve(urls);
         return urlCache[cid];
@@ -1977,7 +1991,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     // Loose: filenames stored in dims, build without network fetch.
     if (source === 'loose' && Array.isArray(chDims?.filenames)) {
-      const urls = chDims.filenames.map(fname => `${base}/${fname}`);
+      const urls = chDims.filenames.map(fname => `${base}/${fname}${v ? `?${v}` : ''}`);
       urlCache[cid] = Promise.resolve(urls);
       return urlCache[cid];
     }

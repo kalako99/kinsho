@@ -1944,12 +1944,19 @@ createApp({
         const ch   = dims?.chapters?.[cid];
         if (!ch) return;
         const base = `/api/manga/${this.libraryId}/${this.mangaId}/chapter/${cid}/page`;
+        // Same ?v= cache-busting tag the reader itself uses (see
+        // ensureChapterUrls in chapter_reader.html) -- without it, warming
+        // the browser cache here with a URL that later turns out to be
+        // stale (chapter replaced with same filenames) would make the
+        // reader's own preload-hit actually WORSE than no preload at all,
+        // since it'd have primed the cache with the wrong bytes.
+        const v = ch.mtime != null ? `?v=${ch.mtime}` : '';
         let urls = null;
         if (ch.source === 'archive' || ch.source === 'epub') {
           const count = ch.page_count ?? ch.pages?.length ?? 0;
-          urls = Array.from({ length: count }, (_, i) => `${base}/${i}`);
+          urls = Array.from({ length: count }, (_, i) => `${base}/${i}${v}`);
         } else if (ch.source === 'loose' && Array.isArray(ch.filenames)) {
-          urls = ch.filenames.map(f => `${base}/${f}`);
+          urls = ch.filenames.map(f => `${base}/${f}${v}`);
         }
         // pdf deliberately skipped: its page URLs carry a render-scale query
         // that depends on per-library reader settings, so a guess here could
