@@ -449,6 +449,198 @@
       cursor: default;
     }
 
+    /* ── MANGA TILE CONTEXT MENU (long-press / right-click) ── */
+    .popup-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 300;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .popup {
+      background: var(--color-secondary, #1a1a1a);
+      border: 1px solid #333;
+      border-radius: 12px;
+      padding: 20px;
+      width: 320px;
+      max-width: 90vw;
+    }
+    .popup-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      margin-bottom: 14px;
+      color: var(--color-text, #f0f0f0);
+    }
+    .ctx-back-btn {
+      background: none;
+      border: none;
+      color: var(--color-text, #f0f0f0);
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 2px 4px;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .ctx-menu-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .ctx-menu-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ctx-menu-item:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--color-primary, #e94560);
+    }
+    .ctx-menu-item svg { flex-shrink: 0; color: var(--color-primary, #e94560); }
+    .popup input[type="text"] {
+      width: 100%;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      margin-bottom: 10px;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    .popup input[type="text"]:focus { border-color: var(--color-primary, #e94560); }
+    .popup-suggestions {
+      max-height: 160px;
+      overflow-y: auto;
+      margin-bottom: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .suggestion-pill {
+      font-size: 0.72rem;
+      padding: 3px 10px;
+      border-radius: 20px;
+      border: 1px solid #444;
+      color: #aaa;
+      background: transparent;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    .suggestion-pill:hover {
+      border-color: var(--color-primary, #e94560);
+      color: var(--color-primary, #e94560);
+    }
+    .popup-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .popup-btn {
+      border: none;
+      border-radius: 8px;
+      padding: 8px 18px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Segoe UI', sans-serif;
+      transition: filter 0.2s;
+    }
+    .popup-btn.primary {
+      background: var(--color-primary, #e94560);
+      color: #fff;
+    }
+    .popup-btn.primary:hover { filter: brightness(0.85); }
+    .popup-btn.primary:disabled { opacity: 0.35; cursor: not-allowed; filter: none; }
+    .popup-btn.soft {
+      background: rgba(255,255,255,0.07);
+      color: var(--color-text, #f0f0f0);
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    .popup-btn.soft:hover { background: rgba(255,255,255,0.13); }
+    .list-search-input {
+      width: 100%;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 7px;
+      padding: 7px 10px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 0.78rem;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      margin-bottom: 6px;
+      box-sizing: border-box;
+      transition: border-color 0.2s;
+    }
+    .list-search-input:focus { border-color: var(--color-primary, #e94560); }
+    .list-search-input::placeholder { color: rgba(255,255,255,0.25); }
+    .list-options {
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .list-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--color-text, #f0f0f0);
+      transition: background 0.15s;
+      user-select: none;
+    }
+    .list-option:hover { background: rgba(255,255,255,0.07); }
+    .list-option-check {
+      width: 15px;
+      height: 15px;
+      border: 1.5px solid var(--color-primary, #e94560);
+      border-radius: 3px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+    }
+    .list-option-check.checked {
+      background: var(--color-primary, #e94560);
+    }
+    .list-create-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--color-primary, #e94560);
+      transition: background 0.15s;
+      user-select: none;
+      border-top: 1px solid #2a2a2a;
+      margin-top: 4px;
+      padding-top: 10px;
+    }
+    .list-create-option:hover { background: rgba(255,255,255,0.07); }
+
   </style>
 </head>
 <body>
@@ -508,6 +700,7 @@
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga.id)"
+          @contextmenu="openCtxMenu(manga)"
         />
       </div>
   </div>
@@ -525,6 +718,7 @@
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga.id)"
+          @contextmenu="openCtxMenu(manga)"
         />
       </div>
   </div>
@@ -542,6 +736,7 @@
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga.id)"
+          @contextmenu="openCtxMenu(manga)"
         />
       </div>
   </div>
@@ -573,6 +768,7 @@
         :key="manga.id"
         :manga="manga"
         @click="openManga(manga.id)"
+        @contextmenu="openCtxMenu(manga)"
       />
     </div>
 
@@ -598,6 +794,117 @@
       >&#8594;</button>
     </div>
   </div>
+
+  {% raw %}
+  <!-- MANGA TILE CONTEXT MENU (long-press / right-click) -->
+  <div class="popup-overlay" v-if="ctxMenuOpen" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, closeCtxMenu)">
+    <div class="popup">
+      <div class="popup-title">
+        <button v-if="ctxView !== 'menu'" class="ctx-back-btn" @click="ctxView = 'menu'" title="Back">&#8592;</button>
+        <span>{{ ctxManga ? ctxManga.title : '' }}</span>
+      </div>
+
+      <!-- MAIN MENU -->
+      <div v-if="ctxView === 'menu'" class="ctx-menu-list">
+        <button class="ctx-menu-item" @click="ctxToggleFavourite">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2.5l3.09 6.26 6.91 1-5 4.87 1.18 6.87L12 18.27l-6.18 3.25L7 14.65 2 9.78l6.91-1L12 2.5z"/>
+          </svg>
+          {{ ctxManga && ctxManga.is_favourite ? 'Remove from Favourites' : 'Add to Favourites' }}
+        </button>
+        <button class="ctx-menu-item" @click="ctxOpenCollections">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/>
+            <line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+          </svg>
+          Add to Collection
+        </button>
+        <button class="ctx-menu-item" v-if="canEditTags" @click="ctxOpenTag">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20.59 13.41L11 3.83V3H3v8h.83l9.58 9.59a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.83z"/>
+            <circle cx="6.5" cy="6.5" r="1.5"/>
+          </svg>
+          Add Tag
+        </button>
+        <button class="ctx-menu-item" v-if="canEditGenres" @click="ctxOpenGenre">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20.59 13.41L11 3.83V3H3v8h.83l9.58 9.59a2 2 0 0 0 2.83 0l4.35-4.35a2 2 0 0 0 0-2.83z"/>
+            <circle cx="6.5" cy="6.5" r="1.5"/>
+          </svg>
+          Add Genre
+        </button>
+      </div>
+
+      <!-- ADD TO COLLECTION -->
+      <div v-else-if="ctxView === 'collection'">
+        <input
+          class="list-search-input"
+          type="text"
+          v-model="ctxCollectionSearch"
+          placeholder="Search or create collection…"
+          ref="ctxCollectionSearchRef"
+          @keyup.enter="ctxOnCollectionSearchEnter"
+          @input="ctxLiveCollectionSearch = $event.target.value"
+        />
+        <div class="list-options">
+          <template v-if="ctxFilteredCollections.length > 0">
+            <div
+              class="list-option"
+              v-for="c in ctxFilteredCollections"
+              :key="c.id"
+              @click="ctxToggleCollectionMembership(c)"
+            >
+              <div class="list-option-check" :class="{ checked: c.has_manga }">
+                <svg v-if="c.has_manga" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                  <polyline points="20 6 9 17 4 12"/>
+                </svg>
+              </div>
+              {{ c.name }}
+            </div>
+          </template>
+          <div
+            class="list-create-option"
+            v-if="ctxLiveCollectionSearch.trim() && !ctxExactCollectionMatch"
+            @click="ctxCreateAndAddToCollection"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+            Create "{{ ctxLiveCollectionSearch.trim() }}"
+          </div>
+          <div v-if="ctxFilteredCollections.length === 0 && !ctxLiveCollectionSearch.trim()" style="font-size:0.75rem;color:#555;padding:6px 8px;">No collections yet.</div>
+        </div>
+        <div class="popup-actions" style="margin-top:10px;">
+          <button class="popup-btn soft" @click="closeCtxMenu">Close</button>
+        </div>
+      </div>
+
+      <!-- ADD TAG -->
+      <div v-else-if="ctxView === 'tag'">
+        <input type="text" v-model="ctxTagInput" placeholder="Type a tag…" @keyup.enter="ctxSaveTag" ref="ctxTagInputRef"/>
+        <div class="popup-suggestions">
+          <button v-for="s in ctxFilteredTagSuggestions" :key="s" class="suggestion-pill" @click="ctxTagInput = s">{{ s }}</button>
+        </div>
+        <div class="popup-actions">
+          <button class="popup-btn soft" @click="closeCtxMenu">Close</button>
+          <button class="popup-btn primary" @click="ctxSaveTag" :disabled="!ctxTagInput.trim()">Save</button>
+        </div>
+      </div>
+
+      <!-- ADD GENRE -->
+      <div v-else-if="ctxView === 'genre'">
+        <input type="text" v-model="ctxGenreInput" placeholder="Type a genre…" @keyup.enter="ctxSaveGenre" ref="ctxGenreInputRef"/>
+        <div class="popup-suggestions">
+          <button v-for="s in ctxFilteredGenreSuggestions" :key="s" class="suggestion-pill" @click="ctxGenreInput = s">{{ s }}</button>
+        </div>
+        <div class="popup-actions">
+          <button class="popup-btn soft" @click="closeCtxMenu">Close</button>
+          <button class="popup-btn primary" @click="ctxSaveGenre" :disabled="!ctxGenreInput.trim()">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endraw %}
 
 </div>
 

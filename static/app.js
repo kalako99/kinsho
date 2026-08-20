@@ -1,5 +1,17 @@
 const { createApp, defineComponent } = Vue;
 
+// ── LONG-PRESS-TO-CONTEXT-MENU TUNING ──
+// Same hold-to-arm / jitter-to-cancel shape already established for the
+// collection member drag-to-reorder gesture (collection_detail.html) --
+// re-implemented on raw touch events rather than relying on the browser's
+// own long-press-synthesizes-contextmenu behavior, which isn't consistent
+// across WebViews/browsers. A plain scroll past a row and the start of an
+// intended long-press both begin as a touchstart followed by (eventually)
+// movement, so arming immediately on touchstart would make ordinary
+// scrolling indistinguishable from opening the menu.
+const CTX_MENU_HOLD_MS   = 450;
+const CTX_MENU_JITTER_PX = 10;
+
 // ── MANGA THUMBNAIL COMPONENT ──
 // Click-vs-drag distinction for a thumb inside a drag-scrollable .manga-row
 // lives in vDragScroll below (row-level, capture-phase click suppression) --
@@ -8,8 +20,49 @@ const { createApp, defineComponent } = Vue;
 const MangaThumb = defineComponent({
   name: 'MangaThumb',
   props: { manga: { type: Object, required: true } },
+  emits: ['click', 'contextmenu'],
+  methods: {
+    onTouchStart(e) {
+      const t = e.touches[0];
+      this._ctxStartX = t.clientX;
+      this._ctxStartY = t.clientY;
+      this._ctxFired = false;
+      clearTimeout(this._ctxTimer);
+      this._ctxTimer = setTimeout(() => {
+        this._ctxFired = true;
+        this.$emit('contextmenu');
+      }, CTX_MENU_HOLD_MS);
+    },
+    onTouchMove(e) {
+      const t = e.touches[0];
+      const dx = t.clientX - this._ctxStartX;
+      const dy = t.clientY - this._ctxStartY;
+      if (Math.hypot(dx, dy) > CTX_MENU_JITTER_PX) clearTimeout(this._ctxTimer);
+    },
+    onTouchEnd(e) {
+      clearTimeout(this._ctxTimer);
+      if (this._ctxFired) {
+        // Suppresses the emulated click mobile browsers fire after a touch
+        // sequence ends, so a long-press that opened the menu doesn't also
+        // navigate into the manga's own page the way a plain tap would.
+        e.preventDefault();
+        this._ctxFired = false;
+      }
+    },
+    onContextMenu(e) {
+      e.preventDefault();
+      this.$emit('contextmenu');
+    },
+  },
   template: `
-    <div class="manga-thumb" @click="$emit('click')">
+    <div class="manga-thumb"
+      @click="$emit('click')"
+      @contextmenu="onContextMenu"
+      @touchstart="onTouchStart"
+      @touchmove="onTouchMove"
+      @touchend="onTouchEnd"
+      @touchcancel="onTouchEnd"
+    >
       <div class="cover">
         <img v-if="manga.cover" :src="manga.cover" :alt="manga.title">
         <span v-else>No Cover</span>
@@ -252,6 +305,25 @@ const app = createApp({
       isAdmin:             false,
       integrityIssueCount: 0,
 
+      // ── TAG/GENRE EDIT PERMISSION (context menu gating) ──
+      canEditTags:   false,
+      canEditGenres: false,
+
+      // ── MANGA TILE CONTEXT MENU (long-press / right-click) ──
+      // Exists mainly for flat-scan oneshot manga, which skip straight to
+      // the reader and never reach manga_detail.html -- the only page
+      // that otherwise offers favourite/collection/tag/genre actions.
+      ctxMenuOpen:          false,
+      ctxManga:             null,
+      ctxView:              'menu',
+      ctxCollections:       [],
+      ctxCollectionSearch:  '',
+      ctxLiveCollectionSearch: '',
+      ctxTagInput:          '',
+      ctxGenreInput:        '',
+      allTags:              [],
+      allGenres:            [],
+
       // ── ROW DATA ──
       lastRead:    activeState ? activeState.lastRead   : [],
       random:      activeState ? activeState.random     : [],
@@ -289,6 +361,24 @@ const app = createApp({
       const perPageN = roundUpToMultiple(100, this.lastUpdatedColumns);
       if (this.lastUpdatedTotal <= perPage1) return 1;
       return 1 + Math.ceil((this.lastUpdatedTotal - perPage1) / perPageN);
+    },
+
+    // ── CONTEXT MENU: COLLECTION PICKER / TAG-GENRE SUGGESTIONS ──
+    ctxFilteredCollections() {
+      const q = this.ctxLiveCollectionSearch.trim().toLowerCase();
+      return this.ctxCollections.filter(c => !q || c.name.toLowerCase().includes(q));
+    },
+    ctxExactCollectionMatch() {
+      const q = this.ctxLiveCollectionSearch.trim().toLowerCase();
+      return this.ctxCollections.some(c => c.name.toLowerCase() === q);
+    },
+    ctxFilteredTagSuggestions() {
+      const q = this.ctxTagInput.trim().toLowerCase();
+      return this.allTags.filter(t => !q || t.toLowerCase().includes(q)).slice(0, 30);
+    },
+    ctxFilteredGenreSuggestions() {
+      const q = this.ctxGenreInput.trim().toLowerCase();
+      return this.allGenres.filter(g => !q || g.toLowerCase().includes(q)).slice(0, 30);
     },
   },
 
@@ -395,6 +485,12 @@ const app = createApp({
         const meRes  = await fetch(apiUrl('/api/auth/me'));
         const meData = await meRes.json();
         this.isAdmin = meData.ok && meData.role === 'admin';
+        // Also doubles as this page's one fetch of tag/genre permission,
+        // used to gate the manga tile context menu's Add Tag/Add Genre
+        // rows -- same isAdmin-or-permission check manga_detail.html uses.
+        const p = (meData.ok && meData.permissions) || {};
+        this.canEditTags   = this.isAdmin || p.tags   === true;
+        this.canEditGenres = this.isAdmin || p.genres === true;
         if (!this.isAdmin) return;
         const res  = await fetch(apiUrl('/api/admin/integrity/issues'));
         const data = await res.json();
@@ -402,6 +498,167 @@ const app = createApp({
       } catch (e) {
         this.isAdmin = false;
       }
+    },
+
+    // ── MANGA TILE CONTEXT MENU (long-press / right-click) ──
+    // Exists mainly for flat-scan oneshot manga, which redirect straight
+    // into the reader and never reach manga_detail.html -- the only page
+    // that otherwise offers favourite/collection/tag/genre actions. Works
+    // the same for any manga tile though, not just oneshots.
+    openCtxMenu(manga) {
+      this.ctxManga = manga;
+      this.ctxView = 'menu';
+      this.ctxCollections = [];
+      this.ctxCollectionSearch = '';
+      this.ctxLiveCollectionSearch = '';
+      this.ctxTagInput = '';
+      this.ctxGenreInput = '';
+      this.ctxMenuOpen = true;
+    },
+
+    closeCtxMenu() {
+      this.ctxMenuOpen = false;
+      this.ctxManga = null;
+    },
+
+    // Same click-vs-text-selection-drag distinction used by every other
+    // popup-overlay in the app (see manga_detail.html's own copy of this
+    // pair) -- a plain @click.self would also close the popup when a drag
+    // that started on selectable text inside it happens to release past
+    // the popup's border.
+    onOverlayMouseDown(e) {
+      this._ctxOverlayMouseDownSelf = (e.target === e.currentTarget);
+    },
+    onOverlayClick(e, closeFn) {
+      if (e.target === e.currentTarget && this._ctxOverlayMouseDownSelf) closeFn();
+    },
+
+    async ctxToggleFavourite() {
+      if (!this.ctxManga) return;
+      try {
+        await fetch(apiUrl(`/api/manga/${this.activeTab}/${this.ctxManga.id}/favourite`), { method: 'POST' });
+      } catch (e) { /* best-effort */ }
+      this.closeCtxMenu();
+      this.loadMangas(this.activeTab);
+    },
+
+    async ctxOpenCollections() {
+      this.ctxView = 'collection';
+      this.$nextTick(() => { if (this.$refs.ctxCollectionSearchRef) this.$refs.ctxCollectionSearchRef.focus(); });
+      if (!this.ctxManga) { this.ctxCollections = []; return; }
+      try {
+        const res = await fetch(apiUrl('/api/collections'));
+        const data = await res.json();
+        const editable = (data.collections || []).filter(c => c.can_edit);
+        const details = await Promise.all(
+          editable.map(c => fetch(apiUrl(`/api/collections/${c.id}`)).then(r => r.json()))
+        );
+        this.ctxCollections = editable.map((c, i) => ({
+          id:        c.id,
+          name:      c.name,
+          has_manga: (details[i].members || []).some(
+            m => m.library_id === this.activeTab && m.manga_id === this.ctxManga.id
+          ),
+        }));
+      } catch (e) { this.ctxCollections = []; }
+    },
+
+    async _ctxAddToCollection(collectionId) {
+      await fetch(apiUrl(`/api/collections/${collectionId}/members/add`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_id: this.activeTab, manga_id: this.ctxManga.id, manga_name: this.ctxManga.title }),
+      });
+    },
+
+    async _ctxRemoveFromCollection(collectionId) {
+      await fetch(apiUrl(`/api/collections/${collectionId}/members/remove`), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ library_id: this.activeTab, manga_id: this.ctxManga.id }),
+      });
+    },
+
+    // Same one-collection-at-a-time behavior as manga_detail.html's own
+    // toggleCollectionMembership: picking a different collection moves the
+    // manga (removes from the current, adds to the new); picking the one
+    // it's already in removes it (back to unassigned).
+    async ctxToggleCollectionMembership(c) {
+      const current = this.ctxCollections.find(x => x.has_manga);
+      if (current && current.id === c.id) {
+        await this._ctxRemoveFromCollection(c.id);
+      } else {
+        if (current) await this._ctxRemoveFromCollection(current.id);
+        await this._ctxAddToCollection(c.id);
+      }
+      await this.ctxOpenCollections();
+      this.loadCollectionMembership();
+    },
+
+    async ctxCreateAndAddToCollection() {
+      const name = this.ctxCollectionSearch.trim();
+      if (!name || !this.ctxManga) return;
+      const current = this.ctxCollections.find(x => x.has_manga);
+      if (current) await this._ctxRemoveFromCollection(current.id);
+      const res  = await fetch(apiUrl('/api/collections'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+      const data = await res.json();
+      if (data.ok) await this._ctxAddToCollection(data.id);
+      this.ctxCollectionSearch = '';
+      this.ctxLiveCollectionSearch = '';
+      await this.ctxOpenCollections();
+      this.loadCollectionMembership();
+    },
+
+    ctxOnCollectionSearchEnter() {
+      if (this.ctxCollectionSearch.trim() && !this.ctxExactCollectionMatch) {
+        this.ctxCreateAndAddToCollection();
+      } else if (this.ctxFilteredCollections.length === 1) {
+        this.ctxToggleCollectionMembership(this.ctxFilteredCollections[0]);
+      }
+    },
+
+    async ctxOpenTag() {
+      this.ctxView = 'tag';
+      this.$nextTick(() => { if (this.$refs.ctxTagInputRef) this.$refs.ctxTagInputRef.focus(); });
+      if (this.allTags.length) return;
+      try {
+        const res = await fetch(apiUrl('/api/tags'));
+        const data = await res.json();
+        this.allTags = data.tags || [];
+      } catch (e) { this.allTags = []; }
+    },
+
+    async ctxSaveTag() {
+      const tag = this.ctxTagInput.trim();
+      if (!tag || !this.ctxManga) return;
+      try {
+        await fetch(apiUrl(`/api/manga/${this.activeTab}/${this.ctxManga.id}/tags/add`), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tag }),
+        });
+      } catch (e) { /* best-effort */ }
+      this.closeCtxMenu();
+    },
+
+    async ctxOpenGenre() {
+      this.ctxView = 'genre';
+      this.$nextTick(() => { if (this.$refs.ctxGenreInputRef) this.$refs.ctxGenreInputRef.focus(); });
+      if (this.allGenres.length) return;
+      try {
+        const res = await fetch(apiUrl('/api/genres'));
+        const data = await res.json();
+        this.allGenres = data.genres || [];
+      } catch (e) { this.allGenres = []; }
+    },
+
+    async ctxSaveGenre() {
+      const genre = this.ctxGenreInput.trim();
+      if (!genre || !this.ctxManga) return;
+      try {
+        await fetch(apiUrl(`/api/manga/${this.activeTab}/${this.ctxManga.id}/genres/add`), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ genre }),
+        });
+      } catch (e) { /* best-effort */ }
+      this.closeCtxMenu();
     },
 
     // Compares the active tab's library against its own last_scanned
@@ -586,6 +843,7 @@ const app = createApp({
             chapters:    m.chapters,
             is_complete: m.is_complete || false,
             is_case2:    m.manga_type === 'case2',
+            is_favourite: favouriteIds.has(m.id),
             progress,
           };
         });
