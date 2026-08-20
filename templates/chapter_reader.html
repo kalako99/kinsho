@@ -76,6 +76,9 @@
       transition: background 0.2s;
     }
     .topbar-iconbtn:hover { background: rgba(255,255,255,0.1); }
+    .topbar-iconbtn:disabled { cursor: default; opacity: 0.6; }
+    .topbar-iconbtn.spinning svg { animation: kinsho-refresh-spin 0.7s linear infinite; }
+    @keyframes kinsho-refresh-spin { to { transform: rotate(360deg); } }
 
     .scroller-dot {
       position: absolute;
@@ -1237,6 +1240,13 @@
     </svg>
   </button>
   <span class="topbar-title" id="topbarTitle">Loading…</span>
+  <button type="button" class="topbar-iconbtn" id="refreshBtn" aria-label="Refresh pages" title="Refresh pages">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="23 4 23 10 17 10"/>
+      <polyline points="1 20 1 14 7 14"/>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  </button>
   <!-- Android app only; hidden by default, shown via JS feature-detection
        on window.KinshoBLE (see kinsho-android/CLAUDE.md) -->
   <button type="button" class="topbar-iconbtn" id="scrollerBtn" style="display:none" aria-label="Scroller device" title="Scroller device">
@@ -4653,6 +4663,122 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (entry) setVirtualY(entry.globalY);
     else setVirtualY(virtualY);
   }
+
+  // ── TOPBAR REFRESH BUTTON ──
+  // Re-fetches this manga's dims.json and re-derives every currently
+  // materialized page's URL from it, without navigating away or resetting
+  // the reading position -- the in-reader equivalent of a browser hard
+  // refresh, for when a chapter/volume gets edited or replaced on disk
+  // while this tab is already open (the dims fetched at page load are
+  // otherwise never refreshed for the lifetime of the tab). Page image
+  // URLs already carry a ?v= tag derived from the chapter/volume's own
+  // mtime (see ensureChapterUrls) so a genuinely-changed chapter gets new
+  // URLs automatically here -- this button exists for the case that fix
+  // alone can't cover: this SPECIFIC tab's own in-memory dims/manifest,
+  // captured once at page load, has no way to notice a change made after
+  // that without either a real navigation or this.
+  const refreshBtn = document.getElementById('refreshBtn');
+  let refreshInFlight = false;
+
+  async function refreshLoadedPages() {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    refreshBtn.disabled = true;
+    refreshBtn.classList.add('spinning');
+    try {
+      const fresh = await apiFetch(`/api/manga/${libraryId}/${mangaId}/dims`);
+      // dims is `const` (destructured at boot) -- every closure in this
+      // file already holds THIS object by reference, so replacing its
+      // contents in place is what makes the fresh data visible everywhere
+      // that reads dims.chapters/dims.volumes, without threading a new
+      // variable through the whole file.
+      Object.keys(dims).forEach(k => delete dims[k]);
+      Object.assign(dims, fresh);
+
+      // Every previously-resolved page URL, and the per-chapter URL-list
+      // cache behind it, may now be stale (pointing at a ?v= tag that no
+      // longer matches what's on disk) -- clear both so everything
+      // re-derives from the dims just fetched. buildManifest() below
+      // creates entirely new manifest entry objects anyway (url: null,
+      // loaded: false by construction), so this mainly matters for
+      // ensureChapterUrls' own per-chapter cache, not the entries.
+      for (const key in urlCache) delete urlCache[key];
+
+      if (readerSettings.mode === 'single-page') {
+        // Anchor on (chapterId, localIdx) rather than a raw spManifest
+        // index -- survives the chapter's own page COUNT changing (a
+        // resliced chapter can gain or lose pages), unlike an index,
+        // which would silently land on a different logical page if the
+        // count shifted at all.
+        const curEntry     = spManifest[spCurrentIdx];
+        const anchorChapId = curEntry ? curEntry.chapterId : chapterId;
+        const anchorLocal  = curEntry ? curEntry.localIdx  : 0;
+
+        buildManifest(readerSettings.padding, viewW);
+        // spManifest is a `const` array (this chapter's slice of
+        // manifest, filtered once at boot) -- buildManifest() above just
+        // replaced manifest's CONTENTS with brand new entry objects, so
+        // this needs re-deriving in place (same reasoning as dims above).
+        spManifest.length = 0;
+        spManifest.push(...manifest.filter(e => e.chapterId === chapterId));
+
+        let newIdx = spManifest.findIndex(e => e.chapterId === anchorChapId && e.localIdx === anchorLocal);
+        if (newIdx === -1) newIdx = Math.min(Math.max(0, anchorLocal), spManifest.length - 1);
+        spCurrentIdx = Math.max(0, newIdx);
+
+        // Deliberately NOT spGotoIdx() -- its big-jump-vs-shift decision
+        // can choose the cheap incremental _spShiftWindow path when the
+        // target is numerically close to the stale spWindowLo/spWindowHi,
+        // which only moves slots at the window's edges and would leave
+        // the rest showing whatever image was already painted into their
+        // (still-attached) <img> elements from before this refresh --
+        // exactly the staleness this button exists to fix. A full
+        // _spRebuildWindow tears down and reloads every slot in the
+        // window unconditionally, which is what an explicit refresh
+        // actually needs.
+        if (spManifest.length > 0) {
+          const targetR   = rOf(spCurrentIdx);
+          const spCount   = Math.min(SP_SLOT_COUNT, spManifest.length);
+          const newWinLo  = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spManifest.length - spCount));
+          _spRebuildWindow(newWinLo, targetR);
+        }
+      } else {
+        // Same (chapterId, localIdx) anchoring as above, plus the exact
+        // pixel offset already scrolled into that page -- restores not
+        // just "the same page" but the same precise scroll position.
+        let anchorEntry = manifest[0];
+        for (const entry of manifest) {
+          if (entry.globalY <= virtualY) anchorEntry = entry;
+          else break;
+        }
+        const anchorChapId = anchorEntry ? anchorEntry.chapterId : chapterId;
+        const anchorLocal  = anchorEntry ? anchorEntry.localIdx  : 0;
+        const offsetIntoPage = anchorEntry ? (virtualY - anchorEntry.globalY) : 0;
+
+        buildManifest(readerSettings.padding, viewW);
+        applyPageGapVar(readerSettings.padding);
+
+        let newAnchor = manifest.find(e => e.chapterId === anchorChapId && e.localIdx === anchorLocal);
+        if (!newAnchor) {
+          const chEntries = manifest.filter(e => e.chapterId === anchorChapId);
+          newAnchor = chEntries[chEntries.length - 1] || manifest[0];
+        }
+        const newTargetY = newAnchor ? newAnchor.globalY + Math.min(offsetIntoPage, newAnchor.scaledH) : 0;
+        // setVirtualY always does a full _rebuildConveyorWindow (no
+        // shift-only path, unlike spGotoIdx above), so every slot in the
+        // window genuinely reloads.
+        setVirtualY(newTargetY);
+      }
+    } catch (e) {
+      // best-effort -- leave whatever was already showing
+    } finally {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove('spinning');
+      refreshInFlight = false;
+    }
+  }
+
+  refreshBtn.addEventListener('click', refreshLoadedPages);
 
   // ── APPLY INITIAL SETTINGS ──
   syncSettingsUI();
