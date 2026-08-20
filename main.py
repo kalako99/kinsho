@@ -1901,6 +1901,49 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     # We track which paths have already been registered to avoid double-registration.
     _loose_registered: set = set()
 
+    def _flat_scan_cover_fallback(manga_path: str, manga_name: str, manga_type: str,
+                                   classification: dict, dims: dict):
+        """Flat-scan libraries have no dedicated per-manga cover convention
+        (a case1/case2 folder here is just chapter/volume subfolders, no
+        loose cover file sitting alongside them) -- process_manga_covers
+        leaves "cover" at None for these. Falls back to the first page of
+        the first chapter/volume, same "first image" convention oneshots
+        and case2 volume covers already use. Reads only from `dims`
+        (never rescans anything itself), so it's safe to call from the
+        unchanged-skip fast path below as well as a real rescan -- a manga
+        scanned before this fallback existed (or before flat_scan was
+        toggled on) would otherwise carry a stale cover: None forever,
+        since nothing on disk changes just because the app gained new
+        fallback logic.
+        """
+        if not classification["content_subfolders"]:
+            return
+        first_dirname = classification["content_subfolders"][0]
+        if manga_type == "case1":
+            first_item = dims.get("chapters", {}).get(make_id(manga_name + ":" + first_dirname))
+            first_fname = (first_item or {}).get("filenames") or [None]
+            first_fname = first_fname[0]
+            if not (first_item and first_fname):
+                return
+            try:
+                with open(os.path.join(first_item["path"], first_fname), "rb") as cf:
+                    cover_bytes = cf.read()
+                result_fname, new_cover_mtimes = process_cover_from_bytes(
+                    cover_bytes, first_dirname + "_" + first_fname,
+                    library_id, manga_name,
+                    mangas[manga_path].get("cover_mtimes", {}), first_item["mtime"]
+                )
+                if result_fname:
+                    mangas[manga_path]["cover"] = result_fname
+                    mangas[manga_path].setdefault("cover_mtimes", {}).update(new_cover_mtimes)
+            except Exception as e:
+                print(f"[ScanLib] Flat-scan chapter cover fallback failed: {e}")
+        else:
+            first_item = dims.get("volumes", {}).get(make_id(manga_name + ":vol:" + first_dirname))
+            first_cover = (first_item or {}).get("cover_image")
+            if first_cover:
+                mangas[manga_path]["cover"] = first_cover
+
     def _register_loose_manga(manga_path: str, classification: dict):
         if manga_path in mangas or manga_path in _loose_registered:
             return
@@ -1952,6 +1995,15 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             if existing.get("path") and existing["path"] != manga_path:
                 relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
             mangas[manga_path] = {**existing, "path": manga_path}
+            # A manga sitting on a stale cover: None (scanned before this
+            # fallback existed, or before flat_scan was toggled on) would
+            # otherwise never get revisited -- this whole branch exists
+            # specifically because nothing on disk changed.
+            if library.get("flat_scan") and mangas[manga_path].get("cover") is None:
+                _flat_scan_cover_fallback(
+                    manga_path, manga_name, manga_type, classification,
+                    _safe_load_manga_dims(library_id, manga_name)
+                )
         else:
             print(f"[ScanLib] Rescanning loose ({manga_type}): {manga_name}")
             default_cover, new_cover_mtimes = process_manga_covers(
@@ -2029,32 +2081,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 print(f"[ScanLib] Removing chapter no longer on disk: {stale_name}")
                 del dims["chapters"][stale_id]
 
-            # Flat-scan libraries have no dedicated per-manga cover
-            # convention (a case1 folder here is just chapter subfolders,
-            # no loose cover file sitting alongside them) -- process_manga_covers
-            # above found nothing and left "cover" at None. Fall back to the
-            # first page of the first chapter, same "first image" convention
-            # oneshots and case2 volumes already use for their own covers.
-            if (library.get("flat_scan") and mangas[manga_path].get("cover") is None
-                    and classification["content_subfolders"]):
-                first_chapter_dirname = classification["content_subfolders"][0]
-                first_chapter = dims["chapters"].get(make_id(manga_name + ":" + first_chapter_dirname))
-                first_fname = (first_chapter or {}).get("filenames") or [None]
-                first_fname = first_fname[0]
-                if first_chapter and first_fname:
-                    try:
-                        with open(os.path.join(first_chapter["path"], first_fname), "rb") as cf:
-                            cover_bytes = cf.read()
-                        result_fname, new_cover_mtimes = process_cover_from_bytes(
-                            cover_bytes, first_chapter_dirname + "_" + first_fname,
-                            library_id, manga_name,
-                            mangas[manga_path].get("cover_mtimes", {}), first_chapter["mtime"]
-                        )
-                        if result_fname:
-                            mangas[manga_path]["cover"] = result_fname
-                            mangas[manga_path].setdefault("cover_mtimes", {}).update(new_cover_mtimes)
-                    except Exception as e:
-                        print(f"[ScanLib] Flat-scan chapter cover fallback failed: {e}")
+            if library.get("flat_scan") and mangas[manga_path].get("cover") is None:
+                _flat_scan_cover_fallback(manga_path, manga_name, manga_type, classification, dims)
 
         else:
             # manga_type == "case2": content subfolders are volumes
@@ -2116,17 +2144,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     "filenames":   files,
                 }
 
-            # Same flat-scan cover fallback as the case1 branch above, just
-            # reusing the first volume's own cover_image (already generated
-            # by the "use first image as cover" step in the loop above)
-            # instead of re-reading/re-processing anything.
-            if (library.get("flat_scan") and mangas[manga_path].get("cover") is None
-                    and classification["content_subfolders"]):
-                first_vol_dirname = classification["content_subfolders"][0]
-                first_vol = dims["volumes"].get(make_id(manga_name + ":vol:" + first_vol_dirname))
-                first_vol_cover = (first_vol or {}).get("cover_image")
-                if first_vol_cover:
-                    mangas[manga_path]["cover"] = first_vol_cover
+            if library.get("flat_scan") and mangas[manga_path].get("cover") is None:
+                _flat_scan_cover_fallback(manga_path, manga_name, manga_type, classification, dims)
 
             # Prune volumes whose backing subfolder is no longer present
             # under this name -- same reasoning as the case1 chapter prune
