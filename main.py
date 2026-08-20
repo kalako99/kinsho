@@ -3538,28 +3538,34 @@ def scan_status(library_id: int):
 
 @app.get("/api/scan/activity")
 def scan_activity(request: Request):
-    """Whether ANY library is currently being scanned, for the "is it safe to
-    update/restart the container right now" question -- checked proactively
-    by Settings on load, not just after the current session's own Reload
-    click (an auto-rescan or another admin's manual scan wouldn't otherwise
-    show up at all until this page happened to poll a specific library it
-    already knew was running)."""
-    err = auth.require_admin(request)
-    if err:
-        return err
+    """Whether any library the CALLER can access is currently being
+    scanned, with progress. For an admin this is the "is it safe to
+    update/restart the container right now" question, checked
+    proactively by Settings on load rather than only after the current
+    session's own Reload click (an auto-rescan or another admin's manual
+    scan wouldn't otherwise show up until this page happened to poll a
+    specific library it already knew was running). Regular users get the
+    same progress bar too -- just filtered to libraries they can actually
+    access, same as every other endpoint (a denied library shouldn't leak
+    its name/existence through here either)."""
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
     if not _scan_running:
         return JSONResponse({"scanning": False, "libraries": []})
     data = load_app_data()
     lib_names = {lib["id"]: lib.get("name", f"Library {lib['id']}") for lib in data.get("libraries", [])}
     active = []
     for library_id in sorted(_scan_running):
+        if not auth.can_access_library(username, library_id):
+            continue
         progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
         active.append({
             "library_id":   library_id,
             "library_name": lib_names.get(library_id, f"Library {library_id}"),
             **progress,
         })
-    return JSONResponse({"scanning": True, "libraries": active})
+    return JSONResponse({"scanning": bool(active), "libraries": active})
 
 def _round_up_to_multiple(n: int, multiple: Optional[int]) -> int:
     """Rounds n UP to the next multiple of `multiple` (never down -- for

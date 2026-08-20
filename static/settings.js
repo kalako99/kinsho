@@ -486,11 +486,17 @@ createApp({
         await this.loadUserPermissions();
         await this.loadAdminStats();
         await this.loadIntegrityIssues();
+      }
+      if (this.isLoggedIn) {
+        // Not admin-gated -- regular users get the same progress bar, just
+        // filtered server-side to libraries they can access (see
+        // /api/scan/activity). Kept live for the whole page visit (not
+        // just while the Libraries section is open) so anyone who checks
+        // Settings for any reason still sees an in-progress scan -- for an
+        // admin this answers "is it safe to update/restart the container
+        // right now"; for a regular user it's just visibility into why
+        // content might be temporarily incomplete.
         await this.loadScanActivity();
-        // Kept live for the whole page visit (not just while the Libraries
-        // section is open) so an admin who checks Settings for any reason
-        // still sees an in-progress scan -- this is specifically to answer
-        // "is it safe to update/restart the container right now".
         setInterval(() => this.loadScanActivity(), 4000);
       }
       await this.loadAnalytics();
