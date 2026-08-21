@@ -1697,9 +1697,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // read of one dense page (no scrolling needed for a while) doesn't itself
   // look idle -- only a genuine pause (locked screen, walked away) does.
 
+  // Anchor for how long it's been since a minute was actually credited --
+  // starts at session mount, not just at the first successful tick, so a
+  // visit that ends before ever reaching 60s has a real elapsed-time figure
+  // to be measured against rather than defaulting to "uncredited = 0 = always
+  // looks overdue." MIN_CREDIT_INTERVAL_MS gates BOTH of the exit-time partial-
+  // minute credits below on this anchor: it stops a brief open-and-close from
+  // rounding up to a full minute it didn't earn, and -- because visibilitychange
+  // -> 'hidden' and beforeunload fire back-to-back on an ordinary tab close --
+  // it doubles as the de-dupe between them, since the second call's elapsed-
+  // since-last-credit is ~0ms and can never clear the bar the first call just
+  // reset. (Previously each exit handler had its own independent "am I idle"
+  // check with no shared anchor, so both could -- and did -- fire a full
+  // minute each for the exact same few seconds of real time.)
+  const MIN_CREDIT_INTERVAL_MS = 60000;
+  let _lastCreditedTs = Date.now();
+
   let _tickSent = false;
   const _tickInterval = setInterval(() => {
     if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // paused -- don't count this minute
+    _lastCreditedTs = Date.now();
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
   }, 60000);
 
@@ -1711,12 +1728,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // fetch behaves like a normal authenticated request but is guaranteed to
   // survive the page unloading -- same fix already used for
   // saveReadingProgress()'s own true-last-chapter completion save.
+  //
+  // Shared by both exit paths below -- only credits a trailing partial
+  // minute if there was real recent activity AND at least MIN_CREDIT_INTERVAL_MS
+  // has actually elapsed since the last credited tick (session start counts
+  // as the first anchor).
+  function _creditPartialMinute() {
+    const now = Date.now();
+    if (now - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle when leaving -- nothing to credit
+    if (now - _lastCreditedTs < MIN_CREDIT_INTERVAL_MS) return; // hasn't been open long enough to earn a minute yet
+    _lastCreditedTs = now;
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
+  }
   function _sendFinalTick() {
     if (_tickSent) return;
     _tickSent = true;
     clearInterval(_tickInterval);
-    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle when leaving -- nothing to credit
-    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
+    _creditPartialMinute();
   }
   // A courtesy tick for merely being BACKGROUNDED (screen lock, switching
   // apps briefly), as opposed to _sendFinalTick's "actually leaving for
@@ -1735,8 +1763,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // which would otherwise lose up to a minute of genuine reading credited
   // to nothing.
   function _sendHiddenTick() {
-    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle -- nothing to credit
-    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
+    _creditPartialMinute();
   }
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') _sendHiddenTick();
