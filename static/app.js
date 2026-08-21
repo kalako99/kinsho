@@ -542,6 +542,19 @@ const app = createApp({
       this.loadMangas(this.activeTab);
     },
 
+    // Oneshots' own tile click always lands on page 1 (manga_detail()'s
+    // oneshot redirect carries no ?page=, matching a plain click's "start
+    // reading" behavior on any other manga) -- this is the only way to
+    // reach that same last_chapter_id/last_page position without clicking
+    // through into the reader and paging back manually. Only ever shown for
+    // an already-read oneshot (see the v-if in manga_list.html).
+    ctxContinueReading() {
+      if (!this.ctxManga || !this.ctxManga.last_chapter_id) return;
+      const url = `/manga/${this.activeTab}/${this.ctxManga.id}/chapter/${this.ctxManga.last_chapter_id}?page=${this.ctxManga.last_page}`;
+      this.closeCtxMenu();
+      window.location.href = url;
+    },
+
     async ctxOpenCollections() {
       this.ctxView = 'collection';
       this.$nextTick(() => { if (this.$refs.ctxCollectionSearchRef) this.$refs.ctxCollectionSearchRef.focus(); });
@@ -843,6 +856,13 @@ const app = createApp({
             chapters:    m.chapters,
             is_complete: m.is_complete || false,
             is_case2:    m.manga_type === 'case2',
+            // Flat-scan oneshots (see the context menu's own comment below)
+            // skip manga_detail.html entirely, so this and last_chapter_id/
+            // last_page are what let the tile's context menu offer a real
+            // "Continue Reading" resume instead of always restarting at page 1.
+            is_oneshot:      m.manga_type === 'oneshot',
+            last_chapter_id: h ? h.last_chapter_id : null,
+            last_page:       h ? h.last_page : 0,
             is_favourite: favouriteIds.has(m.id),
             progress,
           };
@@ -1035,6 +1055,9 @@ const app = createApp({
             cover:       m.cover_url,
             chapters:    m.chapters,
             is_complete: m.is_complete || false,
+            is_oneshot:      m.manga_type === 'oneshot',
+            last_chapter_id: h ? h.last_chapter_id : null,
+            last_page:       h ? h.last_page : 0,
             progress,
           };
         });
