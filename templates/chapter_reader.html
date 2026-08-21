@@ -4522,6 +4522,34 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }, delay);
   }
 
+  // Native `scrollTo({behavior:'smooth'})` has no way to control its own
+  // duration -- the browser picks it, and on this app's Android WebView
+  // specifically it read as noticeably sluggish per-flip (WebView's own
+  // rendering pipeline is already documented elsewhere in this file as
+  // meaningfully heavier than a standalone browser's). Replaced with a
+  // rAF-driven animation over an explicit, tunable duration (~4x shorter
+  // than native smooth-scroll's own typical duration) instead, so flip
+  // speed is a constant rather than whatever the browser happens to choose.
+  // Retargeting mid-animation (holding the arrow key) reads the strip's
+  // CURRENT scrollLeft as the new start, same "always animate from wherever
+  // it actually is" behavior the native version had.
+  const SP_FLIP_DURATION_MS = 110;
+  const _spEaseOutCubic = t => 1 - Math.pow(1 - t, 3);
+  let _spFlipAnimId = null;
+  function _spAnimateScrollTo(targetLeft) {
+    if (_spFlipAnimId !== null) cancelAnimationFrame(_spFlipAnimId);
+    const startLeft = spStrip.scrollLeft;
+    const delta     = targetLeft - startLeft;
+    if (delta === 0) { _spFlipAnimId = null; return; }
+    const startTime = performance.now();
+    function step(now) {
+      const t = Math.min(1, (now - startTime) / SP_FLIP_DURATION_MS);
+      spStrip.scrollLeft = startLeft + delta * _spEaseOutCubic(t);
+      _spFlipAnimId = t < 1 ? requestAnimationFrame(step) : null;
+    }
+    _spFlipAnimId = requestAnimationFrame(step);
+  }
+
   function spGotoIdx(idx) {
     if (idx < 0) {
       if (currentChapIdx > 0) {
@@ -4575,7 +4603,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (targetR < spWindowLo || targetR > spWindowHi) {
         _spShiftWindow(targetR - Math.floor((spWindowLo + spWindowHi) / 2));
       }
-      spStrip.scrollTo({ left: targetR * viewW, behavior: 'smooth' });
+      _spAnimateScrollTo(targetR * viewW);
     }
     _spLoadEntry(entry);
 
