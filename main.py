@@ -4617,6 +4617,233 @@ async def save_description(library_id: int, manga_id: str, request: Request):
     save_manga_dims(library_id, manga["name"], dims)
     return JSONResponse({"ok": True})
 
+_INVALID_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+def _rename_manga_source(old_path: str, new_name: str) -> str:
+    """
+    Rename the manga's actual file/folder on disk to new_name. A case1 manga
+    (single archive IS the manga, see classify_archive) is a FILE -- its own
+    extension is preserved, only the stem changes. Every other case (case2/
+    case3/loose/oneshot) is a FOLDER. Returns the new path.
+    """
+    parent = os.path.dirname(old_path)
+    if os.path.isfile(old_path):
+        ext = os.path.splitext(old_path)[1]
+        new_path = os.path.join(parent, new_name + ext)
+    else:
+        new_path = os.path.join(parent, new_name)
+    if os.path.exists(new_path):
+        raise ValueError(f'A file or folder named "{new_name}" already exists there')
+    os.rename(old_path, new_path)
+    return new_path
+
+def _remap_manga_identity_across_users(library_id: int, old_manga_id: str, new_manga_id: str,
+                                        old_name: str, new_name: str, id_map: dict) -> None:
+    """
+    manga_id AND every chapter/volume id are derived from the manga's own
+    name (see make_id()) and get recomputed fresh on every scan -- so
+    renaming a manga (which a rescan is required to do correctly, see
+    rename_manga_endpoint) hands back a completely different id for the
+    manga itself and for every one of its chapters/volumes. Without this
+    remap, a rename would silently orphan every user's reading history/
+    favourites/bookmarks/reading-time for this exact manga -- indistin-
+    guishable from having read nothing, the same class of bug the reading-
+    time-on-delete question this feature shipped alongside was about.
+    id_map is {old_chapter_or_volume_id: new_chapter_or_volume_id}.
+    """
+    lib_key = str(library_id)
+
+    def _remap_chapter_map(chapters: dict) -> dict:
+        return {id_map.get(cid, cid): v for cid, v in chapters.items()}
+
+    for user in auth._load_users().get("users", []):
+        username = user["username"]
+        udata = auth.load_user_data(username)
+        changed = False
+
+        for fav in udata.get("favourites", []):
+            if fav.get("library_id") == library_id and fav.get("manga_id") == old_manga_id:
+                fav["manga_id"] = new_manga_id
+                changed = True
+
+        lib_history = udata.get("reading_history", {}).get(lib_key, {})
+        if old_manga_id in lib_history:
+            entry = lib_history.pop(old_manga_id)
+            for field in ("last_chapter_id", "last_volume_id", "furthest_chapter", "furthest_volume"):
+                if entry.get(field) in id_map:
+                    entry[field] = id_map[entry[field]]
+            entry["chapters"] = _remap_chapter_map(entry.get("chapters", {}))
+            entry["manga_name"] = new_name
+            lib_history[new_manga_id] = entry
+            changed = True
+
+        lib_covers = udata.get("covers", {}).get(lib_key, {})
+        if old_manga_id in lib_covers:
+            lib_covers[new_manga_id] = lib_covers.pop(old_manga_id)
+            changed = True
+
+        bm_key_old = f"{library_id}:{old_manga_id}"
+        bookmarks = udata.get("bookmarks", {})
+        if bm_key_old in bookmarks:
+            bm_list = bookmarks.pop(bm_key_old)
+            for bm in bm_list:
+                for side in ("start", "end"):
+                    pos = bm.get(side)
+                    if pos and pos.get("chapterId") in id_map:
+                        pos["chapterId"] = id_map[pos["chapterId"]]
+            bookmarks[f"{library_id}:{new_manga_id}"] = bm_list
+            changed = True
+
+        for s in udata.get("reading_sessions", []):
+            if s.get("library_id") == library_id and s.get("manga_name") == old_name:
+                s["manga_name"] = new_name
+                changed = True
+
+        for coll in udata.get("collections", {}).values():
+            coll_changed = False
+            for m in coll.get("members", []):
+                if m.get("library_id") == library_id and m.get("manga_id") == old_manga_id:
+                    m["manga_id"] = new_manga_id
+                    m["manga_name"] = new_name
+                    coll_changed = True
+            if coll_changed:
+                _sync_collection_derived_fields(coll)
+                changed = True
+
+        if changed:
+            auth.save_user_data(username, udata)
+
+    shared = load_shared_collections()
+    shared_changed = False
+    for coll in shared.values():
+        coll_changed = False
+        for m in coll.get("members", []):
+            if m.get("library_id") == library_id and m.get("manga_id") == old_manga_id:
+                m["manga_id"] = new_manga_id
+                m["manga_name"] = new_name
+                coll_changed = True
+        if coll_changed:
+            _sync_collection_derived_fields(coll)
+            shared_changed = True
+    if shared_changed:
+        save_shared_collections(shared)
+
+@app.post("/api/manga/{library_id}/{manga_id}/rename")
+async def rename_manga_endpoint(request: Request, library_id: int, manga_id: str):
+    """
+    Rename a manga AND its backing file/folder on disk (the name is taken
+    from that folder's own basename at scan time, see _register_loose_manga/
+    the case1/case2/case3 PASS 2 loop -- editing just the display name
+    without touching the folder would just get silently overwritten by the
+    next scan). Admin-only: unlike tags/genres/description this touches the
+    real filesystem and, via the rescan below, every user's reading history
+    for this manga -- not something to delegate to a permission flag.
+    """
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    if not auth.resolve_permissions(username).get("is_admin"):
+        return JSONResponse({"ok": False, "error": "Admin access required"}, status_code=403)
+
+    body = await request.json()
+    new_name = (body.get("new_name") or "").strip()
+    if not new_name:
+        return JSONResponse({"ok": False, "error": "New name cannot be empty"}, status_code=400)
+    if _INVALID_NAME_CHARS.search(new_name) or new_name in (".", ".."):
+        return JSONResponse({"ok": False, "error": 'Name contains characters not allowed in a file/folder name (\\ / : * ? " < > |)'}, status_code=400)
+
+    data = load_app_data()
+    libraries = data.get("libraries", [])
+    lib = next((l for l in libraries if l["id"] == library_id), None)
+    if not lib:
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    manga_data = data.get("manga_data", {}).get(str(library_id), {})
+    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
+    if not manga:
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    dims_before = load_manga_dims(library_id, manga["name"])
+    if auth.is_manga_blocked(username, dims_before.get("tags", [])):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+
+    old_name = manga["name"]
+    old_path = manga.get("path", "")
+    if new_name == old_name:
+        return JSONResponse({"ok": False, "error": "That's already the current name"}, status_code=400)
+    if not old_path or not os.path.exists(old_path):
+        return JSONResponse({"ok": False, "error": "Source file/folder not found on disk"}, status_code=404)
+
+    old_manga_id = manga["id"]
+
+    # 1. Rename the actual source file/folder.
+    try:
+        _rename_manga_source(old_path, new_name)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    # 2. Rename the covers/dims folder to match -- carries dims.json (tags/
+    #    genres/description/page-dims data) to the new location for free,
+    #    since load_manga_dims/save_manga_dims key off manga NAME as a path
+    #    segment, not off the (about to change) manga id.
+    covers_dir = get_covers_dir()
+    old_covers_path = os.path.join(covers_dir, str(library_id), old_name) if covers_dir else None
+    new_covers_path = os.path.join(covers_dir, str(library_id), new_name) if covers_dir else None
+    if old_covers_path and os.path.exists(old_covers_path):
+        if new_covers_path and os.path.exists(new_covers_path):
+            return JSONResponse({"ok": False, "error": "A covers folder for that name already exists -- rename aborted after the source rename; please check the library manually"}, status_code=409)
+        os.rename(old_covers_path, new_covers_path)
+
+    # Snapshot the OLD chapter/volume identity (ordered, with display names)
+    # before rescanning, so the fresh ids the rescan produces can be matched
+    # back to what they used to be.
+    old_items = checkable_items_for_manga(dims_before)
+    for it in old_items:
+        _invalidate_stale_source_caches(it["source_path"])
+
+    # 3. Rescan the whole library synchronously -- the only authoritative way
+    #    to (re)compute manga_id/chapter_ids/volume_ids for the new name,
+    #    exactly as scan_library's own per-case-type logic would (hand-
+    #    deriving the same hash inputs here would be guessing at four
+    #    different case-type conventions and risks silently drifting from
+    #    what the next periodic rescan computes anyway).
+    try:
+        auto_organize_library_root(lib)
+        mangas, comicinfo_changed = scan_library(lib)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Renamed on disk, but the rescan that regenerates its catalog entry failed: {e}. Run a manual Reload scan to finish."}, status_code=500)
+
+    data = load_app_data()
+    data["manga_data"][str(library_id)] = {"mangas": mangas, "last_scanned": datetime.now().isoformat()}
+    if comicinfo_changed:
+        data["all_tags"] = rebuild_all_tags(data)
+        data["all_genres"] = rebuild_all_genres(data)
+
+    new_manga = next((m for m in mangas if m["name"] == new_name), None)
+    if not new_manga:
+        save_app_data(data)
+        return JSONResponse({"ok": False, "error": "Renamed on disk, but the manga could not be re-found after the rescan -- check the library manually."}, status_code=500)
+    new_manga_id = new_manga["id"]
+
+    dims_after = load_manga_dims(library_id, new_name)
+    new_items = checkable_items_for_manga(dims_after)
+    # Match old->new by display name (a pure rename doesn't reorder or
+    # rename individual chapters/volumes, so this is reliable) -- ordinal
+    # position first as a fast path, falling back to a name search for any
+    # manga whose scan order isn't guaranteed identical.
+    id_map = {}
+    for i, old_it in enumerate(old_items):
+        new_it = new_items[i] if i < len(new_items) and new_items[i]["item_name"] == old_it["item_name"] else None
+        if new_it is None:
+            new_it = next((n for n in new_items if n["item_name"] == old_it["item_name"]), None)
+        if new_it:
+            id_map[old_it["item_id"]] = new_it["item_id"]
+
+    save_app_data(data)
+    _remap_manga_identity_across_users(library_id, old_manga_id, new_manga_id, old_name, new_name, id_map)
+    if any(os.path.exists(p) for p in (lib.get("paths") or [lib.get("path")]) if p):
+        prune_stale_integrity_issues(library_id, mangas)
+
+    return JSONResponse({"ok": True, "new_manga_id": new_manga_id, "new_name": new_name})
+
 def _metadata_field_done(dims: dict, field: str) -> bool:
     """
     Whether a metadata field has already been fetched for this manga.
@@ -5183,6 +5410,89 @@ async def save_reading_progress(request: Request):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
+@app.post("/api/manga/{library_id}/{manga_id}/mark-read")
+async def bulk_mark_read(request: Request, library_id: int, manga_id: str):
+    """
+    Mark a batch of chapters/volumes as read/completed in one call -- the
+    selection-mode "Check as Read" action on manga_detail.html/
+    volume_detail.html. Deliberately does NOT touch last_read/last_chapter_id/
+    last_page (the resume position / Last Read row ordering) the way a real
+    reading session does -- this is a retroactive "sync my read status" action,
+    not "I'm reading this right now", so it shouldn't move the user's actual
+    resume point or reorder their Last Read list.
+    """
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+
+    body = await request.json()
+    item_ids = body.get("item_ids") or []
+    if not isinstance(item_ids, list) or not item_ids:
+        return JSONResponse({"ok": False, "error": "No items given"}, status_code=400)
+    item_ids = set(item_ids)
+
+    data = load_app_data()
+    manga_data = data.get("manga_data", {}).get(str(library_id), {})
+    manga = next((m for m in manga_data.get("mangas", []) if m["id"] == manga_id), None)
+    if not manga:
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    dims = load_manga_dims(library_id, manga["name"])
+    is_volume_manga = manga.get("manga_type") == "case2" or bool(dims.get("volumes"))
+    source_dict = dims.get("volumes") if is_volume_manga else dims.get("chapters")
+    source_dict = source_dict or {}
+
+    user_data = auth.load_user_data(username)
+    history = user_data.setdefault("reading_history", {})
+    lib_history = history.setdefault(str(library_id), {})
+    default_entry = (
+        {
+            "manga_name": manga["name"], "last_read": None,
+            "last_volume_id": None, "last_volume_name": None, "last_page": 0,
+            "furthest_volume": None, "furthest_volume_name": None, "chapters": {},
+        } if is_volume_manga else
+        {
+            "manga_name": manga["name"], "last_read": None,
+            "last_chapter_id": None, "last_chapter_name": None, "last_page": 0,
+            "furthest_chapter": None, "furthest_chapter_name": None, "chapters": {},
+        }
+    )
+    entry = lib_history.setdefault(manga_id, default_entry)
+    if not entry.get("manga_name"):
+        entry["manga_name"] = manga["name"]
+
+    marked = []
+    for item_id in item_ids:
+        src = source_dict.get(item_id)
+        if not src:
+            continue  # not a real chapter/volume of this manga -- ignore silently
+        ch_entry = entry["chapters"].setdefault(item_id, {})
+        ch_entry["completed"] = True
+        ch_entry["name"] = src.get("name", item_id)
+        marked.append(item_id)
+
+    # Recompute furthest_chapter/furthest_volume once, same "highest position
+    # completed" convention save_reading_progress already uses (walks the
+    # whole ordered list rather than stopping at the first gap, so marking a
+    # later batch read while an earlier one is still unread doesn't get lost).
+    ordered_ids = sorted(source_dict.keys(), key=lambda i: natural_sort_key(source_dict[i].get("name", i)))
+    furthest = None
+    furthest_name = None
+    for iid in ordered_ids:
+        if entry["chapters"].get(iid, {}).get("completed"):
+            furthest = iid
+            furthest_name = source_dict[iid].get("name")
+    if is_volume_manga:
+        entry["furthest_volume"] = furthest
+        entry["furthest_volume_name"] = furthest_name
+    else:
+        entry["furthest_chapter"] = furthest
+        entry["furthest_chapter_name"] = furthest_name
+
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True, "marked": marked})
+
 @app.get("/api/reading/history/{library_id}")
 def get_reading_history(request: Request, library_id: int):
     username  = auth.get_current_user(request)
@@ -5358,6 +5668,7 @@ def get_category_list(
             "cover":       m["cover_url"],
             "chapters":    m.get("chapters"),
             "is_complete": m.get("is_complete", False),
+            "manga_type":  m.get("manga_type", "loose"),
             "progress":    progress,
         })
 

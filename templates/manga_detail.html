@@ -144,6 +144,37 @@
       line-height: 1.3;
       margin-bottom: 10px;
       color: var(--color-text, #f0f0f0);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .manga-title .btn-pencil svg { width: 15px; height: 15px; }
+    .title-edit-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+    .title-edit-input {
+      flex: 1;
+      min-width: 180px;
+      background: var(--color-background, #0f0f0f);
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: var(--color-text, #f0f0f0);
+      font-size: 1rem;
+      font-weight: 700;
+      font-family: 'Segoe UI', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .title-edit-input:focus { border-color: var(--color-primary, #e94560); }
+    .title-edit-error {
+      font-size: 0.78rem;
+      color: var(--color-primary, #e94560);
+      margin: -6px 0 10px;
     }
     .manga-meta {
       display: flex;
@@ -373,6 +404,80 @@
       justify-content: center;
       color: var(--color-primary, #e94560);
     }
+
+    /* ── SELECTION MODE (long-press or drag over rows to multi-select, like
+       Android's own file manager) ── */
+    .mchap-item.selectable { user-select: none; -webkit-user-select: none; touch-action: pan-y; }
+    .mchap-item.selectable.selecting { touch-action: none; }
+    .mchap-item.selected {
+      background: color-mix(in srgb, var(--color-primary, #e94560) 22%, var(--color-secondary, #1a1a1a));
+      box-shadow: 0 0 0 1px var(--color-primary, #e94560) inset, 0 2px 8px rgba(0,0,0,0.25);
+    }
+    .mchap-select-check {
+      flex-shrink: 0;
+      margin-left: 14px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 2px solid #555;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: transparent;
+      transition: border-color 0.15s, background 0.15s, color 0.15s;
+    }
+    .mchap-item.selected .mchap-select-check {
+      border-color: var(--color-primary, #e94560);
+      background: var(--color-primary, #e94560);
+      color: #fff;
+    }
+    .selection-bar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      z-index: 250;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 18px calc(12px + env(safe-area-inset-bottom, 0px));
+      background: color-mix(in srgb, var(--color-secondary, #1a1a1a) 92%, transparent);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 -2px 16px rgba(0,0,0,0.35);
+    }
+    .selection-bar-count {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--color-text, #f0f0f0);
+    }
+    .selection-bar-actions { display: flex; align-items: center; gap: 10px; }
+    .selection-bar-cancel {
+      background: none;
+      border: none;
+      color: #999;
+      font-size: 0.82rem;
+      cursor: pointer;
+      padding: 8px 10px;
+      font-family: 'Segoe UI', sans-serif;
+    }
+    .selection-bar-cancel:hover { color: var(--color-text, #f0f0f0); }
+    .selection-bar-mark-read {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--color-primary, #e94560);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: 'Segoe UI', sans-serif;
+      transition: filter 0.15s;
+    }
+    .selection-bar-mark-read:hover { filter: brightness(1.1); }
 
     /* Loading / empty */
     .state-msg {
@@ -1104,7 +1209,31 @@
 
         <!-- META -->
         <div class="hero-head">
-          <div class="manga-title">{{ manga.name }}</div>
+          <div class="manga-title" v-if="!editingTitle">
+            {{ manga.name }}
+            <button class="btn-pencil" v-if="isAdmin" @click="startEditTitle" title="Rename manga (also renames its folder on disk)">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+              </svg>
+            </button>
+          </div>
+          <div v-else class="title-edit-row">
+            <input
+              type="text"
+              class="title-edit-input"
+              v-model="titleInput"
+              ref="titleInputRef"
+              :disabled="renamingTitle"
+              @keyup.enter="saveTitle"
+              @keyup.escape="cancelEditTitle"
+            />
+            <button class="popup-btn soft" @click="cancelEditTitle" :disabled="renamingTitle">Cancel</button>
+            <button class="popup-btn primary" @click="saveTitle" :disabled="renamingTitle || !titleInput.trim()">
+              {{ renamingTitle ? 'Renaming…' : 'Save' }}
+            </button>
+          </div>
+          <div v-if="renameError" class="title-edit-error">{{ renameError }}</div>
           <div class="manga-meta">
             <span class="meta-badge chapters">{{ manga.chapter_count }} Chapters</span>
           </div>
@@ -1335,10 +1464,26 @@
       <div v-if="sortedChapters.length === 0" class="state-msg">No chapters found.</div>
 
       <ul class="mchap-list" v-else>
-        <li class="mchap-item" v-for="ch in sortedChapters" :key="ch.originalIndex">
-          <a class="mchap-row" :href="`/manga/${libraryId}/${mangaId}/chapter/${ch.id}`">
+        <li
+          class="mchap-item selectable"
+          :class="{ selected: selectedItemIds.has(ch.id), selecting: selectionMode }"
+          v-for="ch in sortedChapters" :key="ch.originalIndex"
+          :data-ch-id="ch.id"
+          @touchstart="onChapterTouchStart($event, ch)"
+          @touchmove="onChapterTouchMove($event, ch)"
+          @touchend="onChapterTouchEnd($event)"
+          @touchcancel="onChapterTouchEnd($event)"
+          @mousedown="onChapterMouseDown($event, ch)"
+          @mouseenter="onChapterMouseEnter(ch)"
+        >
+          <a class="mchap-row" :href="`/manga/${libraryId}/${mangaId}/chapter/${ch.id}`" @click="onChapterClick($event, ch)">
             <span class="mchap-ch">{{ ch.name }}</span>
-            <div v-if="readChapterIds.has(ch.id)" class="mchap-read-check">
+            <div v-if="selectionMode" class="mchap-select-check">
+              <svg v-if="selectedItemIds.has(ch.id)" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </div>
+            <div v-else-if="readChapterIds.has(ch.id)" class="mchap-read-check">
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
                 <polyline points="20 6 9 17 4 12"/>
               </svg>
@@ -1351,6 +1496,20 @@
   </template>
 
   <div v-else class="state-msg">Manga not found.</div>
+
+  <!-- SELECTION MODE ACTION BAR -->
+  <div class="selection-bar" v-if="selectionMode">
+    <span class="selection-bar-count">{{ selectedItemIds.size }} selected</span>
+    <div class="selection-bar-actions">
+      <button class="selection-bar-cancel" @click="cancelSelection">Cancel</button>
+      <button class="selection-bar-mark-read" @click="markSelectedAsRead">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        Check as Read
+      </button>
+    </div>
+  </div>
 
   <!-- ADD TAG POPUP -->
   <div class="popup-overlay" v-if="showAddPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddPopup = false)">
@@ -1583,6 +1742,11 @@
 <script>
 const { createApp } = Vue;
 
+// Chapter-row selection mode: same hold-then-arm timing as app.js's
+// long-press-to-context-menu gesture on manga tiles, kept consistent.
+const SELECT_HOLD_MS   = 450;
+const SELECT_JITTER_PX = 10;
+
 createApp({
   data() {
     return {
@@ -1601,6 +1765,11 @@ createApp({
       // description
       editingDesc:          false,
       descInput:            '',
+      // title (rename -- also renames the manga's folder on disk, admin-only)
+      editingTitle:         false,
+      titleInput:           '',
+      renamingTitle:        false,
+      renameError:          '',
       // tags
       allTags:              [],
       tagInput:             '',
@@ -1619,6 +1788,10 @@ createApp({
       readChapterIds:       new Set(),
       lastChapterId:        null,
       lastPage:             0,
+      // selection mode (long-press or drag over chapter rows to
+      // multi-select, then "Check as Read" -- like Android's file manager)
+      selectionMode:        false,
+      selectedItemIds:      new Set(),
       // cover picker
       showCoverPicker:      false,
       coverPickerLoading:   false,
@@ -1733,6 +1906,13 @@ createApp({
     this._preloadImages = [];
     window.addEventListener('pagehide', () => this.cancelBackgroundPreloads());
 
+    // Ends a mouse-driven drag-select even if the button is released
+    // outside any chapter row (a per-row mouseup would never fire there).
+    window.addEventListener('mouseup', () => {
+      clearTimeout(this._selHoldTimer);
+      this._selDragTouched = null;
+    });
+
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
     }).catch(() => {});
@@ -1804,6 +1984,148 @@ createApp({
       } catch (e) {
         console.error('Failed to load read chapters:', e);
       }
+    },
+
+    // ── SELECTION MODE (long-press or drag over rows to multi-select,
+    // then "Check as Read" -- same interaction as selecting files in an
+    // Android file manager) ──
+    // Hold-then-arm mirrors app.js's own long-press-to-context-menu gesture
+    // (same constants) -- a plain scroll past a row and the start of an
+    // intended long-press both begin as a touchstart followed by movement,
+    // so arming immediately on touchstart would make ordinary scrolling
+    // indistinguishable from starting a selection.
+    onChapterTouchStart(e, ch) {
+      const t = e.touches[0];
+      this._selStartX = t.clientX;
+      this._selStartY = t.clientY;
+      this._selSuppressClick = false;
+      if (this.selectionMode) {
+        this._selDragTouched = new Set([ch.id]);
+        this.toggleChapterSelected(ch.id, true);
+        return;
+      }
+      clearTimeout(this._selHoldTimer);
+      this._selHoldTimer = setTimeout(() => {
+        this.selectionMode = true;
+        this._selSuppressClick = true;
+        this._selDragTouched = new Set([ch.id]);
+        this.toggleChapterSelected(ch.id, true);
+      }, SELECT_HOLD_MS);
+    },
+
+    onChapterTouchMove(e, ch) {
+      const t = e.touches[0];
+      const dx = t.clientX - this._selStartX, dy = t.clientY - this._selStartY;
+      if (!this.selectionMode) {
+        // Not selecting yet -- a real drag (scroll) cancels the pending arm
+        // instead of letting it fire once the hold time is up.
+        if (Math.hypot(dx, dy) > SELECT_JITTER_PX) clearTimeout(this._selHoldTimer);
+        return;
+      }
+      // Already selecting: drag-paint whichever row is currently under the
+      // finger, like dragging over files in Android's own file manager.
+      // Only intercepted here (touch-action: none via the .selecting class
+      // handles the rest) so ordinary page scroll is untouched before this.
+      e.preventDefault();
+      this._selSuppressClick = true;
+      const el  = document.elementFromPoint(t.clientX, t.clientY);
+      const row = el && el.closest('.mchap-item');
+      const id  = row && row.dataset.chId;
+      if (id && this._selDragTouched && !this._selDragTouched.has(id)) {
+        this._selDragTouched.add(id);
+        this.toggleChapterSelected(id, true);
+      }
+    },
+
+    onChapterTouchEnd(e) {
+      clearTimeout(this._selHoldTimer);
+      this._selDragTouched = null;
+      if (this._selSuppressClick) {
+        // Suppresses the emulated click mobile browsers fire after a touch
+        // sequence ends, so a long-press/drag-select doesn't also navigate
+        // into the chapter the way a plain tap would.
+        e.preventDefault();
+        this._selSuppressClick = false;
+      }
+    },
+
+    // Mouse equivalent for desktop: mousedown arms the same hold timer,
+    // mouseenter on a sibling row (while a mousedown-originated drag is in
+    // progress) does the drag-paint a touchmove+elementFromPoint does for
+    // touch. A window-level mouseup (registered in mounted()) ends the drag
+    // even if the button is released outside any row.
+    onChapterMouseDown(e, ch) {
+      if (e.button !== 0) return;
+      this._selSuppressClick = false;
+      if (this.selectionMode) {
+        this._selDragTouched = new Set([ch.id]);
+        this.toggleChapterSelected(ch.id, true);
+        return;
+      }
+      clearTimeout(this._selHoldTimer);
+      this._selHoldTimer = setTimeout(() => {
+        this.selectionMode = true;
+        this._selSuppressClick = true;
+        this._selDragTouched = new Set([ch.id]);
+        this.toggleChapterSelected(ch.id, true);
+      }, SELECT_HOLD_MS);
+    },
+
+    onChapterMouseEnter(ch) {
+      if (!this._selDragTouched || !this.selectionMode) return;
+      if (!this._selDragTouched.has(ch.id)) {
+        this._selDragTouched.add(ch.id);
+        this.toggleChapterSelected(ch.id, true);
+      }
+    },
+
+    // Shared by both the touch (via touchend's preventDefault, which still
+    // lets a genuine tap's click through when nothing was suppressed) and
+    // mouse paths -- preventDefault on mouseup does NOT stop the click that
+    // follows it, so mouse needs this same suppress-flag check here too.
+    onChapterClick(e, ch) {
+      if (this._selSuppressClick) {
+        e.preventDefault();
+        this._selSuppressClick = false;
+        return;
+      }
+      if (this.selectionMode) {
+        e.preventDefault();
+        this.toggleChapterSelected(ch.id);
+      }
+      // else: a plain tap/click while not selecting -- let the <a href> navigate normally.
+    },
+
+    toggleChapterSelected(id, forceOn) {
+      const s = this.selectedItemIds;
+      if (forceOn) s.add(id);
+      else if (s.has(id)) s.delete(id);
+      else s.add(id);
+      if (s.size === 0) this.selectionMode = false;
+    },
+
+    cancelSelection() {
+      this.selectionMode = false;
+      this.selectedItemIds.clear();
+    },
+
+    async markSelectedAsRead() {
+      if (this.selectedItemIds.size === 0) return;
+      const ids = [...this.selectedItemIds];
+      try {
+        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/mark-read`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_ids: ids }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          for (const id of (data.marked || ids)) this.readChapterIds.add(id);
+        }
+      } catch (e) {
+        console.error('Failed to mark chapters as read:', e);
+      }
+      this.cancelSelection();
     },
 
     async toggleFavourite() {
@@ -2075,6 +2397,49 @@ createApp({
         }
       } catch (e) {
         console.error('Failed to save description:', e);
+      }
+    },
+
+    startEditTitle() {
+      this.titleInput = this.manga.name;
+      this.renameError = '';
+      this.editingTitle = true;
+      this.$nextTick(() => { if (this.$refs.titleInputRef) this.$refs.titleInputRef.focus(); });
+    },
+
+    cancelEditTitle() {
+      this.editingTitle = false;
+      this.titleInput = '';
+      this.renameError = '';
+    },
+
+    async saveTitle() {
+      const newName = this.titleInput.trim();
+      if (!newName || newName === this.manga.name) { this.cancelEditTitle(); return; }
+      this.renamingTitle = true;
+      this.renameError = '';
+      try {
+        const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/rename`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          // Renaming regenerates this manga's id (chapter/volume ids too --
+          // see the endpoint's own reasoning), so the current page's URL is
+          // stale the instant this succeeds. A full navigation to the new
+          // id is the correct way forward, not patching every already-
+          // loaded piece of state (chapter ids, reading history, etc.) in place.
+          window.location.href = `/manga/${this.libraryId}/${data.new_manga_id}`;
+        } else {
+          this.renameError = data.error || 'Rename failed.';
+          this.renamingTitle = false;
+        }
+      } catch (e) {
+        console.error('Failed to rename manga:', e);
+        this.renameError = 'Rename failed -- check your connection and try again.';
+        this.renamingTitle = false;
       }
     },
 
