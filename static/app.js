@@ -324,6 +324,16 @@ const app = createApp({
       allTags:              [],
       allGenres:            [],
 
+      // ── ONESHOT OPEN CHOICE ──
+      // A flat-scan oneshot has no detail page of its own -- clicking it
+      // would otherwise always land on page 1 via manga_detail()'s server-side
+      // redirect, with no way to resume. This popup asks Continue vs. Start
+      // before navigating, instead of the old context-menu-only "Continue
+      // Reading" item (which needed a long-press to even find).
+      oneshotPopupOpen: false,
+      oneshotManga:     null,
+      oneshotLastPage:  0,
+
       // ── ROW DATA ──
       lastRead:    activeState ? activeState.lastRead   : [],
       random:      activeState ? activeState.random     : [],
@@ -540,19 +550,6 @@ const app = createApp({
       } catch (e) { /* best-effort */ }
       this.closeCtxMenu();
       this.loadMangas(this.activeTab);
-    },
-
-    // Oneshots' own tile click always lands on page 1 (manga_detail()'s
-    // oneshot redirect carries no ?page=, matching a plain click's "start
-    // reading" behavior on any other manga) -- this is the only way to
-    // reach that same last_chapter_id/last_page position without clicking
-    // through into the reader and paging back manually. Only ever shown for
-    // an already-read oneshot (see the v-if in manga_list.html).
-    ctxContinueReading() {
-      if (!this.ctxManga || !this.ctxManga.last_chapter_id) return;
-      const url = `/manga/${this.activeTab}/${this.ctxManga.id}/chapter/${this.ctxManga.last_chapter_id}?page=${this.ctxManga.last_page}`;
-      this.closeCtxMenu();
-      window.location.href = url;
     },
 
     async ctxOpenCollections() {
@@ -1095,9 +1092,41 @@ const app = createApp({
       }
     },
 
-    openManga(id) {
-      const cid = this.collectionMembership[`${this.activeTab}:${id}`];
-      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.activeTab}/${id}`;
+    openManga(manga) {
+      const cid = this.collectionMembership[`${this.activeTab}:${manga.id}`];
+      if (cid) { window.location.href = `/collection/${cid}`; return; }
+      if (manga.is_oneshot) { this.openOneshotPopup(manga); return; }
+      window.location.href = `/manga/${this.activeTab}/${manga.id}`;
+    },
+
+    // A flat-scan oneshot skips manga_detail.html entirely (manga_detail()
+    // redirects straight into the reader) -- this popup is what asks
+    // Continue vs. Start before that redirect happens, since there's no
+    // detail page left to offer the choice on. is_oneshot/last_chapter_id/
+    // last_page are already joined onto every manga in this file's own
+    // lists (buildTabState), so no extra fetch is needed here.
+    openOneshotPopup(manga) {
+      this.oneshotManga    = manga;
+      this.oneshotLastPage = manga.last_chapter_id ? manga.last_page : 0;
+      this.oneshotPopupOpen = true;
+    },
+
+    closeOneshotPopup() {
+      this.oneshotPopupOpen = false;
+      this.oneshotManga = null;
+    },
+
+    oneshotOpen(page) {
+      if (!this.oneshotManga) return;
+      const manga = this.oneshotManga;
+      this.closeOneshotPopup();
+      // Start Reading (page 0/none) reuses the plain manga-page URL --
+      // manga_detail()'s own oneshot redirect already lands on page 1 with
+      // no ?page= param, same as clicking any other fresh manga would.
+      const url = page > 0
+        ? `/manga/${this.activeTab}/${manga.id}/chapter/${manga.last_chapter_id}?page=${page}`
+        : `/manga/${this.activeTab}/${manga.id}`;
+      window.location.href = url;
     },
 
     goMore(section) {

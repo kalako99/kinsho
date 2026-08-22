@@ -979,6 +979,22 @@
         padding: 0 4px 30px;
       }
     }
+
+    /* ── ONESHOT OPEN CHOICE ── */
+    .ctx-menu-list { display: flex; flex-direction: column; gap: 6px; }
+    .ctx-menu-item {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px; padding: 10px 12px;
+      color: var(--color-text, #f0f0f0); font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif; cursor: pointer; text-align: left;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ctx-menu-item:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--color-primary, #e94560);
+    }
+    .ctx-menu-item svg { flex-shrink: 0; color: var(--color-primary, #e94560); }
   </style>
   <script>
     (function () {
@@ -1265,6 +1281,28 @@
     </div>
   </div>
 
+  <!-- ONESHOT OPEN CHOICE -->
+  <div class="popup-overlay" v-if="oneshotPopupOpen" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, closeOneshotPopup)">
+    <div class="popup">
+      <div class="popup-title">{{ oneshotManga ? oneshotManga.manga_name : '' }}</div>
+      <div class="ctx-menu-list">
+        <button class="ctx-menu-item" v-if="oneshotLastPage > 0" @click="oneshotOpen(oneshotLastPage)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Continue Reading
+        </button>
+        <button class="ctx-menu-item" @click="oneshotOpen(0)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 4.5h7.5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/>
+            <path d="M22 4.5h-7.5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/>
+          </svg>
+          Start Reading
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ADD TAG POPUP -->
   <div class="popup-overlay" v-if="showAddPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddPopup = false)">
     <div class="popup">
@@ -1404,6 +1442,11 @@ createApp({
       availableCovers:      [],
       coverHasOverride:     false,
 
+      // oneshot open choice
+      oneshotPopupOpen: false,
+      oneshotManga:     null,
+      oneshotLastPage:  0,
+
       // add member popup
       showAddMemberPopup:   false,
       libraries:            [],
@@ -1479,7 +1522,40 @@ createApp({
     },
 
     openMember(m) {
+      if (m.manga_type === 'oneshot') { this.openOneshotPopup(m); return; }
       window.location.href = `/manga/${m.library_id}/${m.manga_id}`;
+    },
+
+    // A flat-scan oneshot has no detail page of its own (see app.js's own
+    // copy of this popup for the full reasoning) -- asks Continue vs. Start
+    // before navigating in, instead of always landing on page 1.
+    async openOneshotPopup(m) {
+      this.oneshotManga     = m;
+      this.oneshotLastPage  = 0;
+      this.oneshotPopupOpen = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/reading/history/${m.library_id}/${m.manga_id}`));
+        const data = await res.json();
+        if (this.oneshotManga === m && data.last_chapter_id) {
+          this.oneshotManga = { ...m, last_chapter_id: data.last_chapter_id };
+          this.oneshotLastPage = data.last_page || 0;
+        }
+      } catch (e) { /* no resume position available -- Start Reading still works */ }
+    },
+
+    closeOneshotPopup() {
+      this.oneshotPopupOpen = false;
+      this.oneshotManga = null;
+    },
+
+    oneshotOpen(page) {
+      if (!this.oneshotManga) return;
+      const m = this.oneshotManga;
+      this.closeOneshotPopup();
+      const url = page > 0
+        ? `/manga/${m.library_id}/${m.manga_id}/chapter/${m.last_chapter_id}?page=${page}`
+        : `/manga/${m.library_id}/${m.manga_id}`;
+      window.location.href = url;
     },
 
     startEditName() {

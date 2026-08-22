@@ -294,6 +294,36 @@
     }
     .list-dropdown-option + .list-dropdown-option { margin-top: 2px; }
 
+    /* ── ONESHOT OPEN CHOICE ── */
+    .popup-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 300; display: flex; align-items: center; justify-content: center;
+    }
+    .popup {
+      background: var(--color-secondary, #1a1a1a);
+      border: 1px solid #333; border-radius: 12px;
+      padding: 20px; width: 320px; max-width: 90vw;
+    }
+    .popup-title {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 0.9rem; font-weight: 700; margin-bottom: 14px;
+      color: var(--color-text, #f0f0f0);
+    }
+    .ctx-menu-list { display: flex; flex-direction: column; gap: 6px; }
+    .ctx-menu-item {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px; padding: 10px 12px;
+      color: var(--color-text, #f0f0f0); font-size: 0.85rem;
+      font-family: 'Segoe UI', sans-serif; cursor: pointer; text-align: left;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .ctx-menu-item:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--color-primary, #e94560);
+    }
+    .ctx-menu-item svg { flex-shrink: 0; color: var(--color-primary, #e94560); }
+
   </style>
 
   <script src="/static/api.js"></script>
@@ -408,7 +438,7 @@
         class="manga-thumb"
         v-for="manga in filteredMangas"
         :key="manga.id"
-        @click="openManga(manga.id)"
+        @click="openManga(manga)"
       >
         <div class="cover">
           <img v-if="manga.cover_url" :src="manga.cover_url" :alt="manga.title">
@@ -417,6 +447,28 @@
         <div class="card-body">
           <div class="thumb-title">{{ manga.title }}</div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONESHOT OPEN CHOICE -->
+  <div class="popup-overlay" v-if="oneshotPopupOpen" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, closeOneshotPopup)">
+    <div class="popup">
+      <div class="popup-title"><span>{{ oneshotManga ? oneshotManga.title : '' }}</span></div>
+      <div class="ctx-menu-list">
+        <button class="ctx-menu-item" v-if="oneshotLastPage > 0" @click="oneshotOpen(oneshotLastPage)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Continue Reading
+        </button>
+        <button class="ctx-menu-item" @click="oneshotOpen(0)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 4.5h7.5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/>
+            <path d="M22 4.5h-7.5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/>
+          </svg>
+          Start Reading
+        </button>
       </div>
     </div>
   </div>
@@ -467,6 +519,11 @@ createApp({
       collectionMembership: {},
       mangas:         [],
       loading:        true,
+
+      // ── ONESHOT OPEN CHOICE ── (see app.js's own copy for full reasoning)
+      oneshotPopupOpen: false,
+      oneshotManga:     null,
+      oneshotLastPage:  0,
     };
   },
 
@@ -528,6 +585,7 @@ createApp({
           genres:      m.genres || [],
           tags:        m.tags || [],
           is_complete: !!m.is_complete,
+          manga_type:  m.manga_type || 'loose',
         }));
       } catch (e) {
         console.error('Failed to load mangas:', e);
@@ -599,9 +657,50 @@ createApp({
       this.showCollectionFilterDropdown = false;
     },
 
-    openManga(id) {
-      const cid = this.collectionMembership[`${this.libraryId}:${id}`];
-      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.libraryId}/${id}`;
+    openManga(manga) {
+      const cid = this.collectionMembership[`${this.libraryId}:${manga.id}`];
+      if (cid) { window.location.href = `/collection/${cid}`; return; }
+      if (manga.manga_type === 'oneshot') { this.openOneshotPopup(manga); return; }
+      window.location.href = `/manga/${this.libraryId}/${manga.id}`;
+    },
+
+    async openOneshotPopup(manga) {
+      this.oneshotManga     = manga;
+      this.oneshotLastPage  = 0;
+      this.oneshotPopupOpen = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/reading/history/${this.libraryId}/${manga.id}`));
+        const data = await res.json();
+        if (this.oneshotManga === manga && data.last_chapter_id) {
+          this.oneshotManga = { ...manga, last_chapter_id: data.last_chapter_id };
+          this.oneshotLastPage = data.last_page || 0;
+        }
+      } catch (e) { /* no resume position available -- Start Reading still works */ }
+    },
+
+    closeOneshotPopup() {
+      this.oneshotPopupOpen = false;
+      this.oneshotManga = null;
+    },
+
+    oneshotOpen(page) {
+      if (!this.oneshotManga) return;
+      const manga = this.oneshotManga;
+      this.closeOneshotPopup();
+      const url = page > 0
+        ? `/manga/${this.libraryId}/${manga.id}/chapter/${manga.last_chapter_id}?page=${page}`
+        : `/manga/${this.libraryId}/${manga.id}`;
+      window.location.href = url;
+    },
+
+    // Same click-vs-text-selection-drag distinction every other popup in
+    // the app uses -- a plain @click.self would also close the popup when a
+    // drag started on selectable text inside it releases past its border.
+    onOverlayMouseDown(e) {
+      this._overlayMouseDownSelf = (e.target === e.currentTarget);
+    },
+    onOverlayClick(e, closeFn) {
+      if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
     },
 
     goBack() {

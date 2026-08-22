@@ -55,6 +55,18 @@ const app = createApp({
       bgIsRaster: false,
 
       collectionMembership: {},
+
+      // ── ONESHOT OPEN CHOICE ──
+      // See app.js's own copy of this popup for the full reasoning -- a
+      // flat-scan oneshot has no detail page, so a plain click needs to ask
+      // Continue vs. Start instead of always landing on page 1. This page's
+      // manga list doesn't carry last_chapter_id/last_page (unlike app.js's
+      // own, already history-joined lists), so the popup fetches them
+      // on demand when opened rather than needing every category-list
+      // response to eagerly join reading history for every manga.
+      oneshotPopupOpen: false,
+      oneshotManga:     null,
+      oneshotLastPage:  0,
     };
   },
 
@@ -133,10 +145,53 @@ const app = createApp({
       }
     },
 
-    openManga(id) {
-      const cid = this.collectionMembership[`${this.libraryId}:${id}`];
-      window.location.href = cid ? `/collection/${cid}` : `/manga/${this.libraryId}/${id}`;
+    openManga(manga) {
+      const cid = this.collectionMembership[`${this.libraryId}:${manga.id}`];
+      if (cid) { window.location.href = `/collection/${cid}`; return; }
+      if (manga.manga_type === 'oneshot') { this.openOneshotPopup(manga); return; }
+      window.location.href = `/manga/${this.libraryId}/${manga.id}`;
     },
+
+    async openOneshotPopup(manga) {
+      this.oneshotManga     = manga;
+      this.oneshotLastPage  = 0;
+      this.oneshotPopupOpen = true;
+      try {
+        const res  = await fetch(apiUrl(`/api/reading/history/${this.libraryId}/${manga.id}`));
+        const data = await res.json();
+        if (this.oneshotManga === manga && data.last_chapter_id) {
+          this.oneshotManga = { ...manga, last_chapter_id: data.last_chapter_id };
+          this.oneshotLastPage = data.last_page || 0;
+        }
+      } catch (e) { /* no resume position available -- Start Reading still works */ }
+    },
+
+    closeOneshotPopup() {
+      this.oneshotPopupOpen = false;
+      this.oneshotManga = null;
+    },
+
+    // Same click-vs-text-selection-drag distinction used by every other
+    // popup-overlay in the app -- a plain @click.self would also close the
+    // popup when a drag that started on selectable text inside it happens
+    // to release past the popup's border.
+    onOverlayMouseDown(e) {
+      this._overlayMouseDownSelf = (e.target === e.currentTarget);
+    },
+    onOverlayClick(e, closeFn) {
+      if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
+    },
+
+    oneshotOpen(page) {
+      if (!this.oneshotManga) return;
+      const manga = this.oneshotManga;
+      this.closeOneshotPopup();
+      const url = page > 0
+        ? `/manga/${this.libraryId}/${manga.id}/chapter/${manga.last_chapter_id}?page=${page}`
+        : `/manga/${this.libraryId}/${manga.id}`;
+      window.location.href = url;
+    },
+
     goBack()      { window.kinshoGoBack('/'); },
 
     async loadTheme() {
