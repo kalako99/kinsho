@@ -473,6 +473,18 @@ const app = createApp({
       }
     });
 
+    // ── REFRESH COLLECTION MEMBERSHIP AFTER A BFCACHE RESTORE ──
+    // The in-app "back" button (kinshoGoBack, api.js) uses history.back(),
+    // which the browser/WebView can satisfy by restoring this exact page
+    // instance from bfcache instead of re-running mounted() -- so
+    // collectionMembership (fetched once above) goes stale if a collection
+    // was created or had a member added on whatever page this tab is coming
+    // back from. event.persisted is only true for a bfcache restore, never a
+    // normal fresh load (which already gets a correct fetch from mounted()).
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) this.loadCollectionMembership();
+    });
+
     // ── PICK UP A SCAN THAT FINISHES WHILE THIS PAGE IS SITTING OPEN ──
     // visibilitychange (above) only catches a scan that ran while this page
     // was hidden/backgrounded. A scan triggered from Settings in another

@@ -97,6 +97,15 @@ const app = createApp({
 
     await this.loadPage(1, pinnedIds);
     await this.loadCollectionMembership();
+
+    // Refresh collectionMembership after a bfcache restore (the in-app back
+    // button uses history.back(), which can restore this exact page instance
+    // instead of re-running mounted() -- see app.js's identical listener for
+    // the full reasoning) so a collection created/changed on whatever page
+    // this tab is coming back from isn't shown stale here.
+    window.addEventListener('pageshow', (e) => {
+      if (e.persisted) this.loadCollectionMembership();
+    });
   },
 
   methods: {
