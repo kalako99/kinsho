@@ -19,7 +19,13 @@ const CTX_MENU_JITTER_PX = 10;
 // reaches here at all.
 const MangaThumb = defineComponent({
   name: 'MangaThumb',
-  props: { manga: { type: Object, required: true } },
+  props: {
+    manga: { type: Object, required: true },
+    // Collections in the Collections row have no meaningful reading
+    // progress of their own -- pass :show-progress="false" there to drop
+    // the bar entirely rather than render an always-empty one.
+    showProgress: { type: Boolean, default: true },
+  },
   emits: ['click', 'contextmenu'],
   methods: {
     onTouchStart(e) {
@@ -69,7 +75,7 @@ const MangaThumb = defineComponent({
         <span v-if="manga.is_complete" class="complete-badge">COMPLETE</span>
       </div>
       <div class="card-body">
-        <div class="progress-wrap">
+        <div class="progress-wrap" v-if="showProgress">
           <div class="progress-track">
             <div class="progress-bar" :style="{ width: (manga.progress || 0) + '%' }"></div>
           </div>
@@ -740,7 +746,6 @@ const app = createApp({
           title:       c.name,
           cover:       c.cover_url,
           is_complete: false,
-          progress:    0,
         }));
       } catch (e) {
         console.error('Failed to load collections row:', e);

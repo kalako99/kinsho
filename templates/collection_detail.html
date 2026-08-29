@@ -331,6 +331,33 @@
     .manga-thumb:hover .member-remove-btn { opacity: 1; }
     .member-remove-btn:hover { background: var(--color-primary, #e94560); }
     .manga-thumb .card-body { padding: 5px 2px 0; }
+    /* Progress bar — same as the manga list page's tiles */
+    .manga-thumb .progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-bottom: 4px;
+    }
+    .manga-thumb .progress-track {
+      flex: 1;
+      height: 6px;
+      background: #333;
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .manga-thumb .progress-pct {
+      font-size: 0.6rem;
+      color: #888;
+      white-space: nowrap;
+      flex-shrink: 0;
+      width: 26px;
+      text-align: right;
+    }
+    .manga-thumb .progress-bar {
+      height: 100%;
+      background: var(--color-primary, #e94560);
+      border-radius: 2px;
+    }
     .manga-thumb .thumb-title {
       font-size: 0.72rem;
       color: var(--color-text, #f0f0f0);
@@ -1235,6 +1262,13 @@
             </button>
           </div>
           <div class="card-body">
+            <div class="progress-wrap">
+              <div class="progress-track">
+                <div class="progress-bar" :style="{ width: (m.progress || 0) + '%' }"></div>
+              </div>
+              <span class="progress-pct" v-if="m.progress">{{ m.progress }}%</span>
+              <span class="progress-pct" v-else style="color: transparent">0%</span>
+            </div>
             <div class="thumb-title">{{ m.manga_name }}</div>
           </div>
         </div>

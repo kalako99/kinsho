@@ -3995,9 +3995,23 @@ def get_collection(request: Request, collection_id: str):
     if is_shared and not visible and not _can_edit_collection(username, is_shared):
         return JSONResponse({"error": "Collection not found"}, status_code=404)
     members_out = []
+    user_data = auth.load_user_data(username)
+    reading_history = user_data.get("reading_history", {})
     for m in visible:
         manga = _lookup_manga(m["library_id"], m["manga_id"])
         cover_url, cover_url_large = _resolve_member_cover_urls(username, m["library_id"], m["manga_id"])
+        # Same "X of Y chapters actually marked completed" progress the manga
+        # list tiles show (see /api/category-list and get_reading_history) --
+        # computed per member here so the collection detail page's tiles can
+        # show it too.
+        progress = 0
+        entry = reading_history.get(str(m["library_id"]), {}).get(m["manga_id"])
+        if entry and manga and manga.get("name"):
+            dims_m = load_manga_dims(m["library_id"], manga["name"])
+            is_volume_manga = manga.get("manga_type") == "case2"
+            total_ch = len(dims_m.get("volumes" if is_volume_manga else "chapters", {}))
+            if total_ch > 0:
+                progress = round(completed_chapter_count(entry) / total_ch * 100)
         members_out.append({
             "library_id":      m["library_id"],
             "manga_id":        m["manga_id"],
@@ -4006,6 +4020,7 @@ def get_collection(request: Request, collection_id: str):
             "cover_url_large": cover_url_large,
             "manga_type":      manga.get("manga_type") if manga else None,
             "is_complete":     manga.get("is_complete", False) if manga else False,
+            "progress":        progress,
         })
     cover_url, cover_url_large = _resolve_collection_cover_urls(username, collection_id, visible)
     return JSONResponse({

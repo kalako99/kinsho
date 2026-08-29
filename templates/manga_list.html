@@ -753,6 +753,7 @@
           v-for="c in collectionsRow"
           :key="c.id"
           :manga="c"
+          :show-progress="false"
           @click="openCollection(c.id)"
         />
       </div>
