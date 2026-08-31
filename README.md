@@ -18,6 +18,10 @@ FastAPI application; the frontend is plain JavaScript. Everything it stores
 about your library — reading progress, tags, collections, users — lives in
 plain JSON files under a data folder you choose.
 
+## Support
+
+If Kinsho's useful to you, consider [supporting development on Ko-fi](https://ko-fi.com/kalako99) — it's free to use either way, but a coffee is always appreciated.
+
 ## Features
 
 - **Reads almost anything**: CBZ/ZIP out of the box, plus optional CBR/RAR,
