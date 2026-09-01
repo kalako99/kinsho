@@ -33,6 +33,17 @@ const MangaThumb = defineComponent({
   `
 });
 
+// ── LAST-UPDATED-STYLE ROW-COMPLETION HELPER ──
+// Mirrors app.js's currentGridColumns() -- reads the live resolved column
+// count of .manga-grid so a page never ends on a dangling partial row,
+// same fix already applied to the home page's Last Updated grid.
+function currentGridColumns() {
+  const grid = document.querySelector('.manga-grid');
+  if (!grid) return 1;
+  const cols = getComputedStyle(grid).gridTemplateColumns.split(' ').filter(Boolean).length;
+  return cols || 1;
+}
+
 // ── MAIN APP ──
 const app = createApp({
   components: { MangaThumb },
@@ -135,7 +146,8 @@ const app = createApp({
 
     async loadPage(page, pinnedIds) {
       try {
-        let url = `/api/category-list/${this.libraryId}/${this.category}?page=${page}`;
+        const columns = currentGridColumns();
+        let url = `/api/category-list/${this.libraryId}/${this.category}?page=${page}&columns=${columns}`;
         if (this.category === 'random' && this.seed !== null) {
           url += `&seed=${this.seed}`;
         }

@@ -5587,6 +5587,12 @@ def get_category_list(
     # independently-shuffled selection. Only ever sent on the initial
     # load from "View more"; manual pagination/reshuffle omit it.
     pinned: Optional[str] = Query(default=None),
+    # How many columns the requesting client's .manga-grid is currently
+    # rendering -- same purpose as get_mangas()'s own `columns` param
+    # above: round the per-page count up to a full row so a page never
+    # ends on a dangling partial row. Omitted (or invalid) falls back to
+    # the unrounded flat 50, exactly as before.
+    columns: Optional[int] = Query(default=None, ge=1),
 ):
     if category not in ("favourites", "last-read", "random"):
         return JSONResponse({"error": "Invalid category"}, status_code=400)
@@ -5657,7 +5663,7 @@ def get_category_list(
             ordered_ids = pinned_ids + rest_ids
 
     total = len(ordered_ids)
-    per_page = 50
+    per_page = _round_up_to_multiple(50, columns)
     offset = (page - 1) * per_page
     page_ids = ordered_ids[offset: offset + per_page]
 
