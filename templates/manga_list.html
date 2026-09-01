@@ -291,6 +291,17 @@
       gap: 16px 12px;
     }
 
+    /* Phone-width screens: auto-fill settles on 2 uneven columns since each
+       .manga-thumb has a fixed width smaller than its grid column, leaving it
+       left-aligned with dead space to the right. Force 3 even columns and
+       center each cover within its column instead. */
+    @media (max-width: 640px) {
+      .manga-grid {
+        grid-template-columns: repeat(3, 1fr);
+        justify-items: center;
+      }
+    }
+
     /* ── SEARCH BAR ── */
     .container {
       position: relative;
