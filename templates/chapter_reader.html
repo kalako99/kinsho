@@ -3845,23 +3845,27 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   });
 
-  // Zoom slider label update (no-op on layout for now)
-  // ── STRIP WIDTH SLIDER ──
-  function applyStripWidth(pct) {
-    readerSettings.stripWidth = pct;
-    const effectiveW = Math.round(viewW * pct / 100);
-    // Resize readerInner, not #reader itself -- #reader stays permanently
-    // full-bleed so the black letterbox area at zoomed-out widths is still
-    // part of #reader's own scrollable/draggable bounds (bug 6 fix), not
-    // empty space outside them. readerInner is a normal static block (not
-    // position:fixed), so simple width + auto-margin centers it -- no
-    // separate left/right inset math needed the way #reader's old
-    // fixed-positioning required.
-    readerInner.style.width  = pct + '%';
-    readerInner.style.margin = '0 auto';
-    bbZoomRange.value       = pct;
-    bbZoomValue.textContent = pct + '%';
+  // Current effective render width for long-strip mode: the live viewport
+  // width (read fresh, NOT the `viewW` const captured once at page load --
+  // that goes stale the instant the viewport's actual width changes, e.g.
+  // a device rotation) times the current zoom pct. Every long-strip geometry
+  // recompute (zoom slider, the refresh button, and the resize/orientation
+  // listener below) must scale to THIS, not a frozen boot-time width, or the
+  // manifest's precomputed scaledH stops matching #reader-inner's actual
+  // CSS-driven (responsive) render width -- and since .page-slot img uses
+  // object-fit: fill (see its CSS comment), any such mismatch visibly
+  // stretches/squishes every page instead of just resizing them.
+  function currentLongStripEffectiveW() {
+    return Math.round(window.innerWidth * (readerSettings.stripWidth ?? 100) / 100);
+  }
 
+  // Recomputes long-strip geometry for `effectiveW` and reapplies it to the
+  // materialized slots, preserving the current reading position (same page,
+  // same offset into it) rather than snapping back to the top. Shared by the
+  // zoom slider, the refresh button, and the resize/orientation listener --
+  // three different triggers for the exact same "the render width changed
+  // out from under an already-built manifest" problem.
+  function reapplyLongStripGeometry(effectiveW) {
     let anchorEntry = manifest[0];
     for (const entry of manifest) {
       if (entry.globalY <= virtualY) anchorEntry = entry;
@@ -3876,6 +3880,45 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
     prefetchAroundIndex(anchorGlobalIdx);
   }
+
+  // Zoom slider label update (no-op on layout for now)
+  // ── STRIP WIDTH SLIDER ──
+  function applyStripWidth(pct) {
+    readerSettings.stripWidth = pct;
+    // Resize readerInner, not #reader itself -- #reader stays permanently
+    // full-bleed so the black letterbox area at zoomed-out widths is still
+    // part of #reader's own scrollable/draggable bounds (bug 6 fix), not
+    // empty space outside them. readerInner is a normal static block (not
+    // position:fixed), so simple width + auto-margin centers it -- no
+    // separate left/right inset math needed the way #reader's old
+    // fixed-positioning required.
+    readerInner.style.width  = pct + '%';
+    readerInner.style.margin = '0 auto';
+    bbZoomRange.value       = pct;
+    bbZoomValue.textContent = pct + '%';
+
+    reapplyLongStripGeometry(currentLongStripEffectiveW());
+  }
+
+  // Re-syncs long-strip geometry whenever the actual viewport width changes
+  // -- most commonly a device rotation, but also a foldable's unfold or a
+  // desktop window resize. #reader-inner's own width is plain responsive
+  // CSS (see its rule above) so it already tracks the new width for free;
+  // without this listener, only the manifest's baked-in scaledH values (and
+  // the .page-slot heights set from them) stay frozen at whatever the
+  // viewport measured at page load or the last zoom/refresh, producing the
+  // same object-fit: fill stretch/squish as the zoom+refresh bug above.
+  // Debounced (200ms) since 'resize' can fire repeatedly mid-rotation
+  // animation on some devices, and each call tears down + rebuilds the
+  // whole materialized slot window.
+  let _resizeGeometryTimer = null;
+  window.addEventListener('resize', () => {
+    if (readerSettings.mode !== 'long-strip') return;
+    clearTimeout(_resizeGeometryTimer);
+    _resizeGeometryTimer = setTimeout(() => {
+      reapplyLongStripGeometry(currentLongStripEffectiveW());
+    }, 200);
+  });
 
   function updateZoomVisibility() {
     const isLong = readerSettings.mode === 'long-strip';
@@ -4810,7 +4853,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const anchorLocal  = anchorEntry ? anchorEntry.localIdx  : 0;
         const offsetIntoPage = anchorEntry ? (virtualY - anchorEntry.globalY) : 0;
 
-        buildManifest(readerSettings.padding, viewW);
+        // Must scale to the CURRENT zoom level, not the raw (100%) viewW --
+        // otherwise the freshly-rebuilt manifest's scaledH values assume a
+        // full-width render while #reader-inner is still actually sitting
+        // at whatever pct the zoom slider is at, and object-fit: fill
+        // stretches/squishes every page to the mismatched height (see
+        // currentLongStripEffectiveW's comment above).
+        buildManifest(readerSettings.padding, currentLongStripEffectiveW());
         applyPageGapVar(readerSettings.padding);
 
         let newAnchor = manifest.find(e => e.chapterId === anchorChapId && e.localIdx === anchorLocal);
