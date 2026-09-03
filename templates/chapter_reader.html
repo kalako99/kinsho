@@ -201,26 +201,34 @@
          heights. Removing the layer promotion instead trades away
          whatever it was still buying against the original repaint flash
          -- but by report that flash was still happening regardless, so
-         little is actually being given up. */
+         little is actually being given up.
+
+         2026-09-03 CAVEAT: slots became <canvas> elements (see the rule
+         below), and a <canvas> is commonly promoted to its OWN independent
+         GPU compositor surface by the browser even with NO will-change/
+         contain hint at all -- unlike a plain <img>, which the reasoning
+         above was written about. If the exact seam symptom described above
+         reappears after this change, this is the first place to look:
+         the underlying "two independently-composited surfaces don't agree
+         on a sub-pixel shared edge" mechanism may be back for a different
+         reason than what was removed here. Not yet confirmed either way. */
     }
 
-    .page-slot img {
+    .page-slot canvas {
+      /* Long-strip slots switched from <img> to <canvas> (2026-09-03) to
+         escape Chromium's own compositor tile-raster scheduling entirely --
+         see CLAUDE.md's black-flick investigation. We draw the exact
+         precomputed-ratio box ourselves (drawImage target size == this
+         canvas's own backing-buffer size, see _makeSlotEl), so there's no
+         object-fit equivalent needed here the way <img> required one.
+         user-select carried over from the old <img> rule -- stops a
+         long-press from starting a text/image-adjacent selection, same
+         class of native gesture hijack noted there historically; canvas
+         isn't natively draggable the way <img> is, so no -webkit-user-drag
+         equivalent is needed. */
       display: block;
       width: 100%;
       height: 100%;
-      /* object-fit: fill keeps the image at exactly the precomputed ratio */
-      object-fit: fill;
-      /* <img> is natively draggable by default -- nothing here previously
-         stopped the browser's own long-press-and-drag-image gesture
-         (the same one used to drag an image into another app), which a
-         scroll gesture that starts or lingers on an image can be
-         misread as. That native drag path pulls the image into a
-         separate drag-preview compositing flow, a plausible source of
-         exactly the kind of transient boundary artifact seen during
-         scroll (2026-08-08). -webkit-user-drag disables it directly;
-         user-select stops a long-press from starting a text/image
-         selection instead, the same class of native gesture hijack. */
-      -webkit-user-drag: none;
       user-select: none;
     }
 
@@ -2073,11 +2081,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // _shiftConveyorWindow) for the entry whose slot is being torn down right
   // now. The vacate sites already know the exact index leaving the window,
   // so there's no need to wait for a later radius-based sweep to catch it.
+  // Holds either an Image() (single-page mode's own predecode, unchanged --
+  // see loadEntryTier1) or an AbortController (long-strip's canvas/
+  // ImageBitmap decode -- see _ensureBitmap) keyed by global manifest
+  // index, so callers cancel either shape by index alone without needing
+  // to know which mode dispatched it.
   function cancelInFlightPredecode(idx) {
-    const img = inFlightPrefetchImages.get(idx);
-    if (!img) return;
-    img._cancelled = true;
-    img.src = '';
+    const pending = inFlightPrefetchImages.get(idx);
+    if (!pending) return;
+    if (pending instanceof AbortController) {
+      pending.abort();
+    } else {
+      pending._cancelled = true;
+      pending.src = '';
+    }
     inFlightPrefetchImages.delete(idx);
   }
 
@@ -2139,16 +2156,113 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return `?scale=${scales[readerSettings.pdfScale ?? 1]}`;
   }
 
-  // Assign a URL to a manifest entry (populates entry.url, sets img src via slot if assigned)
-  function loadEntry(entry, retriesLeft = 2) {
+  // ── LONG-STRIP CANVAS DECODE (2026-09-03) ──────────────────────────────
+  // Replaces the old "detached Image() + decode()" predecode trick for
+  // long-strip slots specifically (single-page mode's own slots are
+  // untouched -- see loadEntryTier1/prefetchEntryTier2's mode branches).
+  // That trick relied on the browser's own decoded-pixel cache (keyed by
+  // URL) being reused once the same URL was later assigned to a real
+  // <img>. A <canvas> has no equivalent implicit reuse: createImageBitmap()
+  // hands back a plain object WE must hold onto ourselves, so it's cached
+  // directly on the manifest entry (entry.bitmap) and reused explicitly
+  // everywhere it's next needed (a tier2 prefetch promoted to tier1, a
+  // redraw after a conveyor shift, etc.) -- this is arguably more reliable
+  // than the old implicit-cache-reuse assumption, not just a workaround.
+  //
+  // createImageBitmap() is inherently async and decodes off the main
+  // thread by spec (https://html.spec.whatwg.org/#dom-createimagebitmap)
+  // -- no separate Worker needed just to get that guarantee.
+  //
+  // In-flight decodes are tracked two ways: entry._bitmapPromise dedupes
+  // concurrent callers for the SAME entry (tier2 and tier1 can otherwise
+  // both dispatch for the same page moments apart) onto one shared fetch;
+  // inFlightPrefetchImages (keyed by global index, shared with single-page
+  // mode's own Image()-based tracking -- see cancelInFlightPredecode) is
+  // what lets the EXISTING cancellation machinery
+  // (cancelInFlightPredecode/cancelStalePrefetches) abort it by index,
+  // unchanged from before.
+  function _ensureBitmap(globalIdx, entry, url, priority = 'auto') {
+    if (entry.bitmap) return Promise.resolve(entry.bitmap);
+    if (entry._bitmapPromise) return entry._bitmapPromise;
+    const controller = new AbortController();
+    inFlightPrefetchImages.set(globalIdx, controller);
+    const clearTracking = () => {
+      entry._bitmapPromise = null;
+      if (inFlightPrefetchImages.get(globalIdx) === controller) {
+        inFlightPrefetchImages.delete(globalIdx);
+      }
+    };
+    // `priority` is the Fetch API's own resource-priority hint (Chrome
+    // 101+) -- the closest canvas-era equivalent of the old
+    // `img.fetchPriority` trick, now that we dispatch the fetch ourselves
+    // instead of letting an <img> do it. Ignored harmlessly by browsers
+    // that don't recognize the option.
+    const p = fetch(url, { signal: controller.signal, priority })
+      .then(r => {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.blob();
+      })
+      .then(blob => createImageBitmap(blob))
+      .then(bitmap => {
+        clearTracking();
+        entry.bitmap = bitmap;
+        return bitmap;
+      })
+      .catch(err => {
+        clearTracking();
+        throw err;
+      });
+    entry._bitmapPromise = p;
+    return p;
+  }
+
+  // Frees an already-decoded bitmap's backing store -- called wherever a
+  // manifest entry's association with a materialized slot ends (conveyor
+  // shift/rebuild/clear). Deliberately NOT called on every ordinary scroll
+  // tick or for a merely-out-of-tier2-range entry -- only at the same
+  // points the old <img>-based code already discarded a slot's element
+  // entirely, so this isn't a new memory-vs-smoothness trade-off, just the
+  // canvas-era equivalent of the same disposal point. Bounds total
+  // decoded-bitmap memory to roughly the materialized window's own size
+  // (SLOT_COUNT) plus whatever tier2/tier3 prefetched ahead, the same order
+  // of magnitude the old design already assumed was a reasonable working
+  // set -- left unbounded, a long reading session could otherwise
+  // accumulate hundreds of full-resolution raw bitmaps (an ImageBitmap is
+  // uncompressed pixel data, easily several MB each for a webtoon-sized
+  // page) for as long as the chapter's manifest object lives.
+  function _releaseBitmap(entry) {
+    if (entry.bitmap) {
+      try { entry.bitmap.close(); } catch (e) {}
+      entry.bitmap = null;
+    }
+  }
+
+  // Draws entry's already-decoded bitmap into slot index si's canvas,
+  // filling it exactly (the target size is the canvas's own backing-buffer
+  // size, already computed from the precomputed aspect-correct scaledH --
+  // see _makeSlotEl -- so this is the direct equivalent of what
+  // object-fit: fill did for the old <img>-based slots, just performed by
+  // us instead of the browser).
+  function _paintBitmapToSlot(si, entry) {
+    if (si === -1 || !entry.bitmap) return;
+    const canvas = slotPool[si].canvas;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(entry.bitmap, 0, 0, canvas.width, canvas.height);
+  }
+
+  // Assign a URL to a manifest entry (populates entry.url, sets img src via slot if assigned).
+  // priority is forwarded all the way to fetch()'s own priority option for
+  // long-strip's canvas path -- see _ensureBitmap.
+  function loadEntry(entry, retriesLeft = 2, priority = 'auto') {
     if (entry.loaded) return;
     if (entry.url) {
-      _applyUrlToSlot(entry, retriesLeft);
+      _applyUrlToSlot(entry, retriesLeft, priority);
       return;
     }
     ensureChapterUrls(entry.chapterId).then(urls => {
       entry.url = urls[entry.localIdx] || '';
-      _applyUrlToSlot(entry, retriesLeft);
+      _applyUrlToSlot(entry, retriesLeft, priority);
     });
   }
 
@@ -2167,30 +2281,27 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // a later pass (scrolling back over it, a fresh conveyor rebuild) can
   // still pick it up naturally instead of being marked done-but-broken.
   //
-  // Predecodes off-DOM (a detached Image() + .decode()) before ever touching
-  // the real slot's <img> -- this is the function EVERY slot in the conveyor
-  // actually goes through the moment it's materialized (called directly from
-  // _rebuildConveyorWindow/_shiftConveyorWindow, independently of the
-  // tier1/tier2/tier3 prefetch system below), so it was the real source of a
-  // black-flash-during-fast-scroll bug live-confirmed on real hardware
-  // (2026-08-07/08): the 2026-07-28 predecode fix only ever touched
-  // loadEntryTier1, which this function's own synchronous dispatch always
-  // wins the race against for any freshly-materializing slot -- assigning
-  // straight to the real, already-visible <img> forces the browser to decode
-  // on the critical rendering path, showing the slot's plain black
-  // background underneath for a moment, exactly like the loose-image case
-  // loadEntryTier1 was already fixed for. Confirmed on real hardware that
-  // this isn't about network latency (a page can flash black with no
-  // request anywhere near that moment in the server log -- an
-  // already-cached image still has to be decoded before it can paint,
-  // decode() just moves that off the critical rendering path). Tracked in
-  // inFlightPrefetchImages exactly like loadEntryTier1's own detached
-  // Image() -- see that map's comment -- since a slot torn down mid-decode
-  // (fast scroll shifting the window again before this resolves) would
-  // otherwise leak its connection indefinitely; every vacate site
-  // (_clearSlotPool, both branches of _shiftConveyorWindow) cancels this by
-  // exact index.
-  function _applyUrlToSlot(entry, retriesLeft = 2) {
+  // Predecodes to an ImageBitmap (see _ensureBitmap) before ever touching
+  // the real slot's <canvas> -- this is the function EVERY slot in the
+  // conveyor actually goes through the moment it's materialized (called
+  // directly from _rebuildConveyorWindow/_shiftConveyorWindow,
+  // independently of the tier1/tier2/tier3 prefetch system below), so it
+  // was the real source of a black-flash-during-fast-scroll bug
+  // live-confirmed on real hardware (2026-08-07/08): the 2026-07-28
+  // predecode fix only ever touched loadEntryTier1, which this function's
+  // own synchronous dispatch always wins the race against for any
+  // freshly-materializing slot -- assigning straight to the real,
+  // already-visible element forced the browser to decode on the critical
+  // rendering path. Confirmed on real hardware that this isn't about
+  // network latency (a page can flash black with no request anywhere near
+  // that moment in the server log -- an already-cached image still has to
+  // be decoded before it can paint). Tracked in inFlightPrefetchImages
+  // exactly like loadEntryTier1's own predecode -- see cancelInFlightPredecode
+  // -- since a slot torn down mid-decode (fast scroll shifting the window
+  // again before this resolves) would otherwise leak its connection
+  // indefinitely; every vacate site (_clearSlotPool, both branches of
+  // _shiftConveyorWindow) cancels this by exact index.
+  function _applyUrlToSlot(entry, retriesLeft = 2, priority = 'auto') {
     if (!entry.url) return;
     const globalIdx = manifest.indexOf(entry);
     if (assignedSlot[globalIdx] === -1) return;
@@ -2209,39 +2320,35 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // predecoding the same URL independently at the boundary between them
     // -- a little redundant work, not a correctness issue.)
     entry._realDispatched = true;
-    const img = new Image();
-    inFlightPrefetchImages.set(globalIdx, img);
-    img.src = entry.url;
-    img.decode().then(() => {
-      inFlightPrefetchImages.delete(globalIdx);
+    _ensureBitmap(globalIdx, entry, entry.url, priority).then(() => {
       // Re-resolve the slot at paint time, not the assignedSlot value read
       // above -- the conveyor can shift while this decode is in flight,
       // moving (or removing) this entry's slot in the meantime.
       const curSi = assignedSlot[manifest.indexOf(entry)];
       if (curSi === -1) return;
-      slotPool[curSi].img.src = entry.url;
+      _paintBitmapToSlot(curSi, entry);
       entry.loaded = true;
-    }).catch(() => {
-      inFlightPrefetchImages.delete(globalIdx);
+    }).catch(err => {
       // A deliberate cancelInFlightPredecode() (this slot was vacated while
-      // still decoding) also rejects this same decode() promise -- retrying
-      // here would immediately re-dispatch a fresh request for a page we
-      // just freed a connection slot for, defeating the whole point of
-      // cancelling it. Same guard, same reasoning, as loadEntryTier1 below.
+      // still decoding) also rejects this same promise via AbortController
+      // -- retrying here would immediately re-dispatch a fresh request for
+      // a page we just freed a connection slot for, defeating the whole
+      // point of cancelling it. Same guard, same reasoning, as
+      // loadEntryTier1 below.
       //
       // _realDispatched must still be cleared here even though we're not
       // retrying -- confirmed live (2026-08-08): a materialization wide
       // enough to dispatch real fetches beyond prefetchAroundIndex's own
       // (much narrower) tier2 radius has those fetches cancelled by that
       // same call's cancelStalePrefetches sweep almost immediately, often
-      // before decode() resolves either way. Leaving the flag set left
+      // before the decode resolves either way. Leaving the flag set left
       // loadEntryTier3 permanently refusing to backfill even a thumbnail
       // for that slot (its own guard is exactly "skip if a real fetch is
       // pending or already succeeded") -- a real fetch that was cancelled
       // is neither, so the slot was stuck fully blank forever, not just
       // stuck at low-res.
       entry._realDispatched = false;
-      if (img._cancelled) {
+      if (err && err.name === 'AbortError') {
         // Cancelled, not a genuine failure -- retrying immediately would
         // just re-request a page we deliberately freed a connection for.
         // But clearing the flag alone isn't enough either: nothing else is
@@ -2256,7 +2363,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         return;
       }
       if (retriesLeft > 0) {
-        setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
+        setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1, priority), 500);
       } else {
         // Genuine failure, out of retries -- same reasoning as above, fall
         // through to a thumbnail now rather than leaving the slot blank.
@@ -2312,62 +2419,56 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         if (signal?.aborted || retriesLeft <= 0) return;
         setTimeout(() => loadEntryTier1(entry, signal, retriesLeft - 1), 500);
       };
-      // Always predecode off-DOM before painting into a slot -- not just for
-      // compressed sources (the old split here). Fetching bytes alone (the
-      // previous loose-image path) only warms the browser's HTTP cache; the
-      // slot's own <img> element -- a different element than whatever fetched
-      // the bytes -- still has to synchronously decode a multi-megapixel page
-      // the moment it's assigned that src, and a fast swipe/scroll can outrun
-      // that decode, showing the slot's plain black background underneath
-      // for a moment. img.decode() warms the browser's decoded-pixel cache,
-      // which is keyed by URL, not by element, so the later
-      // `slotPool[curSi].img.src = url` reuses that decode and paints
-      // immediately regardless of source type.
-      // Tracked in inFlightPrefetchImages (keyed by this entry's global
-      // index) so a later prefetchAroundIndex call -- once the conveyor has
-      // moved on and this page is no longer within even the widest prefetch
-      // range -- can actively cancel it. Without this, this detached Image()
-      // is referenced only by this closure's own pending decode()/catch, so
-      // nothing else can ever reach it to stop it: its underlying network
-      // request keeps running in the background indefinitely even after the
-      // user has scrolled far past this page, permanently occupying one of
-      // the browser's handful of per-origin connections. See
-      // cancelStalePrefetches's own comment for the full reasoning -- this
-      // was confirmed live (not guessed at): after enough continuous
-      // scrolling, real page requests for the CURRENT visible position were
-      // observed stuck pending for 10+ seconds, never completing or failing,
-      // while only a handful of these old abandoned requests were still
-      // "in flight" from the browser's perspective.
-      const img = new Image();
-      inFlightPrefetchImages.set(globalIdx, img);
-      img.src = url;
-      img.decode().then(() => {
-        inFlightPrefetchImages.delete(globalIdx);
+
+      // Single-page mode keeps the ORIGINAL <img>-based predecode entirely
+      // unchanged -- its own slots (sp-slot) are a separate implementation
+      // from long-strip's (see "Single-page mode rebuilt..." above) and
+      // aren't part of the 2026-09-03 canvas change. img.decode() here
+      // warms the browser's own decoded-pixel cache (keyed by URL), which
+      // _upgradeSpSlot's plain `img.src = url` reuses.
+      if (readerSettings.mode === 'single-page') {
+        const img = new Image();
+        inFlightPrefetchImages.set(globalIdx, img);
+        img.src = url;
+        img.decode().then(() => {
+          inFlightPrefetchImages.delete(globalIdx);
+          onSuccess();
+        }).catch(() => {
+          inFlightPrefetchImages.delete(globalIdx);
+          if (img._cancelled) return;
+          onFail();
+        });
+        return;
+      }
+
+      // Long-strip: decode to an ImageBitmap and paint via canvas -- see
+      // _ensureBitmap's own comment for why this replaced the <img>-based
+      // predecode for this mode specifically (2026-09-03, the black-flick
+      // fix that moves presentation off the compositor's own tile-raster
+      // scheduling entirely).
+      _ensureBitmap(globalIdx, entry, url).then(() => {
+        if (signal?.aborted) return;
         // Re-resolve the slot fresh here, not a value captured before this
         // decode started -- the conveyor can shift (or fully rebuild
         // slotPool from scratch) while this decode is in flight, which
         // would otherwise paint this entry's image into whatever now
-        // occupies a stale slot position (found 2026-08-09 via code review,
-        // not yet live-verified: the exact stale-slot race _applyUrlToSlot's
-        // own comment already warns about, just missed here -- matches the
-        // reported "wrong image in the wrong container" bug). globalIdx
-        // itself stays valid across shifts
-        // (manifest order is static); only which slot it currently occupies
-        // can change.
+        // occupies a stale slot position (found 2026-08-09 via code review:
+        // the exact stale-slot race _applyUrlToSlot's own comment already
+        // warns about, just missed here -- matches the reported "wrong
+        // image in the wrong container" bug). globalIdx itself stays valid
+        // across shifts (manifest order is static); only which slot it
+        // currently occupies can change.
         const curSi = assignedSlot[globalIdx];
-        if (curSi !== -1) slotPool[curSi].img.src = url;
+        if (curSi !== -1) _paintBitmapToSlot(curSi, entry);
         onSuccess();
-      }).catch(() => {
-        inFlightPrefetchImages.delete(globalIdx);
-        // A deliberate cancelStalePrefetches() (src cleared because this
-        // page fell outside even the tier2 range) also rejects this same
-        // decode() promise -- retrying here would immediately re-dispatch a
+      }).catch(err => {
+        // A deliberate cancelStalePrefetches() (this page fell outside even
+        // the tier2 range) also rejects this same promise via
+        // AbortController -- retrying here would immediately re-dispatch a
         // fresh request for a page we just freed a connection slot for,
-        // defeating the whole point of cancelling it. img._cancelled is set
-        // by cancelStalePrefetches right before it clears src, so a real
-        // network/decode failure (never cancelled) is the only case that
-        // still retries.
-        if (img._cancelled) return;
+        // defeating the whole point of cancelling it. A real network/decode
+        // failure (never cancelled) is the only case that still retries.
+        if (err && err.name === 'AbortError') return;
         onFail();
       });
     };
@@ -2383,30 +2484,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const url = urls[entry.localIdx] || '';
       if (!url) return;
       entry.url = url;
-      // Same stale-prefetch tracking/cancellation as loadEntryTier1 above --
-      // see that function's comment and cancelStalePrefetches for why.
-      //
-      // Also calls decode(), not just src (previously relied on onload/
-      // onerror alone, which only warms the HTTP byte cache) -- confirmed
-      // live (2026-08-08) that a page which only ever reached tier2 sat
-      // with its bytes cached but never decoded, so materializing it later
-      // (loadEntryTier1/_applyUrlToSlot, each of which decodes a
-      // *different*, throwaway Image() for the same URL) paid the real
-      // decode cost right there on the critical path instead -- visible as
-      // a brief black flash on an ordinary flick even though nothing
-      // needed fetching over the network. decode() here warms the same
-      // shared decoded-pixel cache (keyed by URL, see _applyUrlToSlot's
-      // comment) well ahead of when the page is actually needed.
-      const img = new Image();
       const idx = manifest.indexOf(entry);
-      inFlightPrefetchImages.set(idx, img);
-      img.src = url;
-      img.decode().then(() => {
-        inFlightPrefetchImages.delete(idx);
-      }).catch(() => {
-        inFlightPrefetchImages.delete(idx);
+
+      // Single-page mode: unchanged, warms the browser's own decoded-pixel
+      // cache for its own later `img.src = url` reuse (see loadEntryTier1).
+      if (readerSettings.mode === 'single-page') {
+        const img = new Image();
+        inFlightPrefetchImages.set(idx, img);
+        img.src = url;
+        img.decode().then(() => {
+          inFlightPrefetchImages.delete(idx);
+        }).catch(() => {
+          inFlightPrefetchImages.delete(idx);
+        });
+        return;
+      }
+
+      // Long-strip: decode into entry.bitmap (see _ensureBitmap) ahead of
+      // time, so a later promotion to tier1 (loadEntryTier1/_applyUrlToSlot)
+      // reuses it with zero extra decode cost instead of paying that cost
+      // on the critical path -- confirmed live (2026-08-08) this mattered
+      // even for the old <img>-based version, same reasoning carries over
+      // unchanged. Result intentionally discarded here -- _ensureBitmap
+      // already caches onto the entry itself; nothing further to do until
+      // something promotes this entry to tier1.
+      _ensureBitmap(idx, entry, url).catch(() => {
         // A cancelled prefetch (page fell back out of even tier2 range)
-        // also rejects here via cancelInFlightPredecode's img.src = '' --
+        // rejects here via cancelInFlightPredecode's controller.abort() --
         // nothing further to do either way; tier2 never retries a failure,
         // a later pass will naturally re-attempt if the page is still
         // needed once it's back in range.
@@ -2414,37 +2518,53 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     });
   }
 
-  // Tier 3: thumbnail into slot (full-res will overwrite when promoted)
+  // Tier 3: thumbnail into slot (full-res will overwrite when promoted).
+  // Long-strip only (single-page mode has no tier3 concept) -- draws
+  // directly via its own one-off fetch+decode rather than going through
+  // _ensureBitmap/entry.bitmap, since a thumbnail is deliberately never
+  // cached as the entry's "real" bitmap.
   function loadEntryTier3(entry) {
     if (entry.loaded) return;
     const globalIdx = manifest.indexOf(entry);
     const si = assignedSlot[globalIdx];
     if (si === -1) return;
-    const img = slotPool[si].img;
+    const canvas = slotPool[si].canvas;
     // loadEntry() (called for every slot in the window on rebuild/shift,
     // independently of this tier system) may have already dispatched the
     // real full-res fetch to this exact slot -- confirmed live: under
     // realistic network conditions (a real fetch takes real time), that
     // fetch is often still in flight by the time a later shift's
     // prefetchAroundIndex reaches this entry's tier3 range. Overwriting it
-    // here would abort the real request, and once the thumbnail's own load
-    // fires, the onload handler _applyUrlToSlot bound for the REAL image
-    // incorrectly marks entry.loaded true -- permanently blocking any
-    // future upgrade to full-res for this page (every loader early-returns
-    // on entry.loaded) until the slot is vacated and reused from scratch.
-    // Skip the stomp whenever the real fetch is still pending or already
-    // succeeded (entry._realDispatched, set by _applyUrlToSlot -- comparing
-    // img.src against entry.url directly doesn't work here, since reading
-    // back img.src always yields a browser-normalized absolute URL while
-    // entry.url is stored as the original relative path, so the two can
-    // never be string-equal). _applyUrlToSlot clears the flag once retries
-    // are exhausted, so a permanently-failed fetch still falls through to
-    // the thumbnail below instead of being left broken forever.
+    // here would abort the real request AND (since a real fetch resolving
+    // late would still call _paintBitmapToSlot/mark entry.loaded true on
+    // its own) risk the thumbnail's paint racing the real one -- skip the
+    // stomp whenever the real fetch is still pending or already succeeded
+    // (entry._realDispatched, set by _applyUrlToSlot). _applyUrlToSlot
+    // clears the flag once retries are exhausted, so a permanently-failed
+    // fetch still falls through to the thumbnail below instead of being
+    // left broken forever.
     if (entry._realDispatched) return;
-    if (!img.dataset.thumbSet) {
-      img.dataset.thumbSet = '1';
-      img.src = thumbUrl(entry);
-    }
+    if (canvas.dataset.thumbSet) return;
+    canvas.dataset.thumbSet = '1';
+    fetch(thumbUrl(entry))
+      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then(blob => createImageBitmap(blob))
+      .then(bitmap => {
+        // Re-check at paint time -- a real fetch may have started (and
+        // even finished) while this thumbnail was in flight; never let a
+        // late thumbnail stomp a real image that's already landed, same
+        // guard shape as the stale-slot re-resolve pattern used throughout
+        // this file.
+        if (entry.loaded || entry._realDispatched) { bitmap.close(); return; }
+        const curSi = assignedSlot[manifest.indexOf(entry)];
+        if (curSi === -1) { bitmap.close(); return; }
+        const c = slotPool[curSi].canvas;
+        const ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, c.width, c.height);
+        ctx.drawImage(bitmap, 0, 0, c.width, c.height);
+        bitmap.close();
+      })
+      .catch(() => {});
   }
 
   function prefetchAroundIndex(centerGlobalIdx, signal, direction = 0) {
@@ -2516,17 +2636,29 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // ── BUILD A SLOT ──
-  function _makeSlotEl() {
+  // Takes scaledH now (2026-09-03, the canvas change) so this can size the
+  // canvas's own backing buffer in one place instead of splitting "set the
+  // wrapper div's CSS height" (still needed for scroll/layout math, exactly
+  // as before) and "set the canvas's pixel dimensions" (new) across every
+  // call site. Sized at devicePixelRatio so pages stay crisp on any
+  // high-DPI screen -- a canvas backing buffer is a hard resolution
+  // ceiling for whatever's drawn into it, unlike <img>, which the browser
+  // already upscales/downscales natively regardless of backing pixels.
+  function _makeSlotEl(scaledH) {
     const el  = document.createElement('div');
     el.className = 'page-slot';
-    const img = document.createElement('img');
-    img.style.display   = 'block';
-    img.style.width     = '100%';
-    img.style.height    = '100%';
-    img.style.objectFit = 'fill';
-    img.draggable = false; // see .page-slot img's -webkit-user-drag comment
-    el.appendChild(img);
-    return { el, img };
+    el.style.height = scaledH + 'px';
+    const canvas = document.createElement('canvas');
+    canvas.style.display = 'block';
+    canvas.style.width   = '100%';
+    canvas.style.height  = '100%';
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.max(1, Math.round(currentLongStripEffectiveW() * dpr));
+    canvas.height = Math.max(1, Math.round(scaledH * dpr));
+    const ctx = canvas.getContext('2d');
+    if (ctx) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; }
+    el.appendChild(canvas);
+    return { el, canvas };
   }
 
   // ── FULL REBUILD: clears the conveyor and materializes a new window of
@@ -2536,23 +2668,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // bottomSpacer in place as permanent fixtures -- reader.replaceChildren()
   // would also wipe the spacers, which must never happen.
   function _clearSlotPool() {
-    // Clearing src before removal aborts any still-in-flight fetch on the
-    // slot's own <img> element -- but since _applyUrlToSlot now predecodes
-    // via a separate, detached Image() before ever touching the real slot
-    // (see its own comment), the actual in-flight fetch for a still-loading
-    // entry usually lives there instead, out of this element's reach
-    // entirely. cancelInFlightPredecode closes that gap by exact index, same
-    // as both branches of _shiftConveyorWindow below -- without it, every
-    // slot torn down mid-load would leak its detached predecode's connection
-    // indefinitely, the exact "abandoned request" bug class
-    // cancelStalePrefetches was built to prevent for tier1/tier2, just at
-    // the much larger scale of the whole conveyor window instead of a
-    // narrow prefetch radius.
+    // A vacated slot's canvas has nothing equivalent to <img>'s "clear src
+    // to abort the in-flight fetch" -- _applyUrlToSlot's decode lives
+    // entirely in _ensureBitmap's own fetch()/AbortController, out of this
+    // element's reach regardless. cancelInFlightPredecode aborts that (and
+    // _releaseBitmap frees an already-decoded one) by exact index, same as
+    // both branches of _shiftConveyorWindow below -- without it, every slot
+    // torn down mid-load would leak its predecode's connection indefinitely,
+    // the exact "abandoned request" bug class cancelStalePrefetches was
+    // built to prevent for tier1/tier2, just at the much larger scale of
+    // the whole conveyor window instead of a narrow prefetch radius.
     for (let k = 0; k < slotPool.length; k++) {
-      const { el, img } = slotPool[k];
-      img.src = '';
-      el.remove();
+      slotPool[k].el.remove();
       cancelInFlightPredecode(windowLo + k);
+      _releaseBitmap(manifest[windowLo + k]);
     }
     slotPool.length = 0;
   }
@@ -2614,10 +2743,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     coordOffset = _computeCoordOffset(targetGlobalY);
     const frag = document.createDocumentFragment();
     for (let i = windowLo; i <= windowHi; i++) {
-      const { el, img } = _makeSlotEl();
-      el.style.height = manifest[i].scaledH + 'px';
+      const { el, canvas } = _makeSlotEl(manifest[i].scaledH);
       frag.appendChild(el);
-      slotPool.push({ el, img });
+      slotPool.push({ el, canvas });
       assignedSlot[i] = i - windowLo;
     }
     readerInner.insertBefore(frag, bottomSpacer);
@@ -2634,8 +2762,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // request order effectively IS priority order: DOM-order loading
     // queued the visible page behind up to half the window of off-screen
     // full-res pages, which is exactly the blank-first-page-until-you-
-    // scroll symptom on a cold server. fetchPriority nudges supporting
-    // browsers the same way (harmless no-op elsewhere).
+    // scroll symptom on a cold server. Passed through to fetch()'s own
+    // `priority` option now (2026-09-03) -- the old `img.fetchPriority`
+    // hint has no canvas equivalent since we dispatch the fetch ourselves
+    // (see _ensureBitmap); same nudge, different mechanism, harmless no-op
+    // on a browser that doesn't support fetch priority hints.
     const centerIdx = Math.max(windowLo, Math.min(windowHi, firstIndexAfter(targetGlobalY)));
 
     // How many pages ahead/behind center get 'high' fetchPriority, in
@@ -2668,12 +2799,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     for (let d = 0; d <= windowHi - windowLo; d++) {
       for (const i of (d === 0 ? [centerIdx] : [centerIdx + d, centerIdx - d])) {
         if (i < windowLo || i > windowHi) continue;
-        const si = assignedSlot[i];
-        if (si !== -1) {
-          const rel = i - centerIdx;
-          slotPool[si].img.fetchPriority = (rel >= -HIGH_PRI_BEHIND && rel <= HIGH_PRI_AHEAD) ? 'high' : 'low';
-        }
-        loadEntry(manifest[i]);
+        const rel = i - centerIdx;
+        const priority = (rel >= -HIGH_PRI_BEHIND && rel <= HIGH_PRI_AHEAD) ? 'high' : 'low';
+        loadEntry(manifest[i], 2, priority);
       }
     }
     prefetchAroundIndex(centerIdx);
@@ -2691,15 +2819,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const oldIdx = windowLo + k;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
-        // Abort any still-in-flight fetch on this vacated slot -- see
-        // _clearSlotPool's comment for why this matters.
-        slotPool[k].img.src = '';
+        // Abort any still-in-flight fetch on this vacated slot, and free
+        // its already-decoded bitmap if it had one -- see _clearSlotPool's
+        // comment for why cancellation matters; _releaseBitmap is the
+        // canvas-era memory-bound equivalent (see its own comment).
         slotPool[k].el.remove();
         cancelInFlightPredecode(oldIdx);
+        _releaseBitmap(manifest[oldIdx]);
 
         const newIdx = windowHi + 1 + k;
-        const { el } = _makeSlotEl();
-        el.style.height = manifest[newIdx].scaledH + 'px';
+        const { el } = _makeSlotEl(manifest[newIdx].scaledH);
         frag.appendChild(el);
         loadEntry(manifest[newIdx]);
       }
@@ -2711,8 +2840,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const frag = document.createDocumentFragment();
       for (let k = n - 1; k >= 0; k--) {
         const newIdx = windowLo - 1 - k;
-        const { el } = _makeSlotEl();
-        el.style.height = manifest[newIdx].scaledH + 'px';
+        const { el } = _makeSlotEl(manifest[newIdx].scaledH);
         frag.appendChild(el);
         loadEntry(manifest[newIdx]);
       }
@@ -2721,9 +2849,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const oldIdx = windowHi - k;
         manifest[oldIdx].loaded = false;
         assignedSlot[oldIdx] = -1;
-        slotPool[slotPool.length - 1 - k].img.src = '';
         slotPool[slotPool.length - 1 - k].el.remove();
         cancelInFlightPredecode(oldIdx);
+        _releaseBitmap(manifest[oldIdx]);
       }
       windowLo -= n;
       windowHi -= n;
@@ -2738,7 +2866,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     let node = topSpacer.nextSibling;
     let k = 0;
     while (node && node !== bottomSpacer) {
-      slotPool.push({ el: node, img: node.querySelector('img') });
+      slotPool.push({ el: node, canvas: node.querySelector('canvas') });
       assignedSlot[windowLo + k] = k;
       node = node.nextSibling;
       k++;
