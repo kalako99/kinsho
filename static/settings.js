@@ -1080,25 +1080,16 @@ createApp({
       document.documentElement.setAttribute('data-theme', 'custom');
     },
 
-    async resetEditorToDefault() {
+    async resetEditorToBlank() {
       this.cssEditorContent = this.CSS_EDITOR_DEFAULT_TEMPLATE;
     },
 
-    async resetEditorToSharp() {
+    async resetEditorToDefault() {
       try {
-        const res = await fetch(apiUrl('/static/style.css'));
+        const res = await fetch(apiUrl('/static/theme-default.css'));
         this.cssEditorContent = await res.text();
       } catch (e) {
-        console.error('Failed to fetch Sharp CSS:', e);
-      }
-    },
-
-    async resetEditorToAbyss() {
-      try {
-        const res = await fetch(apiUrl('/static/theme-abyss.css'));
-        this.cssEditorContent = await res.text();
-      } catch (e) {
-        console.error('Failed to fetch Abyss CSS:', e);
+        console.error('Failed to fetch the Default theme\'s CSS:', e);
       }
     },
 

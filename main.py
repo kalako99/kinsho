@@ -76,6 +76,7 @@ def get_local_ip():
 @asynccontextmanager
 async def lifespan(app):
     auth._ensure_admin_exists()
+    _startup_migrate_retired_visual_themes()
     _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
     if os.path.exists(bg_folder):
@@ -2975,6 +2976,39 @@ async def dismiss_all_integrity_issues_endpoint(request: Request):
         save_integrity_issues(issues_data)
     return JSONResponse({"ok": True, "count": 0})
 
+def _startup_migrate_retired_visual_themes():
+    """Called once at app startup (see lifespan). The 'default' (original
+    CSS) and 'sharp' visual themes were retired 2026-09-xx, and 'abyss' was
+    renamed to take over the 'default' slot as the app's one remaining
+    built-in look (see get_theme_css). Any user whose active_visual_theme
+    still says 'sharp' or 'abyss' needs it rewritten to 'default' -- left
+    alone, their next page load would set data-theme to a value neither
+    theme-default.css nor anything else defines any rule for, silently
+    rendering completely unstyled (no error, nothing to notice it by)
+    instead of the intended look. Idempotent -- a user already on 'default'
+    or 'custom' is untouched, so this is safe to run on every startup."""
+    try:
+        users = auth._load_users().get("users", [])
+    except Exception as e:
+        print(f"[StartupCheck] could not list users for visual-theme migration: {e}")
+        return
+    migrated = 0
+    for user in users:
+        username = user.get("username")
+        if not username:
+            continue
+        try:
+            user_data = auth.load_user_data(username)
+            if user_data.get("active_visual_theme") in ("sharp", "abyss"):
+                user_data["active_visual_theme"] = "default"
+                auth.save_user_data(username, user_data)
+                migrated += 1
+        except Exception as e:
+            print(f"[StartupCheck] visual-theme migration failed for '{username}': {e}")
+    if migrated:
+        print(f"[StartupCheck] migrated {migrated} user(s) off the retired sharp/abyss visual themes.")
+
+
 def _startup_heal_corrupted_dims():
     """Called once at app startup (see lifespan). Detects any manga's
     dims.json that fails to parse -- the truncated-mid-write corruption
@@ -3111,12 +3145,18 @@ def get_theme_css(username: str = None) -> str:
     except Exception:
         theme = BUILTIN_THEMES[0]
         visual_theme = "default"
-    dt_val = visual_theme if visual_theme in ("default", "sharp", "abyss", "custom") else "default"
+    # "sharp" and the old "default" (original CSS) were retired 2026-09-xx --
+    # "abyss" was renamed to take over the "default" slot as the app's one
+    # remaining built-in look (see _startup_migrate_retired_visual_themes,
+    # which rewrites any user still storing the old values). A value that
+    # somehow still says "sharp"/"abyss" (e.g. a restored old backup) falls
+    # back to "default" here too, so it can never reference CSS that no
+    # longer exists.
+    dt_val = visual_theme if visual_theme in ("default", "custom") else "default"
     dt_script = f'<script>document.documentElement.setAttribute("data-theme","{dt_val}");</script>'
     custom_block = f'<style id="custom-theme-style">{custom_css}</style>' if custom_css else ""
     return (
-        f'<link rel="stylesheet" href="/static/style.css">'
-        f'<link rel="stylesheet" href="/static/theme-abyss.css">'
+        f'<link rel="stylesheet" href="/static/theme-default.css">'
         f"<style>"
         f":root{{"
         f"--color-primary:{theme['primary']};"
@@ -3404,7 +3444,7 @@ async def save_visual_theme(request: Request):
     body      = await request.json()
     user_data = auth.load_user_data(username)
     vt = body.get("active_visual_theme", "default")
-    if vt not in ("default", "sharp", "abyss", "custom"):
+    if vt not in ("default", "custom"):
         vt = "default"
     user_data["active_visual_theme"] = vt
     if vt == "custom" and "active_custom_theme_name" in body:

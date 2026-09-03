@@ -1,0 +1,212 @@
+/* ── DEFAULT VISUAL THEME (formerly "Abyss") ─────────────────────────────────
+   Applied when <html data-theme="default"> — now the app's one and only
+   built-in look (alongside Custom); the old separate "Default"/"Sharp"
+   options were retired since they were too similar to be worth choosing
+   between, and this (Abyss) was renamed to take over the "Default" slot.
+   Frosted-glass panels, pill-shaped controls, soft rounded corners, a
+   Google Sans typeface and smooth easing. Changes shapes, spacing, borders,
+   shadows and fonts only — colors always come from the active accent color
+   (CSS custom properties), never hardcoded here.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap');
+
+[data-theme="default"] {
+  --default-radius: 20px;
+  --default-radius-lg: 28px;
+  --default-radius-sm: 12px;
+  --default-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --default-glass: color-mix(in srgb, var(--color-secondary) 55%, transparent);
+}
+
+/* ── TYPOGRAPHY ──────────────────────────────────────────────────────────── */
+
+[data-theme="default"] body {
+  font-family: "Google Sans", "Segoe UI", sans-serif;
+  font-optical-sizing: auto;
+}
+
+[data-theme="default"] .section-title {
+  text-shadow: none;
+  letter-spacing: 1px;
+  border-left: 3px solid var(--color-primary);
+  padding-left: 10px;
+}
+
+/* ── SCROLLBAR & SELECTION ───────────────────────────────────────────────── */
+
+[data-theme="default"] * {
+  scrollbar-color: color-mix(in srgb, var(--color-primary) 80%, transparent) transparent;
+}
+[data-theme="default"] ::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-primary) 80%, transparent);
+  border-radius: var(--default-radius-sm);
+}
+[data-theme="default"] ::-webkit-scrollbar-track { background: transparent; }
+
+[data-theme="default"] ::selection {
+  background: color-mix(in srgb, var(--color-primary) 25%, transparent);
+}
+
+/* ── BUTTONS, TABS & PILLS: fully rounded ───────────────────────────────── */
+
+[data-theme="default"] .btn,
+[data-theme="default"] .popup-btn,
+[data-theme="default"] .page-btn,
+[data-theme="default"] .sort-btn,
+[data-theme="default"] .tab-btn,
+[data-theme="default"] .tag-pill,
+[data-theme="default"] .btn-tag,
+[data-theme="default"] .suggestion-pill,
+[data-theme="default"] .meta-badge,
+[data-theme="default"] .meta-badge-sm,
+[data-theme="default"] .status-badge,
+[data-theme="default"] .complete-badge,
+[data-theme="default"] .bb-chap-btn,
+[data-theme="default"] .bm-panel-btn {
+  border-radius: 999px !important;
+  transition: background 0.3s var(--default-ease), color 0.3s var(--default-ease),
+    border-color 0.3s var(--default-ease), box-shadow 0.3s var(--default-ease),
+    transform 0.3s var(--default-ease);
+}
+
+[data-theme="default"] .btn:hover,
+[data-theme="default"] .page-btn:hover,
+[data-theme="default"] .tab-btn:hover {
+  transform: translateY(-1px);
+}
+
+[data-theme="default"] .back-btn,
+[data-theme="default"] .settings-btn,
+[data-theme="default"] .bb-iconbtn,
+[data-theme="default"] .bb-chapbtn,
+[data-theme="default"] .btn-pencil {
+  border-radius: var(--default-radius-sm) !important;
+  transition: background 0.25s var(--default-ease), color 0.25s var(--default-ease);
+}
+
+/* ── GLASS SURFACES: topbar, panels, dialogs, dropdowns ─────────────────── */
+
+[data-theme="default"] .topbar {
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  background: var(--default-glass);
+  border-bottom-color: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+[data-theme="default"] .popup,
+[data-theme="default"] .list-dropdown-menu,
+[data-theme="default"] .cover-picker-box,
+[data-theme="default"] .meta-popup,
+[data-theme="default"] .settings-panel,
+[data-theme="default"] .bm-modal,
+[data-theme="default"] .bookmark-panel {
+  border-radius: var(--default-radius-lg) !important;
+  background: var(--default-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border: 1px solid color-mix(in srgb, var(--color-text) 12%, transparent) !important;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+[data-theme="default"] .bottombar {
+  border-radius: var(--default-radius) !important;
+  background: var(--default-glass);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border-color: color-mix(in srgb, var(--color-text) 12%, transparent);
+}
+
+/* ── CARDS & COVERS: soft rounding, lift-on-hover ────────────────────────── */
+
+[data-theme="default"] .manga-thumb,
+[data-theme="default"] .manga-thumb .cover,
+[data-theme="default"] .manga-thumb .cover img,
+[data-theme="default"] .poster img,
+[data-theme="default"] .poster-placeholder,
+[data-theme="default"] .cover-option,
+[data-theme="default"] .cover-option img,
+[data-theme="default"] .meta-cover,
+[data-theme="default"] .meta-cover-ph {
+  border-radius: var(--default-radius) !important;
+}
+
+[data-theme="default"] .manga-thumb {
+  transition: transform 0.4s var(--default-ease);
+}
+[data-theme="default"] .manga-thumb:hover {
+  transform: translateY(-6px) scale(1.03);
+}
+[data-theme="default"] .manga-thumb:hover .cover {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-primary) 60%, transparent),
+    0 16px 32px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="default"] .meta-candidate {
+  border-radius: var(--default-radius-sm) !important;
+  transition: background 0.25s var(--default-ease), transform 0.25s var(--default-ease);
+}
+[data-theme="default"] .meta-candidate:hover {
+  transform: translateX(2px);
+}
+
+/* ── CHAPTER / LIST ITEMS ────────────────────────────────────────────────── */
+
+[data-theme="default"] .mchap-item,
+[data-theme="default"] .bm-panel-btn,
+[data-theme="default"] .list-option {
+  border-radius: var(--default-radius-sm) !important;
+  transition: background 0.3s var(--default-ease), transform 0.3s var(--default-ease);
+}
+[data-theme="default"] .mchap-item:hover {
+  transform: translateX(3px);
+  background: color-mix(in srgb, var(--color-secondary) 65%, white 10%);
+}
+
+/* ── INPUTS ──────────────────────────────────────────────────────────────── */
+
+[data-theme="default"] input[type="text"],
+[data-theme="default"] input[type="password"],
+[data-theme="default"] .theme-select,
+[data-theme="default"] .list-search-input,
+[data-theme="default"] .meta-search-input,
+[data-theme="default"] .desc-textarea,
+[data-theme="default"] .page-slider-input {
+  border-radius: var(--default-radius-sm) !important;
+}
+
+[data-theme="default"] input[type="checkbox"],
+[data-theme="default"] input[type="radio"] {
+  accent-color: var(--color-primary);
+}
+
+[data-theme="default"] .settings-toggle-slider {
+  border-radius: 999px !important;
+  transition: background 0.3s var(--default-ease);
+}
+[data-theme="default"] .settings-toggle-slider::before {
+  transition: transform 0.3s var(--default-ease);
+}
+
+/* ── PROGRESS BARS ───────────────────────────────────────────────────────── */
+
+[data-theme="default"] .manga-thumb .progress-track,
+[data-theme="default"] .manga-thumb .progress-bar {
+  border-radius: 999px !important;
+}
+
+/* ── SECTION ENTRANCE ANIMATION ──────────────────────────────────────────── */
+
+@keyframes default-fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+[data-theme="default"] .section:nth-of-type(1),
+[data-theme="default"] .grid-section:nth-of-type(1) { animation: default-fade-up 0.6s var(--default-ease) both 0.05s; }
+[data-theme="default"] .section:nth-of-type(2),
+[data-theme="default"] .grid-section:nth-of-type(2) { animation: default-fade-up 0.6s var(--default-ease) both 0.1s; }
+[data-theme="default"] .section:nth-of-type(3),
+[data-theme="default"] .grid-section:nth-of-type(3) { animation: default-fade-up 0.6s var(--default-ease) both 0.15s; }
+[data-theme="default"] .section:nth-of-type(n+4),
+[data-theme="default"] .grid-section:nth-of-type(n+4) { animation: default-fade-up 0.6s var(--default-ease) both 0.2s; }
