@@ -29,6 +29,7 @@ import opds
 import comicinfo
 import integrity
 import epub_reader
+import auto_extract
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -233,6 +234,26 @@ def get_thumbs_dir(library_id: int, manga_name: str, source_id: str) -> Optional
     os.makedirs(thumbs, exist_ok=True)
     return thumbs
 
+def _cleanup_stale_archive_thumbs(library_id: int, manga_name: str, source_id: str):
+    """Called whenever a chapter/volume that used to be archive-sourced is
+    about to be rewritten as loose-sourced (same id, see make_id -- ids are
+    derived from the extension-stripped name, so an archive replaced by a
+    same-named loose folder keeps the exact same id and just gets its dims
+    entry overwritten in place). extract_thumbs_for_library only ever
+    generates thumbs for source == "archive" and skips loose entirely, so
+    once a unit flips to loose those old thumbnail files become permanently
+    orphaned -- nothing regenerates or reads them again, they'd just sit
+    there wasting disk space forever otherwise. General cleanup, not
+    specific to the auto-extract feature: the same stale-thumbs situation
+    would arise from a user manually replacing an archive with a same-named
+    loose folder outside this app entirely."""
+    covers_dir = get_covers_dir()
+    if not covers_dir:
+        return
+    thumbs = os.path.join(covers_dir, str(library_id), manga_name, "thumbs", source_id)
+    if os.path.exists(thumbs):
+        shutil.rmtree(thumbs, ignore_errors=True)
+
 # Tracks thumb extraction progress: key = (library_id, manga_id, source_id)
 # value = {"total": int, "done": int, "running": bool}
 _thumb_progress: dict = {}
@@ -240,6 +261,7 @@ _thumb_progress_lock = threading.Lock()
 
 _scan_running: set = set()  # library_ids currently being scanned
 _scan_progress: dict = {}  # library_id -> {"processed": int, "total": int}, present only while running
+_extraction_running: set = set()  # library_ids currently running background auto-extraction
 
 templates = Jinja2Templates(directory="templates")
 
@@ -1863,9 +1885,14 @@ def relocate_dims_paths(library_id: int, manga_name: str, old_manga_path: str, n
         save_manga_dims(library_id, manga_name, dims)
 
 def scan_library(library: dict, progress_cb=None) -> tuple:
-    """Returns (mangas, comicinfo_changed) — comicinfo_changed is True if any
-    manga's genres/tags were filled in from ComicInfo.xml during this scan,
-    telling the caller to rebuild all_tags/all_genres once manga_data is saved.
+    """Returns (mangas, comicinfo_changed, pending_extractions) —
+    comicinfo_changed is True if any manga's genres/tags were filled in from
+    ComicInfo.xml during this scan, telling the caller to rebuild
+    all_tags/all_genres once manga_data is saved. pending_extractions is a
+    list of archive/PDF file paths found but deliberately NOT registered as
+    any manga this pass, because library["auto_extract"] is on -- see the
+    "AUTO-EXTRACT" guard inside PASS 2 below. Always [] for a library with
+    the setting off.
 
     progress_cb(processed, total), if given, is called once per manga/folder
     candidate examined (skip or full rescan both count -- this is "how far
@@ -1878,10 +1905,11 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     lib_paths = [p for p in raw_paths if p and os.path.exists(p)]
     library_id = library["id"]
     mangas = {}
+    pending_extractions = []
 
     if not lib_paths:
         print(f"[ScanLib] No valid paths found for library {library_id}")
-        return []
+        return [], False, []
 
     existing_data = load_app_data()
     existing_mangas = existing_data.get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
@@ -2042,6 +2070,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     continue
 
                 print(f"[ScanLib] Scanning chapter: {dirname}")
+                if existing_chapter.get("source") == "archive":
+                    _cleanup_stale_archive_thumbs(library_id, manga_name, chapter_id)
                 files = sorted(
                     [f for f in os.listdir(chapter_full_path)
                      if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
@@ -2103,6 +2133,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     continue
 
                 print(f"[ScanLib] Scanning loose volume: {dirname}")
+                if existing_vol.get("source") == "archive":
+                    _cleanup_stale_archive_thumbs(library_id, manga_name, vol_id)
                 files = sorted(
                     [f for f in os.listdir(vol_full_path)
                      if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
@@ -2302,6 +2334,37 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             archive_files = [f for f in filenames_sorted if is_archive(f)]
             pdf_files     = [f for f in filenames_sorted if is_pdf(f)]
             epub_files    = [f for f in filenames_sorted if is_epub(f)]
+
+            # ── AUTO-EXTRACT: divert archive/pdf files instead of registering them ──
+            # Opt-in per library (library["auto_extract"], toggleable any
+            # time in Settings -- unlike flat_scan this isn't locked to
+            # creation time, since converting an existing archive-based
+            # library into a loose one is exactly the point). epub_files is
+            # deliberately untouched -- auto_extract.py has no EPUB support
+            # (de-comp doesn't either) and Kinsho already has its own
+            # dedicated EPUB text reader, which this feature has no reason
+            # to interfere with.
+            #
+            # Diverting here (before CASE 1/2/3 below ever see these files)
+            # means none of them get a dims.json entry or a thumbnail this
+            # pass -- run_auto_extraction() converts each file to a loose
+            # folder in the background after this scan completes and saves,
+            # then triggers a fresh rescan, at which point the now-loose
+            # folder is picked up by the normal PASS 1 loose classification
+            # above with zero special-casing needed here. This is also what
+            # makes a manga with SOME loose volumes and some freshly-dropped
+            # archive files (e.g. a new nyaa-server download landing next to
+            # already-converted volumes) work with no extra logic: PASS 1
+            # already registered it as loose from its existing subfolders,
+            # and clearing archive_files here just means CASE 2/3 below find
+            # nothing left to add this pass for the new file specifically.
+            if library.get("auto_extract"):
+                for f in archive_files:
+                    pending_extractions.append(os.path.join(dirpath, f))
+                for f in pdf_files:
+                    pending_extractions.append(os.path.join(dirpath, f))
+                archive_files = []
+                pdf_files = []
 
             # ── CASE 1: standalone cbz that is itself a manga ──
             for arc_file in archive_files:
@@ -2797,7 +2860,9 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     result = list(mangas.values())
     result.sort(key=lambda m: natural_sort_key(m["name"]))
     print(f"[ScanLib] Total mangas found: {len(result)}")
-    return result, comicinfo_changed
+    if pending_extractions:
+        print(f"[ScanLib] {len(pending_extractions)} file(s) queued for auto-extraction.")
+    return result, comicinfo_changed, pending_extractions
 
 async def periodic_library_rescan():
     INTERVAL_SECONDS = 12 * 60 * 60
@@ -2822,7 +2887,12 @@ async def periodic_library_rescan():
                     print("[AutoScan] Auto-rescan disabled mid-cycle -- letting any already-running scan finish, starting no more this cycle.")
                     break
                 lib_id = lib.get("id")
-                if lib_id is not None and lib_id not in _scan_running:
+                # Also skip a library with a background auto-extraction pass
+                # still running from an earlier scan -- that pass triggers
+                # its own follow-up run_scan once it finishes, so starting
+                # another one here on top of it would just race the same
+                # files being converted/deleted mid-walk.
+                if lib_id is not None and lib_id not in _scan_running and lib_id not in _extraction_running:
                     print(f"[AutoScan] Re-scanning library {lib_id}...")
                     await asyncio.to_thread(run_scan, lib_id)
         except Exception as e:
@@ -3051,6 +3121,74 @@ def _startup_heal_corrupted_dims():
     for library_id in affected_libraries:
         threading.Thread(target=run_scan, args=(library_id,), daemon=True).start()
 
+def run_auto_extraction(library_id: int, pending_paths: list):
+    """Background follow-up to a scan that found library["auto_extract"] on
+    and archive/PDF files sitting in this library (see scan_library's
+    AUTO-EXTRACT guard in PASS 2). Converts each one to a loose folder via
+    auto_extract.py (a faithful port of C:\\de_comp's own extraction logic),
+    deletes the original file once its extraction is verified non-empty,
+    then -- if anything actually converted -- triggers a fresh run_scan so
+    the newly-loose content is picked up by the normal PASS 1 classification
+    with no special-casing needed there. One bad file (already-existing
+    destination, corrupt archive, unsupported RAR without rarfile installed,
+    etc.) never blocks the rest of the batch -- logged and skipped, source
+    file left untouched so it's simply retried on the next scan that finds
+    it again."""
+    if library_id in _extraction_running:
+        print(f"[AutoExtract] Library {library_id} already has an extraction pass running -- skipping.")
+        return
+    _extraction_running.add(library_id)
+    print(f"[AutoExtract] Starting: {len(pending_paths)} file(s) queued for library {library_id}.")
+    converted = 0
+    try:
+        for path in pending_paths:
+            if not os.path.isfile(path):
+                print(f"[AutoExtract] Skipping (no longer exists): {path}")
+                continue
+            # A prior scan/thumbnail pass may have opened and cached a
+            # handle to this exact archive (_open_archive_handles etc.) --
+            # on Windows in particular, an open handle blocks the os.remove()
+            # below entirely (WinError 32), leaving a fully-extracted file
+            # undeleted and the source re-queued for extraction again on the
+            # very next scan. Same invalidation scan_library already calls
+            # whenever it detects an archive's content changed underneath it.
+            _invalidate_stale_source_caches(path)
+            try:
+                output_dir = auto_extract.extract_file(path)
+            except auto_extract.DestinationExistsError as e:
+                print(f"[AutoExtract] Skipping {path}: {e}")
+                continue
+            except Exception as e:
+                print(f"[AutoExtract] FAILED to extract {path}: {e}")
+                continue
+
+            # extract_file already cleans up its own output dir on a raised
+            # exception -- reaching here with an empty folder would mean it
+            # "succeeded" at producing nothing (shouldn't happen, but never
+            # delete the source based on that).
+            try:
+                has_content = any(os.scandir(output_dir))
+            except OSError:
+                has_content = False
+            if not has_content:
+                print(f"[AutoExtract] Extraction of {path} produced no files -- leaving source in place.")
+                shutil.rmtree(output_dir, ignore_errors=True)
+                continue
+
+            try:
+                os.remove(path)
+            except OSError as e:
+                print(f"[AutoExtract] Extracted {path} but could not delete the original: {e}")
+            print(f"[AutoExtract] Converted: {path} -> {output_dir}")
+            converted += 1
+    finally:
+        _extraction_running.discard(library_id)
+
+    print(f"[AutoExtract] Done for library {library_id}: {converted}/{len(pending_paths)} converted.")
+    if converted:
+        run_scan(library_id)
+
+
 def run_scan(library_id: int):
     _scan_running.add(library_id)
     _scan_progress[library_id] = {"processed": 0, "total": 1}
@@ -3076,7 +3214,7 @@ def run_scan(library_id: int):
 
     try:
         auto_organize_library_root(lib)
-        mangas, comicinfo_changed = scan_library(lib, progress_cb=_progress_cb)
+        mangas, comicinfo_changed, pending_extractions = scan_library(lib, progress_cb=_progress_cb)
     except Exception as e:
         # A single manga/folder that scan_library's own per-manga resilience
         # doesn't already catch (see _safe_load_manga_dims) shouldn't leave
@@ -3112,7 +3250,13 @@ def run_scan(library_id: int):
     t = threading.Thread(target=extract_thumbs_for_library, args=(library_id,), daemon=True)
     t.start()
 
-    
+    if pending_extractions:
+        et = threading.Thread(
+            target=run_auto_extraction, args=(library_id, pending_extractions), daemon=True
+        )
+        et.start()
+
+
 # ── API ROUTES ──
 
 def default_theme():
@@ -4862,7 +5006,13 @@ async def rename_manga_endpoint(request: Request, library_id: int, manga_id: str
     #    what the next periodic rescan computes anyway).
     try:
         auto_organize_library_root(lib)
-        mangas, comicinfo_changed = scan_library(lib)
+        # pending_extractions (archive/pdf files skipped this pass because
+        # auto_extract is on) is discarded here on purpose -- this is a
+        # narrow, synchronous rename-repair path, not a general library
+        # scan; anything left pending just gets picked up by the next
+        # regular scan/rescan like normal, no urgency to background-extract
+        # from inside a rename request.
+        mangas, comicinfo_changed, _pending = scan_library(lib)
     except Exception as e:
         return JSONResponse({"ok": False, "error": f"Renamed on disk, but the rescan that regenerates its catalog entry failed: {e}. Run a manual Reload scan to finish."}, status_code=500)
 
