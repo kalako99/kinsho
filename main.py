@@ -1930,6 +1930,25 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     # We track which paths have already been registered to avoid double-registration.
     _loose_registered: set = set()
 
+    def _case2_cover_from_existing_volumes(dims: dict):
+        """Any case2 manga's cover_image, from the volume that sorts first
+        by name, or None if no volume has one recorded. Reads only from
+        `dims` -- safe to call from the unchanged-skip fast path (mirrors
+        _flat_scan_cover_fallback's own reasoning right below) as well as
+        after a real rescan's per-volume loop, so a manga stuck with
+        cover: None (e.g. from before this fallback existed) can self-heal
+        on the very next scan, changed or not, rather than only when some
+        volume happens to actually need reprocessing."""
+        sorted_vids = sorted(
+            dims.get("volumes", {}).keys(),
+            key=lambda vid: natural_sort_key(dims["volumes"][vid].get("name", vid))
+        )
+        for vid in sorted_vids:
+            fallback = dims["volumes"][vid].get("cover_image")
+            if fallback:
+                return fallback
+        return None
+
     def _flat_scan_cover_fallback(manga_path: str, manga_name: str, manga_type: str,
                                    classification: dict, dims: dict):
         """Flat-scan libraries have no dedicated per-manga cover convention
@@ -1957,14 +1976,19 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             try:
                 with open(os.path.join(first_item["path"], first_fname), "rb") as cf:
                     cover_bytes = cf.read()
-                result_fname, new_cover_mtimes = process_cover_from_bytes(
+                # unit_cover_mtimes, NOT cover_mtimes -- a composed
+                # "{chapter}_{filename}" key can never match a real
+                # top-level file, so process_manga_covers' orphan-cleanup
+                # would delete it the next time this manga is rescanned
+                # while this particular chapter happens to be unchanged.
+                result_fname, new_unit_cover_mtimes = process_cover_from_bytes(
                     cover_bytes, first_dirname + "_" + first_fname,
                     library_id, manga_name,
-                    mangas[manga_path].get("cover_mtimes", {}), first_item["mtime"]
+                    mangas[manga_path].get("unit_cover_mtimes", {}), first_item["mtime"]
                 )
                 if result_fname:
                     mangas[manga_path]["cover"] = result_fname
-                    mangas[manga_path].setdefault("cover_mtimes", {}).update(new_cover_mtimes)
+                    mangas[manga_path].setdefault("unit_cover_mtimes", {}).update(new_unit_cover_mtimes)
             except Exception as e:
                 print(f"[ScanLib] Flat-scan chapter cover fallback failed: {e}")
         else:
@@ -1984,6 +2008,20 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         existing     = existing_by_id.get(manga_id, {})
         stored_mtime = existing.get("folder_mtime")
         stored_cover_mtimes = existing.get("cover_mtimes", {})
+        # Deliberately separate from cover_mtimes above: that dict is
+        # process_manga_covers' own bookkeeping of top-level loose cover
+        # FILES sitting directly in manga_path, and its orphan-cleanup
+        # deletes any key it doesn't recognize as one of those. A per-volume
+        # cover uses a composed name ("{volume_name}_{page_filename}") that
+        # can never match a real top-level file, so merging it into the same
+        # dict meant process_manga_covers would delete it the next time this
+        # manga is rescanned while that specific volume happens to be
+        # unchanged (skipped, so never regenerated) -- confirmed live as the
+        # cause of a converted manga's volume 1 cover vanishing after a
+        # later auto-extract batch left it unreprocessed while sibling
+        # volumes were. See the case2 branch below and its archive-based
+        # counterpart in PASS 2 for the actual fix.
+        stored_unit_cover_mtimes = existing.get("unit_cover_mtimes", {})
         current_mtime = os.path.getmtime(manga_path)
         manga_type    = classification["manga_type"]  # "case1" or "case2"
 
@@ -2033,6 +2071,10 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     manga_path, manga_name, manga_type, classification,
                     _safe_load_manga_dims(library_id, manga_name)
                 )
+            elif manga_type == "case2" and mangas[manga_path].get("cover") is None:
+                fallback = _case2_cover_from_existing_volumes(_safe_load_manga_dims(library_id, manga_name))
+                if fallback:
+                    mangas[manga_path]["cover"] = fallback
         else:
             print(f"[ScanLib] Rescanning loose ({manga_type}): {manga_name}")
             default_cover, new_cover_mtimes = process_manga_covers(
@@ -2045,6 +2087,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 "cover":        default_cover,
                 "folder_mtime": current_mtime,
                 "cover_mtimes": new_cover_mtimes,
+                "unit_cover_mtimes": dict(stored_unit_cover_mtimes),
                 "last_updated": datetime.now().isoformat(),
                 "manga_type":   "loose",
             }
@@ -2155,14 +2198,17 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                         try:
                             with open(os.path.join(vol_full_path, fname), "rb") as cf:
                                 cover_bytes = cf.read()
-                            result_fname, new_cover_mtimes = process_cover_from_bytes(
+                            # unit_cover_mtimes, NOT cover_mtimes -- see the
+                            # comment where stored_unit_cover_mtimes is read,
+                            # near the top of this function.
+                            result_fname, new_unit_cover_mtimes = process_cover_from_bytes(
                                 cover_bytes, cover_fname,
                                 library_id, manga_name,
-                                mangas[manga_path].get("cover_mtimes", {}), vol_mtime
+                                mangas[manga_path].get("unit_cover_mtimes", {}), vol_mtime
                             )
                             if result_fname:
                                 cover_fname = result_fname
-                                mangas[manga_path].setdefault("cover_mtimes", {}).update(new_cover_mtimes)
+                                mangas[manga_path].setdefault("unit_cover_mtimes", {}).update(new_unit_cover_mtimes)
                         except Exception as e:
                             print(f"[ScanLib] Loose volume cover failed: {e}")
                             cover_fname = None
@@ -2176,6 +2222,20 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     "source":      "loose",
                     "filenames":   files,
                 }
+                # Set the manga's own cover from the first freshly-scanned
+                # volume that has one, same as the archive-based case2 path
+                # already does. Unconditional here (not gated on anything
+                # about this specific pass) -- deliberately NOT nested
+                # inside the stale-volume pruning loop below, which is where
+                # this used to live: that meant it only ever ran when a
+                # volume was actually being REMOVED this pass, so a from-
+                # scratch conversion of an entire archive-based manga (every
+                # volume rewritten in the same pass, nothing stale to prune)
+                # never set a manga-level cover at all -- confirmed live as
+                # the cause of a converted manga showing "No Cover" despite
+                # every individual volume having its own correct cover.
+                if mangas[manga_path].get("cover") is None and cover_fname is not None:
+                    mangas[manga_path]["cover"] = cover_fname
 
             if library.get("flat_scan") and mangas[manga_path].get("cover") is None:
                 _flat_scan_cover_fallback(manga_path, manga_name, manga_type, classification, dims)
@@ -2189,8 +2249,15 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 print(f"[ScanLib] Removing volume no longer on disk: {stale_name}")
                 del dims["volumes"][stale_id]
 
-                if mangas[manga_path].get("cover") is None and cover_fname is not None:
-                    mangas[manga_path]["cover"] = cover_fname
+            # If nothing above set a cover (e.g. every volume was unchanged
+            # and skipped this pass, so the loop above never ran its
+            # cover-setting branch at all), fall back to whatever cover_image
+            # is already stored for any existing volume -- same two-tier
+            # fallback the archive-based case2 path uses.
+            if manga_type == "case2" and mangas[manga_path].get("cover") is None:
+                fallback = _case2_cover_from_existing_volumes(dims)
+                if fallback:
+                    mangas[manga_path]["cover"] = fallback
 
         save_manga_dims(library_id, manga_name, dims)
         _prune_stale_reading_history(library_id, manga_id, dims, stale_ids)
@@ -2636,6 +2703,12 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     stored_folder_mtime  = existing.get("folder_mtime")
                     current_folder_mtime = os.path.getmtime(manga_path)
                     stored_cover_mtimes  = existing.get("cover_mtimes", {})
+                    # Separate from cover_mtimes -- see the comment on
+                    # stored_unit_cover_mtimes in _register_loose_manga
+                    # above for why per-volume composed cover names can
+                    # never share that dict with process_manga_covers'
+                    # top-level-file orphan-cleanup.
+                    stored_unit_cover_mtimes = existing.get("unit_cover_mtimes", {})
 
                     folder_unchanged = stored_folder_mtime is not None and current_folder_mtime == stored_folder_mtime
                     # See the matching comment in the case3 branch above: a
@@ -2665,6 +2738,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                         default_cover, new_cover_mtimes = process_manga_covers(
                             manga_path, library_id, manga_name, stored_cover_mtimes
                         )
+                        new_unit_cover_mtimes = dict(stored_unit_cover_mtimes)
                         mangas[manga_path] = {
                             "id":           manga_id,
                             "name":         manga_name,
@@ -2672,6 +2746,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                             "cover":        default_cover,
                             "folder_mtime": current_folder_mtime,
                             "cover_mtimes": new_cover_mtimes,
+                            "unit_cover_mtimes": new_unit_cover_mtimes,
                             "last_updated": datetime.now().isoformat(),
                             "manga_type":   "case2",
                         }
@@ -2712,12 +2787,21 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                         cover_fname = vol_name + os.path.splitext(cover_entry)[1]
                                         cover_bytes = _cached_archive_page(vol_path, cover_entry)
                                         if cover_bytes:
+                                            # unit_cover_mtimes, NOT cover_mtimes -- see the
+                                            # comment on stored_unit_cover_mtimes above.
+                                            # The result dict is intentionally not captured
+                                            # here (matches the direct-mutation pattern
+                                            # below) -- reassigning this name to
+                                            # process_cover_from_bytes' returned dict would
+                                            # silently detach it from the same object
+                                            # already stored in mangas[manga_path], which is
+                                            # exactly what the old 'pdf' branch below did.
                                             process_cover_from_bytes(
                                                 cover_bytes, cover_fname,
                                                 library_id, manga_name,
-                                                new_cover_mtimes, vol_mtime
+                                                new_unit_cover_mtimes, vol_mtime
                                             )
-                                            new_cover_mtimes[cover_fname] = vol_mtime
+                                            new_unit_cover_mtimes[cover_fname] = vol_mtime
 
                             elif vol_type == 'pdf':
                                 if not PDF_SUPPORT:
@@ -2733,14 +2817,14 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                         cover_fname = vol_name + ".jpg"
                                         cover_bytes = _cached_pdf_page(vol_path, 0)
                                         if cover_bytes:
-                                            result_fname, new_cover_mtimes = process_cover_from_bytes(
+                                            result_fname, _ = process_cover_from_bytes(
                                                 cover_bytes, cover_fname,
                                                 library_id, manga_name,
-                                                new_cover_mtimes, vol_mtime
+                                                new_unit_cover_mtimes, vol_mtime
                                             )
                                             if result_fname:
                                                 cover_fname = result_fname
-                                                new_cover_mtimes[cover_fname] = vol_mtime
+                                                new_unit_cover_mtimes[cover_fname] = vol_mtime
                                     except Exception as e:
                                         print(f"[ScanLib] Failed to process PDF {vol_path}: {e}")
 
@@ -2764,9 +2848,9 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                         process_cover_from_bytes(
                                             cover_bytes, cover_fname,
                                             library_id, manga_name,
-                                            new_cover_mtimes, vol_mtime
+                                            new_unit_cover_mtimes, vol_mtime
                                         )
-                                        new_cover_mtimes[cover_fname] = vol_mtime
+                                        new_unit_cover_mtimes[cover_fname] = vol_mtime
 
                             # Always write the volume record, even if cover extraction failed
                             dims["volumes"][vol_id] = {
