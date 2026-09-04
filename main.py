@@ -78,6 +78,7 @@ def get_local_ip():
 async def lifespan(app):
     auth._ensure_admin_exists()
     _startup_migrate_retired_visual_themes()
+    _startup_migrate_unit_cover_mtimes()
     _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
     if os.path.exists(bg_folder):
@@ -3161,6 +3162,62 @@ def _startup_migrate_retired_visual_themes():
             print(f"[StartupCheck] visual-theme migration failed for '{username}': {e}")
     if migrated:
         print(f"[StartupCheck] migrated {migrated} user(s) off the retired sharp/abyss visual themes.")
+
+
+def _startup_migrate_unit_cover_mtimes():
+    """Called once at app startup (see lifespan). cover_mtimes used to be
+    shared between two unrelated things: process_manga_covers' own
+    bookkeeping of top-level loose cover FILES sitting directly in a
+    manga's folder (its orphan-cleanup deletes any key it doesn't
+    recognize as one of those), and per-volume/chapter composed cover
+    names ("{volume_name}_{page_filename}") merged in by the per-unit
+    cover-processing loops -- a composed name can never match a real
+    top-level file, so it would get deleted as "orphaned" the next time
+    that specific volume/chapter was skipped as unchanged while siblings
+    were reprocessed (see CLAUDE.md, 2026-09-05, and the code fix
+    separating these into cover_mtimes vs. the new unit_cover_mtimes).
+
+    That code fix only stops the pollution from happening going forward --
+    a manga already scanned under the old code has cover_mtimes entries
+    that are ALREADY misclassified and will keep getting wrongly deleted
+    on every future rescan otherwise. This migrates them: any cover_mtimes
+    key that matches a current chapter/volume's own cover_image in that
+    manga's dims.json is unambiguously a unit cover (cross-referencing the
+    real dims data, not guessing from the key's shape), so it's moved into
+    unit_cover_mtimes instead, where process_manga_covers will never look
+    at it again. Idempotent -- a manga with nothing left to move is
+    untouched, so this is safe to run on every startup."""
+    try:
+        data = load_app_data()
+    except Exception as e:
+        print(f"[StartupCheck] could not load app data for unit-cover-mtimes migration: {e}")
+        return
+    migrated = 0
+    for lib_id_str, manga_bucket in data.get("manga_data", {}).items():
+        for manga in manga_bucket.get("mangas", []):
+            cover_mtimes = manga.get("cover_mtimes")
+            if not cover_mtimes:
+                continue
+            try:
+                dims = load_manga_dims(int(lib_id_str), manga["name"])
+            except Exception:
+                continue
+            unit_cover_images = {
+                item.get("cover_image")
+                for item in {**dims.get("chapters", {}), **dims.get("volumes", {})}.values()
+                if item.get("cover_image")
+            }
+            to_move = {k: v for k, v in cover_mtimes.items() if k in unit_cover_images}
+            if not to_move:
+                continue
+            for k in to_move:
+                del cover_mtimes[k]
+            manga.setdefault("unit_cover_mtimes", {}).update(to_move)
+            migrated += 1
+            print(f"[StartupCheck] moved {len(to_move)} unit cover(s) out of cover_mtimes for '{manga['name']}' (library {lib_id_str})")
+    if migrated:
+        save_app_data(data)
+        print(f"[StartupCheck] unit-cover-mtimes migration touched {migrated} manga total.")
 
 
 def _startup_heal_corrupted_dims():
