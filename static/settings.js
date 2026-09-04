@@ -753,8 +753,18 @@ createApp({
       return Math.max(0, Math.min(100, Math.round((lib.processed / Math.max(lib.total, 1)) * 100)));
     },
 
-    // ── TRIGGER SCAN FOR ONE LIBRARY ──
-    async scanLibrary(lib) {
+    // ── PERSIST THE CURRENT LIBRARIES ARRAY (no scan, no status message) ──
+    async _persistLibraries() {
+        const res = await fetch(apiUrl('/api/settings/libraries'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ libraries: this.libraries }),
+        });
+        return await res.json();
+    },
+
+    // ── TRIGGER SCAN FOR ONE LIBRARY (assumes already saved) ──
+    async _triggerScan(lib) {
         this.scanStatus = { ...this.scanStatus, [lib.id]: { msg: 'Scanning...', type: 'scanning' } };
         try {
             await fetch(apiUrl(`/api/scan/${lib.id}`), { method: 'POST' });
@@ -762,6 +772,29 @@ createApp({
         } catch (e) {
             this.scanStatus = { ...this.scanStatus, [lib.id]: { msg: 'Scan failed.', type: 'err' } };
         }
+    },
+
+    // ── "↺ Reload scan" BUTTON ON ONE LIBRARY CARD ──
+    async scanLibrary(lib) {
+        // Saves the current libraries array first -- this button sits right
+        // next to per-library checkboxes (auto_extract in particular, which,
+        // unlike flat_scan, is meant to be toggled on an existing library at
+        // any time), and the scan reads whatever's actually persisted
+        // server-side. Without this, toggling a checkbox and clicking
+        // Reload scan silently scanned with the OLD saved value, and
+        // navigating away afterward showed the checkbox reverted (it was
+        // never actually saved) -- confirmed live, reported as "nothing
+        // happened" and "checkbox got deselected".
+        //
+        // Only admins can edit library settings at all (POST
+        // /api/settings/libraries is admin-gated server-side) -- a non-admin
+        // has this same button on their own read-only library card, with no
+        // editable fields to save, so skip straight to the scan for them
+        // rather than firing a save request that would just come back 403.
+        if (this.isAdmin) {
+            await this._persistLibraries();
+        }
+        await this._triggerScan(lib);
     },
 
     // ── BULK METADATA SCAN FOR ONE LIBRARY ──
@@ -818,20 +851,17 @@ createApp({
         }, 1500);
     },
 
-    // ── SAVE LIBRARIES ──
+    // ── SAVE LIBRARIES (+ rescan every one) ──
     async saveLibraries() {
       try {
-        const res = await fetch(apiUrl('/api/settings/libraries'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ libraries: this.libraries }),
-        });
-        const data = await res.json();
+        const data = await this._persistLibraries();
 
         if (data.ok) {
           this.libStatus = { msg: '✓ Libraries saved.', type: 'ok' };
           for (const lib of this.libraries) {
-            await this.scanLibrary(lib);
+            // _triggerScan, not scanLibrary -- already saved once above,
+            // no need for each library to re-save the same array again.
+            await this._triggerScan(lib);
           }
         } else {
           this.libStatus = { msg: 'Something went wrong.', type: 'err' };
