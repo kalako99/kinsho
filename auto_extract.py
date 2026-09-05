@@ -101,9 +101,14 @@ def _top_level_entries(archive_path: Path) -> list[tuple[str, bool]]:
 @dataclass
 class ExtractionPlan:
     archive: Path
-    extract_to: Path  # path handed to the backend library's extractall()
-    output_dir: Path  # resulting folder that will hold the extracted content
+    extract_to: Path     # path handed to the backend library's extractall()
+    output_dir: Path      # FINAL folder that will hold the extracted content
     unwrap_single_folder: bool
+    extracted_dir: Path   # where the archive's own contents actually land the
+                          # instant extractall() runs, before any rename --
+                          # differs from output_dir only in the single-
+                          # internal-folder case below, when that folder's own
+                          # name doesn't match the archive's own filename
 
 
 def plan_extraction(archive_path: Path) -> ExtractionPlan:
@@ -114,17 +119,31 @@ def plan_extraction(archive_path: Path) -> ExtractionPlan:
     3. Exactly one folder at the root: extract straight into the archive's
        parent directory, so that folder lands as a sibling with no
        redundant wrapper -- avoids the classic double-nested-folder result.
+       Named after the ARCHIVE's OWN filename, not whatever that internal
+       folder happened to be called when the archive was originally
+       packaged -- an archive's filename is something a user (or an
+       automated pipeline) may have deliberately renamed/cleaned up, while
+       its internal folder name is just whatever it shipped with and can be
+       stale/raw (confirmed live: a real release's own filename had been
+       cleaned up, but its one internal folder still carried the original
+       raw, uncleaned name -- extracting under THAT name defeated the
+       rename entirely). Extraction still necessarily lands at the internal
+       folder's own name first (that's what the archive's own stored paths
+       dictate), then gets renamed to the archive's filename as a final
+       step whenever the two differ.
     """
     entries = _top_level_entries(archive_path)
     parent = archive_path.parent
 
     if len(entries) == 1 and entries[0][1]:
-        folder_name = entries[0][0]
-        output_dir = parent / folder_name
-        return ExtractionPlan(archive_path, parent, output_dir, unwrap_single_folder=True)
+        extracted_dir = parent / entries[0][0]
+        output_dir = parent / archive_path.stem
+        return ExtractionPlan(archive_path, parent, output_dir, unwrap_single_folder=True,
+                               extracted_dir=extracted_dir)
 
     output_dir = parent / archive_path.stem
-    return ExtractionPlan(archive_path, output_dir, output_dir, unwrap_single_folder=False)
+    return ExtractionPlan(archive_path, output_dir, output_dir, unwrap_single_folder=False,
+                           extracted_dir=output_dir)
 
 
 def extract_archive(archive_path) -> Path:
@@ -153,11 +172,17 @@ def extract_archive(archive_path) -> Path:
                 rf.extractall(plan.extract_to)
         else:
             raise ProcessingError(f"Unsupported archive type: {archive_path.suffix}")
+
+        if plan.extracted_dir != plan.output_dir:
+            plan.extracted_dir.rename(plan.output_dir)
     except Exception:
         # Don't leave a partially-extracted result behind on failure. Safe to
-        # remove output_dir unconditionally here: the exists() check above
-        # already proved it didn't exist before this call started.
+        # remove both unconditionally here: the exists() check above already
+        # proved output_dir didn't exist before this call started, and
+        # extracted_dir (when different) is a transient intermediate this
+        # same call just created.
         shutil.rmtree(plan.output_dir, ignore_errors=True)
+        shutil.rmtree(plan.extracted_dir, ignore_errors=True)
         raise
 
     return plan.output_dir
