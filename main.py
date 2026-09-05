@@ -30,6 +30,7 @@ import comicinfo
 import integrity
 import epub_reader
 import auto_extract
+import volume_rename
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -640,6 +641,136 @@ def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, sta
         entry["furthest_chapter_name"] = furthest_name
         print(f"[ScanLib] Pruned {len(removed)} stale completed-chapter record(s) from {username}'s reading history for {manga_id}")
         auth.save_user_data(username, user_data)
+
+def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, str]) -> None:
+    """
+    A volume folder renamed by the "Rename volumes" library setting (see
+    _apply_volume_renames) changes that volume's id, since ids are a hash
+    of the folder name (make_id). Unlike _prune_stale_reading_history
+    above (which drops a truly-gone id), this MOVES every reference to the
+    old id onto the new one, so reading progress survives a pure rename --
+    it's the same content under a shorter/reshuffled name, not new or
+    removed content.
+
+    Touches every place a volume id is referenced per-user: the completion
+    map (entry["chapters"], despite the name -- volume-type manga reuses
+    this same key, see save_reading_progress), last_volume_id/_name,
+    furthest_volume/_name, and bookmarks (each bookmark's start/end carries
+    a chapterId that's really a volume id for volume-type manga).
+    """
+    if not id_map:
+        return
+    lib_key = str(library_id)
+    bm_key = f"{library_id}:{manga_id}"
+    for user in auth._load_users().get("users", []):
+        username = user.get("username")
+        if not username:
+            continue
+        user_data = auth.load_user_data(username)
+        changed = False
+
+        entry = user_data.get("reading_history", {}).get(lib_key, {}).get(manga_id)
+        if entry:
+            chapters = entry.get("chapters") or {}
+            for old_id, new_id in id_map.items():
+                if old_id in chapters:
+                    chapters[new_id] = chapters.pop(old_id)
+                    changed = True
+            if entry.get("last_volume_id") in id_map:
+                entry["last_volume_id"] = id_map[entry["last_volume_id"]]
+                changed = True
+            if entry.get("furthest_volume") in id_map:
+                entry["furthest_volume"] = id_map[entry["furthest_volume"]]
+                changed = True
+
+        bookmarks = user_data.get("bookmarks", {}).get(bm_key)
+        if bookmarks:
+            for bm in bookmarks:
+                for side in ("start", "end"):
+                    pos = bm.get(side)
+                    if pos and pos.get("chapterId") in id_map:
+                        pos["chapterId"] = id_map[pos["chapterId"]]
+                        changed = True
+
+        if changed:
+            print(f"[ScanLib] Remapped {len(id_map)} renamed-volume id(s) in {username}'s data for {manga_id}")
+            auth.save_user_data(username, user_data)
+
+def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, manga_id: str,
+                           classification: dict) -> None:
+    """
+    Opt-in per-library setting (library["rename_volumes"]) -- case2 (volume)
+    loose manga only, per explicit request. Runs BEFORE the normal
+    unchanged/changed detection in _register_loose_manga so that renamed-
+    but-otherwise-untouched volumes are recognized as unchanged afterward
+    (the id remap below moves each volume's stored mtime onto its new id
+    first). See volume_rename.py for the actual parse/decode/recompact
+    logic -- this function only does the filesystem rename + dims.json key
+    move + reading-history/bookmark remap, using that module's decisions.
+
+    Mutates classification["content_subfolders"] in place so every caller
+    downstream (including this same scan pass) sees the final, already-
+    renamed folder names.
+    """
+    dirnames = classification.get("content_subfolders", [])
+    if not dirnames:
+        return
+
+    def _rename_order_key(dirname: str):
+        # Sort by the PARSED volume number, not natural_sort_key on the raw
+        # text -- a library mid-transition (some folders already renamed to
+        # "Volume NN", a freshly-dropped-in one still "Manga Name NN") has
+        # inconsistent prefixes, so comparing raw text ("manga name " vs
+        # "volume ") sorts on the prefix before ever reaching the number,
+        # putting a new volume 25 before volume 01. Unparseable names are
+        # excluded from the provider chain entirely regardless of where they
+        # land here, so their own ordering only needs to be stable, not exact.
+        parsed = volume_rename.parse_volume_name(dirname)
+        if parsed is not None:
+            return (0, parsed[0])
+        return (1, natural_sort_key(dirname))
+
+    ordered = sorted(dirnames, key=_rename_order_key)
+    renamed = volume_rename.compute_renamed_volumes([(d, d) for d in ordered])
+
+    dims = None
+    id_map: dict[str, str] = {}
+    for old_dirname in ordered:
+        new_name = renamed.get(old_dirname)
+        if new_name is None or new_name == old_dirname:
+            continue
+        old_path = os.path.join(manga_path, old_dirname)
+        new_path = os.path.join(manga_path, new_name)
+        if os.path.exists(new_path):
+            print(f"[ScanLib] Rename-volumes: skipping '{old_dirname}' -> '{new_name}' "
+                  f"(destination already exists)")
+            continue
+        try:
+            os.rename(old_path, new_path)
+        except OSError as e:
+            print(f"[ScanLib] Rename-volumes: failed to rename '{old_dirname}' -> '{new_name}': {e}")
+            continue
+
+        print(f"[ScanLib] Renamed volume: '{old_dirname}' -> '{new_name}'")
+        old_vol_id = make_id(manga_name + ":vol:" + old_dirname)
+        new_vol_id = make_id(manga_name + ":vol:" + new_name)
+        if dims is None:
+            dims = _safe_load_manga_dims(library_id, manga_name)
+        volumes = dims.setdefault("volumes", {})
+        if old_vol_id in volumes:
+            vol_entry = volumes.pop(old_vol_id)
+            vol_entry["name"] = new_name
+            vol_entry["path"] = new_path
+            volumes[new_vol_id] = vol_entry
+        id_map[old_vol_id] = new_vol_id
+
+        idx = classification["content_subfolders"].index(old_dirname)
+        classification["content_subfolders"][idx] = new_name
+
+    if dims is not None:
+        save_manga_dims(library_id, manga_name, dims)
+    if id_map:
+        _remap_renamed_volume_ids(library_id, manga_id, id_map)
 
 def completed_chapter_count(history_entry: dict) -> int:
     """How many chapters/volumes this user has actually marked completed
@@ -2025,6 +2156,14 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         stored_unit_cover_mtimes = existing.get("unit_cover_mtimes", {})
         current_mtime = os.path.getmtime(manga_path)
         manga_type    = classification["manga_type"]  # "case1" or "case2"
+
+        if manga_type == "case2" and library.get("rename_volumes"):
+            # Must run before folder_unchanged/any_subfolder_changed below --
+            # a rename bumps manga_path's own mtime (recomputed right after),
+            # and content_subfolders/dims are mutated in place so every check
+            # further down sees the final, already-renamed state.
+            _apply_volume_renames(library_id, manga_path, manga_name, manga_id, classification)
+            current_mtime = os.path.getmtime(manga_path)
 
         def _dims_paths_valid(manga_name: str) -> bool:
             dims = _safe_load_manga_dims(library_id, manga_name)

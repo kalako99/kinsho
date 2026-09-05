@@ -679,7 +679,7 @@ createApp({
 
     // ── ADD LIBRARY ──
     addLibrary() {
-      this.libraries.push({ id: this.nextId++, name: '', paths: [''], flat_scan: false, auto_extract: false });
+      this.libraries.push({ id: this.nextId++, name: '', paths: [''], flat_scan: false, auto_extract: false, rename_volumes: false });
     },
 
     addPath(lib) {

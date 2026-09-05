@@ -886,6 +886,21 @@
         Converted files are permanently deleted after extraction -- make sure you have a backup if you want one, nothing
         here is recoverable afterward.
       </div>
+      <label
+        style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-muted,#888); margin:2px 0 4px; cursor:pointer;"
+        title="Shortens volume folders (case2 only) to 'Volume NN', keeping a provider name in parentheses when one is present -- e.g. 'Grand Blue Dreaming 19 (danke-Empire)' becomes 'Volume 19 (danke-Empire)'. Only the last volume of a run of consecutive same-provider volumes carries the bracket; adding a new volume from the same provider moves it forward automatically on the next scan. Reading progress and bookmarks are preserved across the rename. A volume name with more than one number or bracket group is left untouched rather than guessed at. Safe to turn on or off any time, including on an already-scanned library."
+      >
+        <input
+          type="checkbox"
+          v-model="lib.rename_volumes"
+          style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
+        >
+        Rename volumes (shorten to "Volume NN", keep provider)
+      </label>
+      <div class="section-hint" style="margin:0 0 10px;">
+        Renames on the very next scan or rescan, including for volumes already in the library. Only volume-type (case2)
+        manga are affected -- chapter-type manga are left alone.
+      </div>
       <div class="field-label">Folder path</div>
       <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
         <input type="text" v-model="lib.paths[pi]" placeholder="e.g. /app/manga" />
