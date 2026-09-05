@@ -642,7 +642,8 @@ def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, sta
         print(f"[ScanLib] Pruned {len(removed)} stale completed-chapter record(s) from {username}'s reading history for {manga_id}")
         auth.save_user_data(username, user_data)
 
-def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, str]) -> None:
+def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, str],
+                               new_names: dict[str, str]) -> None:
     """
     A volume folder renamed by the "Rename volumes" library setting (see
     _apply_volume_renames) changes that volume's id, since ids are a hash
@@ -657,6 +658,12 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
     this same key, see save_reading_progress), last_volume_id/_name,
     furthest_volume/_name, and bookmarks (each bookmark's start/end carries
     a chapterId that's really a volume id for volume-type manga).
+
+    new_names maps new_id -> new display name, so the cached *_name fields
+    (last_volume_name/furthest_volume_name) get refreshed alongside their
+    id, not just the id itself -- a rename-only pass never touches
+    save_reading_progress, so nothing else would ever correct a stale
+    cached name until the user's next real read on that exact volume.
     """
     if not id_map:
         return
@@ -674,13 +681,22 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
             chapters = entry.get("chapters") or {}
             for old_id, new_id in id_map.items():
                 if old_id in chapters:
-                    chapters[new_id] = chapters.pop(old_id)
+                    ch_entry = chapters.pop(old_id)
+                    if ch_entry.get("name") is not None and new_id in new_names:
+                        ch_entry["name"] = new_names[new_id]
+                    chapters[new_id] = ch_entry
                     changed = True
             if entry.get("last_volume_id") in id_map:
-                entry["last_volume_id"] = id_map[entry["last_volume_id"]]
+                new_id = id_map[entry["last_volume_id"]]
+                entry["last_volume_id"] = new_id
+                if new_id in new_names:
+                    entry["last_volume_name"] = new_names[new_id]
                 changed = True
             if entry.get("furthest_volume") in id_map:
-                entry["furthest_volume"] = id_map[entry["furthest_volume"]]
+                new_id = id_map[entry["furthest_volume"]]
+                entry["furthest_volume"] = new_id
+                if new_id in new_names:
+                    entry["furthest_volume_name"] = new_names[new_id]
                 changed = True
 
         bookmarks = user_data.get("bookmarks", {}).get(bm_key)
@@ -735,6 +751,7 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
 
     dims = None
     id_map: dict[str, str] = {}
+    new_names: dict[str, str] = {}
     for old_dirname in ordered:
         new_name = renamed.get(old_dirname)
         if new_name is None or new_name == old_dirname:
@@ -763,6 +780,7 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
             vol_entry["path"] = new_path
             volumes[new_vol_id] = vol_entry
         id_map[old_vol_id] = new_vol_id
+        new_names[new_vol_id] = new_name
 
         idx = classification["content_subfolders"].index(old_dirname)
         classification["content_subfolders"][idx] = new_name
@@ -770,7 +788,7 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
     if dims is not None:
         save_manga_dims(library_id, manga_name, dims)
     if id_map:
-        _remap_renamed_volume_ids(library_id, manga_id, id_map)
+        _remap_renamed_volume_ids(library_id, manga_id, id_map, new_names)
 
 def completed_chapter_count(history_entry: dict) -> int:
     """How many chapters/volumes this user has actually marked completed
