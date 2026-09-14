@@ -9,7 +9,11 @@
    (CSS custom properties), never hardcoded here.
    ──────────────────────────────────────────────────────────────────────────── */
 
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap');
+/* The Google Sans font-face is loaded by get_theme_css() (main.py) as a
+   separate <link> tag, either the live Google Fonts CDN or a local copy
+   under /local-assets/google-sans.css once downloaded via Settings ->
+   General -> Local Assets -- kept out of this file so it can be swapped
+   without editing a static asset that ships with every deploy. */
 
 [data-theme="default"] {
   --default-radius: 20px;

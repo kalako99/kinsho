@@ -199,6 +199,103 @@ def get_covers_dir():
     os.makedirs(covers, exist_ok=True)
     return covers
 
+# ── LOCAL ASSETS (offline Vue.js + font, no CDN dependency) ──────────────────
+# Kinsho's Vue-based pages load Vue.js from cdnjs.cloudflare.com and the
+# default theme's font from fonts.googleapis.com by default -- fine for a
+# normal internet-connected browser, but both are render-blocking, and with
+# no internet a DNS lookup for either can hang for minutes rather than
+# failing fast, stalling every full page load (see the "no internet" incident
+# this was built in response to). An admin can download both once (Settings
+# -> General -> Local Assets) into data_path, which survives every future
+# `docker build`/container recreate the same way covers/thumbnails do --
+# unlike anything saved under the app's own source tree, which is baked into
+# the image and gets overwritten on every rebuild.
+VUE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"
+GOOGLE_SANS_CSS_URL = (
+    "https://fonts.googleapis.com/css2?"
+    "family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap"
+)
+
+def local_assets_dir() -> Optional[str]:
+    data_path = get_data_path()
+    if not data_path:
+        return None
+    return os.path.join(data_path, "local_assets")
+
+def local_assets_available() -> bool:
+    d = local_assets_dir()
+    if not d:
+        return False
+    return (os.path.isfile(os.path.join(d, "vue.global.js"))
+            and os.path.isfile(os.path.join(d, "google-sans.css")))
+
+def get_asset_urls() -> dict:
+    if local_assets_available():
+        return {"vue_src": "/local-assets/vue.global.js"}
+    return {"vue_src": VUE_CDN_URL}
+
+@app.get("/local-assets/{filename:path}")
+def serve_local_asset(filename: str):
+    d = local_assets_dir()
+    if not d:
+        raise HTTPException(status_code=404)
+    root = os.path.realpath(d)
+    target = os.path.realpath(os.path.join(root, filename))
+    if os.path.commonpath([root, target]) != root or not os.path.isfile(target):
+        raise HTTPException(status_code=404)
+    return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+@app.post("/api/admin/local-assets/download")
+async def download_local_assets_endpoint(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    d = local_assets_dir()
+    if not d:
+        return JSONResponse({"ok": False, "error": "Set the data folder path first."}, status_code=400)
+    fonts_dir = os.path.join(d, "fonts")
+    os.makedirs(fonts_dir, exist_ok=True)
+    # Google only serves woff2 (rather than older, larger formats) to a
+    # request carrying a modern-browser User-Agent.
+    browser_ua = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            vue_resp = await client.get(VUE_CDN_URL)
+            vue_resp.raise_for_status()
+            with open(os.path.join(d, "vue.global.js"), "wb") as f:
+                f.write(vue_resp.content)
+
+            css_resp = await client.get(GOOGLE_SANS_CSS_URL, headers=browser_ua)
+            css_resp.raise_for_status()
+            css_text = css_resp.text
+            for font_url in set(re.findall(r'url\((https://fonts\.gstatic\.com/[^)]+)\)', css_text)):
+                fname = os.path.basename(urlparse(font_url).path)
+                font_resp = await client.get(font_url)
+                font_resp.raise_for_status()
+                with open(os.path.join(fonts_dir, fname), "wb") as f:
+                    f.write(font_resp.content)
+                css_text = css_text.replace(font_url, f"/local-assets/fonts/{fname}")
+            with open(os.path.join(d, "google-sans.css"), "w", encoding="utf-8") as f:
+                f.write(css_text)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    return JSONResponse({"ok": True, "available": local_assets_available()})
+
+@app.post("/api/admin/local-assets/reset")
+def reset_local_assets_endpoint(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    d = local_assets_dir()
+    if d and os.path.isdir(d):
+        shutil.rmtree(d)
+    return JSONResponse({"ok": True, "available": local_assets_available()})
+
 def _cover_file_version(file_path: str) -> str:
     """Cache-busting tag for a cover file, derived from its own mtime -- lets
     cover URLs be served as long-lived immutable resources (like thumbnails
@@ -3597,7 +3694,9 @@ def get_theme_css(username: str = None) -> str:
     dt_val = visual_theme if visual_theme in ("default", "custom") else "default"
     dt_script = f'<script>document.documentElement.setAttribute("data-theme","{dt_val}");</script>'
     custom_block = f'<style id="custom-theme-style">{custom_css}</style>' if custom_css else ""
+    font_href = "/local-assets/google-sans.css" if local_assets_available() else GOOGLE_SANS_CSS_URL
     return (
+        f'<link rel="stylesheet" href="{font_href}">'
         f'<link rel="stylesheet" href="/static/theme-default.css">'
         f"<style>"
         f":root{{"
@@ -3637,6 +3736,7 @@ def get_settings(request: Request):
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
         "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
+        "local_assets_available":   local_assets_available(),
     })
 
 @app.post("/api/admin/settings/auto-rescan")
@@ -6230,6 +6330,7 @@ def settings_page(request: Request):
         return RedirectResponse("/login", status_code=302)
     return templates.TemplateResponse(request, "settings.html", {
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/search")
@@ -6241,6 +6342,7 @@ def search_page(request: Request):
         return RedirectResponse("/settings", status_code=302)
     return templates.TemplateResponse(request, "search_page.html", {
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/collections")
@@ -6252,6 +6354,7 @@ def collections_list_page(request: Request):
         return RedirectResponse("/settings", status_code=302)
     return templates.TemplateResponse(request, "collections_list.html", {
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/collection/{collection_id}")
@@ -6271,6 +6374,7 @@ def collection_detail_page(request: Request, collection_id: str):
     return templates.TemplateResponse(request, "collection_detail.html", {
         "collection_id": collection_id,
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/")
@@ -6299,6 +6403,7 @@ def manga_list(request: Request):
         "libraries": libraries,
         "last_tab":  user_data.get("last_tab", None),
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/manga/{library_id}/{manga_id}")
@@ -6334,6 +6439,7 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
         "library_id": library_id,
         "manga_id": manga_id,
         "theme_css": get_theme_css(username),
+        "vue_src":   get_asset_urls()["vue_src"],
     })
 
 @app.get("/manga/{library_id}/category/{category}")
@@ -6357,6 +6463,7 @@ def category_list_page(request: Request, library_id: int, category: str):
         "category":      category,
         "category_title": titles[category],
         "theme_css":     get_theme_css(username),
+        "vue_src":       get_asset_urls()["vue_src"],
     })
 
 @app.get("/manga/{library_id}/{manga_id}/chapter/{chapter_id}")
@@ -7462,6 +7569,7 @@ def community_favourites_page(request: Request, target_username: str):
     return templates.TemplateResponse(request, "community_favourites.html", {
         "target_username": target,
         "theme_css":        get_theme_css(username),
+        "vue_src":          get_asset_urls()["vue_src"],
     })
 
 # ── OPDS + OPDS-PSE CATALOG ──────────────────────────────────────────────────

@@ -249,6 +249,11 @@ createApp({
       autoRescanStatus:  { msg: '', type: '' },
       scanActivity:      { scanning: false, libraries: [] },
 
+      // ── LOCAL ASSETS (admin) ──
+      localAssetsAvailable:   false,
+      localAssetsDownloading: false,
+      localAssetsStatus:      { msg: '', type: '' },
+
       // ── USERNAME ──
       username:           '',
       currentPassword:    '',
@@ -607,6 +612,7 @@ createApp({
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
         this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
+        this.localAssetsAvailable   = !!data.local_assets_available;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
         this.activeCustomThemeName  = data.active_custom_theme_name || '';
         this.customThemes           = data.custom_themes            || {};
@@ -926,6 +932,39 @@ createApp({
         this.backdropStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.backdropStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    async toggleLocalAssets(checked) {
+      if (!checked) {
+        if (!confirm('Switch Vue.js and the theme font back to loading from the internet? The downloaded local copies will be deleted.')) {
+          return;
+        }
+        this.localAssetsDownloading = true;
+        this.localAssetsStatus = { msg: '', type: '' };
+        try {
+          const res  = await fetch(apiUrl('/api/admin/local-assets/reset'), { method: 'POST' });
+          const data = await res.json();
+          this.localAssetsAvailable = !!data.available;
+          this.localAssetsStatus = { msg: 'Switched back to loading from the internet.', type: 'ok' };
+        } catch (e) {
+          this.localAssetsStatus = { msg: 'Could not reach server.', type: 'err' };
+        }
+        this.localAssetsDownloading = false;
+        return;
+      }
+      this.localAssetsDownloading = true;
+      this.localAssetsStatus = { msg: 'Downloading Vue.js and fonts…', type: '' };
+      try {
+        const res  = await fetch(apiUrl('/api/admin/local-assets/download'), { method: 'POST' });
+        const data = await res.json();
+        this.localAssetsAvailable = !!data.available;
+        this.localAssetsStatus = data.ok
+          ? { msg: '✓ Downloaded — pages now load these locally.', type: 'ok' }
+          : { msg: data.error || 'Download failed.', type: 'err' };
+      } catch (e) {
+        this.localAssetsStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      this.localAssetsDownloading = false;
     },
 
     async saveBleScrollerPref() {
