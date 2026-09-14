@@ -726,18 +726,21 @@
       this server to keep working with no internet connection at all.
     </div>
     <div class="card">
-      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
-        <span style="font-size:0.85rem;">Load Vue.js and fonts locally</span>
-        <input
-          type="checkbox"
-          :checked="localAssetsAvailable"
-          :disabled="localAssetsDownloading"
-          @change="toggleLocalAssets($event.target.checked)"
-          style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);"
+      <div class="field-row" style="align-items:center; justify-content:space-between;">
+        <span style="font-size:0.85rem;">Vue.js and default theme font</span>
+        <button
+          class="btn btn-primary"
+          @click="downloadLocalAssets"
+          :disabled="localAssetsAvailable || localAssetsDownloading"
         >
-      </label>
-      <div class="section-hint" style="margin-top:4px;">
-        Takes effect on your next page load or navigation (every KINSHO page is a full reload, so this happens automatically).
+          <template v-if="localAssetsDownloading">Downloading…</template>
+          <template v-else-if="localAssetsAvailable">✓ Downloaded</template>
+          <template v-else>Download locally</template>
+        </button>
+      </div>
+      <div class="section-hint" style="margin-top:4px;" v-if="localAssetsAvailable">
+        Loading locally — no internet needed for these anymore. Takes effect on your next page load or navigation (every KINSHO page is a full reload, so this happens automatically).
+        <a href="#" @click.prevent="resetLocalAssets" style="color:var(--color-muted,#888);">Switch back to CDN</a>
       </div>
       <div class="status-msg" :class="localAssetsStatus.type" v-text="localAssetsStatus.msg"></div>
     </div>

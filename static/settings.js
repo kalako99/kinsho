@@ -934,24 +934,7 @@ createApp({
       setTimeout(() => { this.backdropStatus = { msg: '', type: '' }; }, 2000);
     },
 
-    async toggleLocalAssets(checked) {
-      if (!checked) {
-        if (!confirm('Switch Vue.js and the theme font back to loading from the internet? The downloaded local copies will be deleted.')) {
-          return;
-        }
-        this.localAssetsDownloading = true;
-        this.localAssetsStatus = { msg: '', type: '' };
-        try {
-          const res  = await fetch(apiUrl('/api/admin/local-assets/reset'), { method: 'POST' });
-          const data = await res.json();
-          this.localAssetsAvailable = !!data.available;
-          this.localAssetsStatus = { msg: 'Switched back to loading from the internet.', type: 'ok' };
-        } catch (e) {
-          this.localAssetsStatus = { msg: 'Could not reach server.', type: 'err' };
-        }
-        this.localAssetsDownloading = false;
-        return;
-      }
+    async downloadLocalAssets() {
       this.localAssetsDownloading = true;
       this.localAssetsStatus = { msg: 'Downloading Vue.js and fonts…', type: '' };
       try {
@@ -961,6 +944,23 @@ createApp({
         this.localAssetsStatus = data.ok
           ? { msg: '✓ Downloaded — pages now load these locally.', type: 'ok' }
           : { msg: data.error || 'Download failed.', type: 'err' };
+      } catch (e) {
+        this.localAssetsStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      this.localAssetsDownloading = false;
+    },
+
+    async resetLocalAssets() {
+      if (!confirm('Switch Vue.js and the theme font back to loading from the internet? The downloaded local copies will be deleted.')) {
+        return;
+      }
+      this.localAssetsDownloading = true;
+      this.localAssetsStatus = { msg: '', type: '' };
+      try {
+        const res  = await fetch(apiUrl('/api/admin/local-assets/reset'), { method: 'POST' });
+        const data = await res.json();
+        this.localAssetsAvailable = !!data.available;
+        this.localAssetsStatus = { msg: 'Switched back to loading from the internet.', type: 'ok' };
       } catch (e) {
         this.localAssetsStatus = { msg: 'Could not reach server.', type: 'err' };
       }

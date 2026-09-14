@@ -223,6 +223,13 @@ def local_assets_dir() -> Optional[str]:
     return os.path.join(data_path, "local_assets")
 
 def local_assets_available() -> bool:
+    # NOTE: this only checks that the files exist, not that they match
+    # VUE_CDN_URL's currently-pinned version -- if that version ever gets
+    # bumped in a future update, an already-downloaded vue.global.js from an
+    # older version will keep being served silently until an admin presses
+    # "Switch back to CDN" + re-downloads. Add a version check here (e.g.
+    # store the downloaded version alongside the file and compare) if/when
+    # VUE_CDN_URL's version actually changes -- not needed before then.
     d = local_assets_dir()
     if not d:
         return False
