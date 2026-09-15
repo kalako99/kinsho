@@ -1575,14 +1575,35 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (!document.pointerLockElement && !barVisible) showAll();
   });
 
+  // Tracks whether the most recent pointer interaction was a real mouse
+  // (pointerType 'mouse') as opposed to touch or a stylus (S Pen reports
+  // 'pen', deliberately grouped with touch here, not mouse) -- capture
+  // phase so this is always current by the time a click handler further
+  // down the chain reads it, since pointerdown always fires before click.
+  let lastInputWasMouse = false;
+  document.addEventListener('pointerdown', e => {
+    lastInputWasMouse = (e.pointerType === 'mouse');
+  }, { capture: true });
+
   // Schedules (or reschedules) the 3s auto-hide -- shared by showAll() and
   // by any later interaction with the reader's own UI chrome (see
   // isInReaderChrome below), so opening Settings/Bookmarks etc. keeps
   // pushing the deadline out instead of the original showAll() timer
   // silently ticking down in the background regardless of what the user
   // does next (2026-08-11).
+  //
+  // Skips arming the timer at all when the most recent interaction was a
+  // mouse: requestReaderPointerLock() (see hideAll()) needs to be called
+  // from within a genuine, synchronous user gesture to reliably be granted
+  // by the browser -- a click always qualifies, a timer firing 3s after the
+  // last interaction might not. For a mouse session the bars now only ever
+  // hide via the existing explicit "click while visible" path below, which
+  // guarantees hideAll() (and the pointer-lock request inside it) is always
+  // triggered by fresh activation. Touch/pen sessions are unaffected, since
+  // pointer lock has nothing to do with them in the first place (2026-09-15).
   function scheduleAutoHide() {
     clearTimeout(barTimer);
+    if (lastInputWasMouse) return;
     barTimer = setTimeout(() => {
       if (stripVisible) return; // don't hide while thumb strip is active
       if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
@@ -3404,8 +3425,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   pageSliderWrap.addEventListener('click', (e) => {
     if (e.target === pageSliderWrap) {
       hideThumbStrip();
-      clearTimeout(barTimer);
-      barTimer = setTimeout(() => hideAll(), 3000);
+      // Routed through the shared scheduleAutoHide() (was its own raw
+      // setTimeout) so this respects the same mouse-session "no passive
+      // auto-hide timer" policy -- otherwise a mouse user dismissing the
+      // thumb strip would still get a stale-activation hideAll() 3s later
+      // through this one remaining side door.
+      scheduleAutoHide();
       return;
     }
     if (stripVisible) e.stopPropagation();
