@@ -1544,7 +1544,36 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
     if (typeof syncSliderVisibility === 'function') syncSliderVisibility();
     document.body.classList.add('cursor-hidden');
+    requestReaderPointerLock();
   }
+
+  // Locks the OS cursor in place (hidden, frozen, movementX/Y-only) once the
+  // UI is hidden -- pure CSS cursor:none only hides the cursor's sprite, it
+  // doesn't stop the real pointer from moving, which on Android lets an
+  // accidental drag to the top edge trigger the system notification shade
+  // mid-scroll. Requesting pointer lock from a setTimeout (scheduleAutoHide's
+  // 3s timer, not a direct click handler) may be rejected by browsers that
+  // require fresher user-activation for it -- that's fine, it just leaves
+  // cursor-hidden's plain CSS hide as the fallback, exactly like before this
+  // existed.
+  function requestReaderPointerLock() {
+    if (!document.body.requestPointerLock || document.pointerLockElement === document.body) return;
+    try {
+      const p = document.body.requestPointerLock();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (err) { /* unsupported -- silently fall back to CSS-only hide */ }
+  }
+
+  // pointerlockchange also fires for our own intentional exitPointerLock()
+  // call inside showAll() below -- but by the time that async event reaches
+  // here, showAll() has already run synchronously and barVisible is true, so
+  // this only actually triggers a recovery showAll() when the lock is lost
+  // some OTHER way (Escape key, app losing focus, etc.) while the bars are
+  // still supposed to be hidden -- otherwise the reader would be left with
+  // hidden UI and a suddenly-free, visible cursor.
+  document.addEventListener('pointerlockchange', () => {
+    if (!document.pointerLockElement && !barVisible) showAll();
+  });
 
   // Schedules (or reschedules) the 3s auto-hide -- shared by showAll() and
   // by any later interaction with the reader's own UI chrome (see
@@ -1576,6 +1605,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function showAll() {
+    if (document.pointerLockElement) document.exitPointerLock();
     topbar.classList.add('visible');
     fragProgress.classList.add('visible');
     document.getElementById('bottombar').classList.add('visible');
@@ -4806,6 +4836,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // still triggers an unwanted extra chrome toggle from the document
     // handler. The old per-zone divs each did this same stopPropagation.
     e.stopPropagation();
+    // While pointer-locked, clientX is frozen wherever it was when the lock
+    // was acquired (not necessarily centered), so it can't be trusted for
+    // zone routing -- and the user has no visible cursor to aim with anyway.
+    // Every click while locked is the "give me my cursor back" click, never
+    // a navigation tap.
+    if (document.pointerLockElement) { showAll(); return; }
     const frac = e.clientX / viewW;
     if (frac < 0.3) {
       // Physical left = backward in LTR, forward in RTL
