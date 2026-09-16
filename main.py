@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, BackgroundTasks, Query, Depends, HTTPException
+from fastapi import FastAPI, Request, Query, Depends, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, FileResponse
@@ -19,6 +19,7 @@ from PIL import Image
 from typing import List, Optional
 from datetime import datetime
 import asyncio
+import queue
 import threading
 from fastapi.responses import Response
 from urllib.parse import quote, urlparse
@@ -86,6 +87,7 @@ async def lifespan(app):
         app.mount("/backgrounds", StaticFiles(directory=bg_folder), name="backgrounds")
     ip = get_local_ip()
     print(f"\n  Kinsho running at: http://{ip}:8000\n")
+    threading.Thread(target=_scan_worker, daemon=True).start()
     task = asyncio.create_task(periodic_library_rescan())
     integrity_task = asyncio.create_task(run_integrity_check_loop())
     yield
@@ -365,9 +367,64 @@ def _cleanup_stale_archive_thumbs(library_id: int, manga_name: str, source_id: s
 _thumb_progress: dict = {}
 _thumb_progress_lock = threading.Lock()
 
-_scan_running: set = set()  # library_ids currently being scanned
+_scan_running: set = set()  # library_ids whose run_scan() is actively executing right now
 _scan_progress: dict = {}  # library_id -> {"processed": int, "total": int}, present only while running
 _extraction_running: set = set()  # library_ids currently running background auto-extraction
+
+# ── SCAN QUEUE ──
+#
+# These are spinning drives (WD Red + Toshiba USB HDDs, not SSDs) -- letting
+# two libraries' scans read from different parts of the disk at the same
+# time means the head thrashes between them instead of either one reading
+# efficiently, unlike an SSD where concurrency is close to free. A single
+# background worker is the only thing that ever calls run_scan(): every
+# trigger (a manual Reload-scan click, Save Libraries looping over every
+# configured library, the periodic 12h auto-rescan, a corrupted-dims.json
+# repair, auto_extract's own follow-up rescan) funnels through
+# enqueue_library_scan() instead of starting its own thread, so at most one
+# library's scan is ever touching disk at once, strictly in request order.
+#
+# _scan_queued_ids is the superset of _scan_running: it covers a library
+# from the moment it's enqueued (still waiting its turn) through the whole
+# time run_scan() is actually executing, and is what /api/scan/*status now
+# checks -- a library merely waiting in line still needs to read as "not
+# done yet", not silently look like nothing is happening until its turn
+# actually arrives.
+_scan_queue: "queue.Queue[int]" = queue.Queue()
+_scan_queue_lock = threading.Lock()
+_scan_queued_ids: set = set()  # library_ids waiting in line OR actively running
+
+
+def enqueue_library_scan(library_id: int) -> bool:
+    """Adds library_id to the shared scan queue unless it's already queued
+    or running. Returns False for a no-op duplicate (several triggers for
+    the same library collapse into a single run instead of queuing a
+    redundant rescan right behind the one already pending)."""
+    with _scan_queue_lock:
+        if library_id in _scan_queued_ids:
+            return False
+        _scan_queued_ids.add(library_id)
+    _scan_queue.put(library_id)
+    return True
+
+
+def _scan_worker():
+    """The single background worker -- the only thing that ever calls
+    run_scan(). Blocks on the queue when idle; runs one library's scan to
+    completion (run_scan() itself also kicks off that library's thumbnail
+    extraction and, if needed, auto-extraction as their own follow-up
+    threads -- unchanged, out of scope for this queue) before looking at
+    the next queued library."""
+    while True:
+        library_id = _scan_queue.get()
+        try:
+            run_scan(library_id)
+        except Exception as e:
+            print(f"[ScanQueue] library {library_id} raised: {e!r}")
+        finally:
+            with _scan_queue_lock:
+                _scan_queued_ids.discard(library_id)
+            _scan_queue.task_done()
 
 templates = Jinja2Templates(directory="templates")
 
@@ -516,8 +573,6 @@ def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
               f"Manually-added tags/genres/description for this manga are lost unless a backup exists.")
         return {"chapters": {}, "tags": [], "genres": [], "description": ""}
 
-_corruption_repair_started: set = set()  # library_ids where a repair rescan has already been kicked off this process's lifetime, cleared when that scan finishes
-
 def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[dict]:
     """Listing/serving-path-safe dims loader. A corrupted dims.json here
     would otherwise 500 the entire request -- e.g. one bad manga taking down
@@ -525,26 +580,20 @@ def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[
     report this exists for. Returns None on corruption; the caller must skip
     this manga from whatever it's building (never substitute an empty dict --
     that would read as "no tags", which could surface a manga a blocked tag
-    was supposed to hide). Also triggers a background rescan of the whole
-    library, same as the startup self-heal check, so the very next request
-    sees it repaired instead of it staying invisible until someone happens to
-    trigger a manual Reload."""
+    was supposed to hide). Also enqueues a repair rescan of the whole
+    library (see enqueue_library_scan), same as the startup self-heal check,
+    so the very next request sees it repaired instead of it staying
+    invisible until someone happens to trigger a manual Reload."""
     try:
         return load_manga_dims(library_id, manga_name)
     except json.JSONDecodeError as e:
-        print(f"[Serving] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
-              f"-- hiding it from this response and triggering a repair rescan.")
-        if library_id not in _scan_running and library_id not in _corruption_repair_started:
-            _corruption_repair_started.add(library_id)
-            _scan_running.add(library_id)  # claim it now (synchronously) so a flood of
-            # concurrent requests hitting this same corrupted manga can't each pass the
-            # check above and each spawn their own redundant repair scan.
-            def _repair():
-                try:
-                    run_scan(library_id)
-                finally:
-                    _corruption_repair_started.discard(library_id)
-            threading.Thread(target=_repair, daemon=True).start()
+        # enqueue_library_scan() already atomically dedupes -- a flood of
+        # concurrent requests hitting this same corrupted manga only ever
+        # gets ONE of them to actually enqueue (returns True), so only that
+        # one logs/triggers the repair.
+        if enqueue_library_scan(library_id):
+            print(f"[Serving] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
+                  f"-- hiding it from this response and triggering a repair rescan.")
         return None
 
 def _is_manga_id_blocked(username: str, library_id: int, manga_id: str) -> bool:
@@ -3235,12 +3284,25 @@ async def periodic_library_rescan():
                 lib_id = lib.get("id")
                 # Also skip a library with a background auto-extraction pass
                 # still running from an earlier scan -- that pass triggers
-                # its own follow-up run_scan once it finishes, so starting
+                # its own follow-up rescan once it finishes, so starting
                 # another one here on top of it would just race the same
                 # files being converted/deleted mid-walk.
-                if lib_id is not None and lib_id not in _scan_running and lib_id not in _extraction_running:
+                if lib_id is not None and lib_id not in _extraction_running:
                     print(f"[AutoScan] Re-scanning library {lib_id}...")
-                    await asyncio.to_thread(run_scan, lib_id)
+                    # Enqueues onto the SAME shared scan queue a manual Reload
+                    # click or Save Libraries uses (see enqueue_library_scan)
+                    # -- routing through it here too, not a direct call, is
+                    # what guarantees this periodic pass can never overlap
+                    # with a manually-triggered scan for some other library
+                    # happening at the same moment. Waiting for it to clear
+                    # from _scan_queued_ids keeps this loop's own existing
+                    # one-library-at-a-time-with-the-flag-rechecked-between-
+                    # each behavior, whether this pass's own enqueue actually
+                    # started it or it was already queued/running from
+                    # somewhere else.
+                    enqueue_library_scan(lib_id)
+                    while lib_id in _scan_queued_ids:
+                        await asyncio.sleep(0.5)
         except Exception as e:
             print(f"[AutoScan] Error during periodic rescan: {e}")
 
@@ -3521,7 +3583,7 @@ def _startup_heal_corrupted_dims():
                 affected_libraries.add(library_id)
 
     for library_id in affected_libraries:
-        threading.Thread(target=run_scan, args=(library_id,), daemon=True).start()
+        enqueue_library_scan(library_id)
 
 def run_auto_extraction(library_id: int, pending_paths: list):
     """Background follow-up to a scan that found library["auto_extract"] on
@@ -3588,7 +3650,7 @@ def run_auto_extraction(library_id: int, pending_paths: list):
 
     print(f"[AutoExtract] Done for library {library_id}: {converted}/{len(pending_paths)} converted.")
     if converted:
-        run_scan(library_id)
+        enqueue_library_scan(library_id)
 
 
 def run_scan(library_id: int):
@@ -4105,13 +4167,13 @@ def list_backgrounds():
     return JSONResponse({"backgrounds": files})
 
 @app.post("/api/scan/{library_id}")
-async def trigger_scan(library_id: int, background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_scan, library_id)
+async def trigger_scan(library_id: int):
+    enqueue_library_scan(library_id)
     return JSONResponse({"ok": True, "message": "Scan started"})
 
 @app.get("/api/scan/{library_id}/status")
 def scan_status(library_id: int):
-    if library_id in _scan_running:
+    if library_id in _scan_queued_ids:
         progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
         return JSONResponse({"scanned": False, "running": True, **progress})
     data = load_app_data()
@@ -4140,12 +4202,12 @@ def scan_activity(request: Request):
     username = auth.get_current_user(request)
     if not username:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
-    if not _scan_running:
+    if not _scan_queued_ids:
         return JSONResponse({"scanning": False, "libraries": []})
     data = load_app_data()
     lib_names = {lib["id"]: lib.get("name", f"Library {lib['id']}") for lib in data.get("libraries", [])}
     active = []
-    for library_id in sorted(_scan_running):
+    for library_id in sorted(_scan_queued_ids):
         if not auth.can_access_library(username, library_id):
             continue
         progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
