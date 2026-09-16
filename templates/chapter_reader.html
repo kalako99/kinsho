@@ -4865,8 +4865,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // was acquired (not necessarily centered), so it can't be trusted for
     // zone routing -- and the user has no visible cursor to aim with anyway.
     // Every click while locked is the "give me my cursor back" click, never
-    // a navigation tap.
-    if (document.pointerLockElement) { showAll(); return; }
+    // a navigation tap. document.pointerLockElement is kept as the primary
+    // check for platforms where Pointer Lock actually works (desktop
+    // browsers) -- confirmed a silent no-op on Android WebView (2026-09-15),
+    // where pointerLockElement never gets set at all, so it's paired with a
+    // second, platform-independent check below for exactly that case: a
+    // mouse session (lastInputWasMouse) with the bars/cursor currently
+    // hidden (!barVisible) means the real cursor is invisible but still
+    // free to move -- the user has no way to aim a zone tap accurately, so
+    // treat any click made in that state as "give me my cursor back" too,
+    // same as the locked case, instead of risking an accidental page flip.
+    // Touch/pen taps are unaffected either way -- there's no hidden-cursor
+    // problem for them to begin with, so zone routing still applies to them
+    // even while the bars are hidden.
+    if (document.pointerLockElement || (!barVisible && lastInputWasMouse)) { showAll(); return; }
     const frac = e.clientX / viewW;
     if (frac < 0.3) {
       // Physical left = backward in LTR, forward in RTL
