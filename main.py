@@ -344,29 +344,24 @@ def get_thumbs_dir(library_id: int, manga_name: str, source_id: str) -> Optional
     return thumbs
 
 def _cleanup_stale_archive_thumbs(library_id: int, manga_name: str, source_id: str):
-    """Called whenever a chapter/volume that used to be archive-sourced is
-    about to be rewritten as loose-sourced (same id, see make_id -- ids are
-    derived from the extension-stripped name, so an archive replaced by a
-    same-named loose folder keeps the exact same id and just gets its dims
-    entry overwritten in place). extract_thumbs_for_library only ever
-    generates thumbs for source == "archive" and skips loose entirely, so
-    once a unit flips to loose those old thumbnail files become permanently
-    orphaned -- nothing regenerates or reads them again, they'd just sit
-    there wasting disk space forever otherwise. General cleanup, not
-    specific to the auto-extract feature: the same stale-thumbs situation
-    would arise from a user manually replacing an archive with a same-named
-    loose folder outside this app entirely."""
+    """Called whenever a chapter/volume that used to be archive/pdf-sourced
+    is about to be rewritten as loose-sourced (same id, see make_id -- ids
+    are derived from the extension-stripped name, so an archive replaced by
+    a same-named loose folder keeps the exact same id and just gets its
+    dims entry overwritten in place). If the old source was a PDF,
+    prerender_pdf_pages_for_library will have left full-page p{n}.jpg
+    renders in this directory (see _prerender_pdf_volume) -- a loose volume
+    never reads from here at all, so once a unit flips to loose those files
+    become permanently orphaned, wasting disk space forever otherwise.
+    General cleanup, not specific to the auto-extract feature: the same
+    stale-files situation would arise from a user manually replacing an
+    archive/PDF with a same-named loose folder outside this app entirely."""
     covers_dir = get_covers_dir()
     if not covers_dir:
         return
     thumbs = os.path.join(covers_dir, str(library_id), manga_name, "thumbs", source_id)
     if os.path.exists(thumbs):
         shutil.rmtree(thumbs, ignore_errors=True)
-
-# Tracks thumb extraction progress: key = (library_id, manga_id, source_id)
-# value = {"total": int, "done": int, "running": bool}
-_thumb_progress: dict = {}
-_thumb_progress_lock = threading.Lock()
 
 _scan_running: set = set()  # library_ids whose run_scan() is actively executing right now
 _scan_progress: dict = {}  # library_id -> {"processed": int, "total": int}, present only while running
@@ -557,7 +552,7 @@ def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
     This does NOT recover tags/genres/description -- those aren't derivable
     from the source images, so if the corrupted write had ever saved
     different values than what's recoverable from a backup, they're gone.
-    Used by scan_library/relocate_dims_paths/extract_thumbs_for_library, where
+    Used by scan_library/relocate_dims_paths/prerender_pdf_pages_for_library, where
     "treat as empty and let the existing rescan-if-changed logic rebuild it"
     is exactly the right behavior. Permission checks keep calling
     load_manga_dims directly and keep failing loudly on real corruption,
@@ -1380,143 +1375,6 @@ def _make_thumb_bytes(img_bytes: bytes) -> Optional[bytes]:
         print(f"[Thumbs] Failed to make thumb: {e}")
         return None
 
-def extract_thumbs_for_source(
-    library_id: int,
-    manga_name: str,
-    source_id: str,
-    source_type: str,   # 'archive', 'pdf', 'epub'
-    source_path: str,
-    prefix: str = "",   # for case1 chapters inside archives
-):
-    """
-    Extract THUMB_WIDTH-wide JPEG thumbnails for every page of a source
-    (archive chapter, volume, or pdf/epub volume) into the thumbs directory.
-    Skips pages whose thumb file already exists.
-    Updates _thumb_progress during extraction.
-    """
-    key = (library_id, manga_name, source_id)
-    thumbs_dir = get_thumbs_dir(library_id, manga_name, source_id)
-    if not thumbs_dir:
-        return
-
-    # Build the ordered list of raw page identifiers
-    if source_type == "archive":
-        all_images = _cached_archive_image_list(source_path)
-        if prefix:
-            images = [n for n in all_images if n.startswith(prefix)]
-        else:
-            images = all_images
-        total = len(images)
-    elif source_type == "pdf":
-        if not PDF_SUPPORT:
-            return
-        doc = pymupdf.open(source_path)
-        total = len(doc)
-        doc.close()
-        images = list(range(total))
-    elif source_type == "epub":
-        images = get_epub_image_list(source_path)
-        total = len(images)
-    else:
-        return
-
-    with _thumb_progress_lock:
-        _thumb_progress[key] = {"total": total, "done": 0, "running": True}
-
-    done = 0
-    for i, entry in enumerate(images):
-        thumb_path = os.path.join(thumbs_dir, f"{i}.jpg")
-        if os.path.exists(thumb_path):
-            done += 1
-            with _thumb_progress_lock:
-                _thumb_progress[key]["done"] = done
-            continue
-
-        # Extract raw bytes
-        raw = None
-        try:
-            if source_type == "archive":
-                raw = _cached_archive_page(source_path, entry)
-            elif source_type == "pdf":
-                raw = _cached_pdf_page(source_path, i)
-            elif source_type == "epub":
-                raw = _cached_epub_page(source_path, entry)
-        except Exception as e:
-            print(f"[Thumbs] Error reading page {i}: {e}")
-
-        if raw:
-            thumb_bytes = _make_thumb_bytes(raw)
-            if thumb_bytes:
-                try:
-                    with open(thumb_path, "wb") as f:
-                        f.write(thumb_bytes)
-                except Exception as e:
-                    print(f"[Thumbs] Error saving thumb {i}: {e}")
-
-        done += 1
-        with _thumb_progress_lock:
-            _thumb_progress[key]["done"] = done
-
-    with _thumb_progress_lock:
-        _thumb_progress[key]["running"] = False
-
-    print(f"[Thumbs] Done: {manga_name}/{source_id} ({done}/{total})")
-
-def extract_thumbs_for_loose_chapter(
-    library_id: int,
-    manga_name: str,
-    chapter_id: str,
-    chapter_path: str,
-):
-    """
-    Extract thumbnails for every image in a loose chapter folder.
-    Skips pages whose thumb file already exists.
-    """
-    key = (library_id, manga_name, chapter_id)
-    thumbs_dir = get_thumbs_dir(library_id, manga_name, chapter_id)
-    if not thumbs_dir:
-        return
-
-    try:
-        images = sorted(
-            [f for f in os.listdir(chapter_path)
-             if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
-            key=natural_sort_key
-        )
-    except Exception as e:
-        print(f"[Thumbs] Cannot list loose chapter {chapter_path}: {e}")
-        return
-
-    total = len(images)
-    with _thumb_progress_lock:
-        _thumb_progress[key] = {"total": total, "done": 0, "running": True}
-
-    done = 0
-    for i, fname in enumerate(images):
-        thumb_path = os.path.join(thumbs_dir, f"{i}.jpg")
-        if os.path.exists(thumb_path):
-            done += 1
-            with _thumb_progress_lock:
-                _thumb_progress[key]["done"] = done
-            continue
-        try:
-            with open(os.path.join(chapter_path, fname), "rb") as f:
-                raw = f.read()
-            thumb_bytes = _make_thumb_bytes(raw)
-            if thumb_bytes:
-                with open(thumb_path, "wb") as f:
-                    f.write(thumb_bytes)
-        except Exception as e:
-            print(f"[Thumbs] Error processing loose image {fname}: {e}")
-        done += 1
-        with _thumb_progress_lock:
-            _thumb_progress[key]["done"] = done
-
-    with _thumb_progress_lock:
-        _thumb_progress[key]["running"] = False
-
-    print(f"[Thumbs] Done (loose): {manga_name}/{chapter_id} ({done}/{total})")
-
 def _prerender_pdf_volume(
     library_id: int,
     manga_name: str,
@@ -1526,10 +1384,16 @@ def _prerender_pdf_volume(
     scale: float = 1.5,
 ):
     """
-    Pre-render all pages of a PDF volume to JPEG files on disk.
-    Files are named p{index}.jpg inside the thumbs directory.
-    Skips pages whose file already exists.
-    Runs in a background thread.
+    Pre-render all pages of a PDF volume to JPEG files on disk (p{index}.jpg
+    inside the thumbs directory), so actually reading a PDF page is fast --
+    rendering one live via pymupdf on every page view would be slow.
+    Skips pages whose file already exists. Runs in a background thread.
+
+    Deliberately does NOT also generate a small thumb_{i}.jpg alongside each
+    page any more (2026-09-19) -- that was this function's own contribution
+    to the small-thumbnail-on-disk system removed the same day (see
+    get_thumb_on_demand's docstring); the scrub-bar thumbnail for a PDF page
+    is generated on demand instead, same as every other source type.
     """
     if not PDF_SUPPORT:
         return
@@ -1544,45 +1408,41 @@ def _prerender_pdf_volume(
         print(f"[PDF] Cannot open {pdf_path}: {e}")
         return
 
-    mat       = pymupdf.Matrix(scale, scale)
-    thumb_mat = pymupdf.Matrix(0.2, 0.2)  # ~72dpi — enough for a 100px thumb
-    rendered  = 0
+    mat      = pymupdf.Matrix(scale, scale)
+    rendered = 0
     for i in range(page_count):
-        out_path   = os.path.join(thumbs_dir, f"p{i}.jpg")
-        thumb_path = os.path.join(thumbs_dir, f"thumb_{i}.jpg")
-        need_page  = not os.path.exists(out_path)
-        need_thumb = not os.path.exists(thumb_path)
-        if not need_page and not need_thumb:
+        out_path = os.path.join(thumbs_dir, f"p{i}.jpg")
+        if os.path.exists(out_path):
             continue
         try:
             page = doc.load_page(i)
-            if need_page:
-                pix = page.get_pixmap(matrix=mat, alpha=False)
-                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                img.save(out_path, format="JPEG", quality=88, optimize=True)
-            if need_thumb:
-                tpix  = page.get_pixmap(matrix=thumb_mat, alpha=False)
-                timg  = Image.frombytes("RGB", (tpix.width, tpix.height), tpix.samples)
-                # Resize to exactly THUMB_WIDTH wide
-                tw, th = timg.size
-                if tw > 0:
-                    new_h = int(th * THUMB_WIDTH / tw)
-                    timg  = timg.resize((THUMB_WIDTH, new_h), Image.LANCZOS)
-                timg.save(thumb_path, format="JPEG", quality=70, optimize=True)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            img.save(out_path, format="JPEG", quality=88, optimize=True)
             rendered += 1
         except Exception as e:
             print(f"[PDF] Error rendering page {i}: {e}")
     doc.close()
     print(f"[PDF] Pre-render done: {rendered} new pages for {manga_name}/{volume_id}.")
 
-def extract_thumbs_for_library(library_id: int):
+def prerender_pdf_pages_for_library(library_id: int):
     """
-    Post-scan background task: extract thumbnails for all compressed sources in a library.
-    Skips loose chapters (their images are served directly from disk, fast enough).
-    Uses mtime comparison to skip unchanged sources.
-    Runs all sources sequentially to avoid server overload.
+    Post-scan background task: pre-renders full-size pages for every PDF
+    volume in a library (see _prerender_pdf_volume) so PDF reading is fast.
+    Uses mtime comparison to skip unchanged volumes.
+
+    Renamed from extract_thumbs_for_library (2026-09-19) when small on-disk
+    scrub-bar thumbnails were removed entirely for every source type --
+    this function no longer does any thumbnail work at all, only PDF page
+    pre-rendering, which is the one piece of "generate ahead of time and
+    cache on disk" that's still worth doing (a PDF page has to be rendered
+    from vector data via pymupdf, which is genuinely slow to do live on
+    every page view; a manga/archive/loose page is already a raster image,
+    so there's nothing to pre-render for those -- reading the file IS the
+    whole cost, and that's now handled purely on demand, see
+    get_thumb_on_demand).
     """
-    print(f"[Thumbs] Starting library-wide extraction for library {library_id}...")
+    print(f"[PDF] Starting library-wide pre-render for library {library_id}...")
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     mangas = manga_data.get("mangas", [])
@@ -1595,45 +1455,10 @@ def extract_thumbs_for_library(library_id: int):
 
         dims = _safe_load_manga_dims(library_id, manga_name)
 
-        # ── CHAPTERS: compressed only ──
-        for chapter_id, chapter in dims.get("chapters", {}).items():
-            source_type = chapter.get("source")
-            if source_type != "archive":
-                continue  # skip loose chapters
-
-            source_path  = chapter.get("path", "")
-            stored_mtime = chapter.get("mtime")
-
-            try:
-                current_mtime = os.path.getmtime(source_path)
-            except Exception:
+        for volume_id, volume in dims.get("volumes", {}).items():
+            if volume.get("source", "archive") != "pdf":
                 continue
 
-            thumbs_dir  = get_thumbs_dir(library_id, manga_name, chapter_id)
-            total_pages = len(chapter.get("pages", []))
-            if thumbs_dir and total_pages > 0:
-                existing_thumbs = len([f for f in os.listdir(thumbs_dir) if f.endswith(".jpg")])
-                if existing_thumbs >= total_pages and stored_mtime == current_mtime:
-                    continue  # up to date
-
-            if thumbs_dir and stored_mtime != current_mtime:
-                for f in os.listdir(thumbs_dir):
-                    if f.endswith(".jpg"):
-                        try:
-                            os.remove(os.path.join(thumbs_dir, f))
-                        except Exception:
-                            pass
-
-            print(f"[Thumbs] Extracting chapter: {manga_name}/{chapter.get('name', chapter_id)}")
-            prefix = chapter.get("prefix", "")
-            extract_thumbs_for_source(
-                library_id, manga_name, chapter_id,
-                "archive", source_path, prefix
-            )
-
-        # ── VOLUMES (case2): always compressed ──
-        for volume_id, volume in dims.get("volumes", {}).items():
-            source_type  = volume.get("source", "archive")
             source_path  = volume.get("path", "")
             stored_mtime = volume.get("mtime")
 
@@ -1645,40 +1470,21 @@ def extract_thumbs_for_library(library_id: int):
             thumbs_dir  = get_thumbs_dir(library_id, manga_name, volume_id)
             total_pages = len(volume.get("pages", []))
 
-            if source_type == "pdf":
-                if thumbs_dir and total_pages > 0:
-                    # Count p{n}.jpg pre-rendered pages
-                    existing = len([f for f in os.listdir(thumbs_dir) if f.startswith("p") and f.endswith(".jpg")])
-                    if existing >= total_pages and stored_mtime == current_mtime:
-                        continue
-                if thumbs_dir and stored_mtime != current_mtime:
-                    for f in os.listdir(thumbs_dir):
-                        if f.endswith(".jpg"):
-                            try:
-                                os.remove(os.path.join(thumbs_dir, f))
-                            except Exception:
-                                pass
-                print(f"[PDF] Scheduling pre-render: {manga_name}/{volume.get('name', volume_id)}")
-                _prerender_pdf_volume(library_id, manga_name, volume_id, source_path, total_pages)
-            else:
-                if thumbs_dir and total_pages > 0:
-                    existing_thumbs = len([f for f in os.listdir(thumbs_dir) if f.endswith(".jpg")])
-                    if existing_thumbs >= total_pages and stored_mtime == current_mtime:
-                        continue
-                if thumbs_dir and stored_mtime != current_mtime:
-                    for f in os.listdir(thumbs_dir):
-                        if f.endswith(".jpg"):
-                            try:
-                                os.remove(os.path.join(thumbs_dir, f))
-                            except Exception:
-                                pass
-                print(f"[Thumbs] Extracting volume: {manga_name}/{volume.get('name', volume_id)}")
-                extract_thumbs_for_source(
-                    library_id, manga_name, volume_id,
-                    source_type, source_path, ""
-                )
+            if thumbs_dir and total_pages > 0:
+                existing = len([f for f in os.listdir(thumbs_dir) if f.startswith("p") and f.endswith(".jpg")])
+                if existing >= total_pages and stored_mtime == current_mtime:
+                    continue
+            if thumbs_dir and stored_mtime != current_mtime:
+                for f in os.listdir(thumbs_dir):
+                    if f.endswith(".jpg"):
+                        try:
+                            os.remove(os.path.join(thumbs_dir, f))
+                        except Exception:
+                            pass
+            print(f"[PDF] Scheduling pre-render: {manga_name}/{volume.get('name', volume_id)}")
+            _prerender_pdf_volume(library_id, manga_name, volume_id, source_path, total_pages)
 
-    print(f"[Thumbs] Library-wide extraction complete for library {library_id}.")
+    print(f"[PDF] Library-wide pre-render complete for library {library_id}.")
 
 def _get_source_info(library_id: int, manga_id: str, source_id: str, is_volume: bool):
     """
@@ -3782,7 +3588,7 @@ def run_scan(library_id: int):
     _scan_running.discard(library_id)
     _scan_progress.pop(library_id, None)
     print(f"[Scan] Done. Saved to data.json.")
-    t = threading.Thread(target=extract_thumbs_for_library, args=(library_id,), daemon=True)
+    t = threading.Thread(target=prerender_pdf_pages_for_library, args=(library_id,), daemon=True)
     t.start()
 
     if pending_extractions:
@@ -7193,19 +6999,13 @@ def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source
     source_type = source.get("source") if not is_volume else source.get("source", "archive")
     source_path = source.get("path", "")
 
-    # ── Disk cache check for compressed sources ──
-    if source_type in ("archive", "pdf"):
-        from fastapi.responses import FileResponse as _FR
-        thumbs_dir = get_thumbs_dir(library_id, manga["name"], source_id)
-        if thumbs_dir:
-            thumb_name = f"{page_index}.jpg" if source_type == "archive" else f"thumb_{page_index}.jpg"
-            thumb_path = os.path.join(thumbs_dir, thumb_name)
-            if os.path.exists(thumb_path):
-                return _FR(
-                    thumb_path,
-                    media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=86400, immutable"},
-                )
+    # Every source type generates its scrub-bar thumbnail on demand, in
+    # memory, never written to disk (2026-09-19 -- small thumbnails used to
+    # be pre-generated to disk for archive/pdf sources during the post-scan
+    # background pass, at the cost of real, permanent disk space for
+    # something only glanced at while dragging the progress bar; removed
+    # entirely at the user's request). This is real per-request decode+
+    # resize cost with no cache, same as loose sources already had.
 
     raw = None
     try:
