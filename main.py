@@ -81,6 +81,7 @@ async def lifespan(app):
     auth._ensure_admin_exists()
     _startup_migrate_retired_visual_themes()
     _startup_migrate_unit_cover_mtimes()
+    _startup_purge_duplicate_page_issues()
     _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
     if os.path.exists(bg_folder):
@@ -976,7 +977,7 @@ def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
         return None
     return comicinfo.aggregate_for_manga(ordered_items, open_archive, read_archive_entry_bytes)
 
-# ── INTEGRITY CHECK (corrupt archives / duplicate pages) ────────────────────
+# ── INTEGRITY CHECK (corrupt archives) ───────────────────────────────────────
 # A background-only, idle-gated pass — see is_idle() near the top of this
 # file and run_integrity_check_loop() further down. integrity_issues.json is
 # global (admin-facing), not per-user, same storage pattern as collections.json.
@@ -1043,15 +1044,13 @@ def record_integrity_result(
     library_id: int, manga_id: str, manga_name: str, item: dict, result: dict
 ) -> None:
     """
-    Replaces any existing findings for this exact chapter/volume with whatever
+    Replaces any existing finding for this exact chapter/volume with whatever
     this check just found (empty result = the item is now clean, which is
-    exactly how a Recheck clears a fixed issue). One issue per duplicate-page
-    group, so each row in the admin list is one concrete problem.
+    exactly how a Recheck clears a fixed issue).
     """
     with _integrity_issues_lock:
         issues_data = load_integrity_issues()
         _clear_issues_for_item(issues_data, library_id, manga_id, item["item_type"], item["item_id"])
-        now = datetime.now().isoformat()
 
         if result["corrupt"]:
             issues_data["issues"].append({
@@ -1059,22 +1058,7 @@ def record_integrity_result(
                 "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
                 "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
                 "type": "corrupt", "detail": result["corrupt"], "filenames": [],
-                "detected_at": now,
-            })
-        for group in result.get("duplicate_groups", []):
-            filenames = group["filenames"]
-            similarity = group.get("similarity", 1.0)
-            if similarity >= 1.0:
-                detail = f"{len(filenames)} identical pages: {', '.join(filenames)}"
-            else:
-                detail = f"{len(filenames)} near-duplicate pages ({similarity:.0%} similar): {', '.join(filenames)}"
-            issues_data["issues"].append({
-                "id": uuid.uuid4().hex,
-                "library_id": library_id, "manga_id": manga_id, "manga_name": manga_name,
-                "item_type": item["item_type"], "item_id": item["item_id"], "item_name": item["item_name"],
-                "type": "duplicate_pages",
-                "detail": detail,
-                "filenames": filenames, "detected_at": now,
+                "detected_at": datetime.now().isoformat(),
             })
         save_integrity_issues(issues_data)
 
@@ -3541,6 +3525,34 @@ def _startup_migrate_unit_cover_mtimes():
     if migrated:
         save_app_data(data)
         print(f"[StartupCheck] unit-cover-mtimes migration touched {migrated} manga total.")
+
+
+def _startup_purge_duplicate_page_issues():
+    """Called once at app startup (see lifespan). Duplicate/near-duplicate
+    page detection (perceptual hash + SSIM) was removed from integrity.py on
+    2026-09-18 -- false positives were common enough to make the feature more
+    trouble than it was worth, and it was the most CPU-expensive part of every
+    check by a wide margin. Corruption detection (the "type": "corrupt"
+    issues) is unaffected and stays.
+
+    New "duplicate_pages" issues can never be created going forward, but
+    stale ones from before this change would otherwise sit in the admin
+    Issues list indefinitely -- a Recheck naturally clears one (the new
+    check only ever reports corruption), but that's not guaranteed to happen
+    again for months on the normal ~3-month recheck cycle. Purging them here
+    means the list reflects the current feature set immediately, not
+    whenever each stale entry's item next happens to get rechecked."""
+    try:
+        issues_data = load_integrity_issues()
+    except Exception as e:
+        print(f"[StartupCheck] could not load integrity issues for duplicate-page purge: {e}")
+        return
+    before = len(issues_data["issues"])
+    issues_data["issues"] = [i for i in issues_data["issues"] if i.get("type") != "duplicate_pages"]
+    removed = before - len(issues_data["issues"])
+    if removed:
+        save_integrity_issues(issues_data)
+        print(f"[StartupCheck] purged {removed} stale duplicate-page issue(s) (feature removed).")
 
 
 def _startup_heal_corrupted_dims():

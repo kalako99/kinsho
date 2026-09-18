@@ -1469,10 +1469,9 @@
   <div class="settings-section">
     <div class="section-label">Integrity Issues</div>
     <div class="section-hint">
-      Corrupt archives and duplicate pages found by the automatic idle-time
-      library check (only runs when no one's been active for a while, so it
-      doesn't compete with anyone reading). Fix the file, then Recheck to
-      confirm and clear it.
+      Corrupt archives found by the automatic idle-time library check (only
+      runs when no one's been active for a while, so it doesn't compete with
+      anyone reading). Fix the file, then Recheck to confirm and clear it.
     </div>
 
     <div v-if="integrityIssues.length === 0" class="section-hint" style="text-align:center; padding: 30px 0;">
@@ -1497,7 +1496,7 @@
           <span class="issue-sep">›</span>
           <span class="issue-crumb" v-text="issue.item_name"></span>
         </div>
-        <div class="issue-type" v-text="issue.type === 'corrupt' ? 'Corrupt' : 'Duplicate pages'"></div>
+        <div class="issue-type">Corrupt</div>
         <div class="issue-detail" v-text="issue.detail"></div>
         <div class="issue-actions">
           <a :href="`/manga/${issue.library_id}/${issue.manga_id}`" class="btn" style="text-decoration:none;">Open manga</a>
