@@ -984,6 +984,20 @@ def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
 
 INTEGRITY_RECHECK_SECONDS = 90 * 24 * 60 * 60  # ~3 months
 
+# How often the background pass is even allowed to START a batch, independent
+# of INTEGRITY_RECHECK_SECONDS above (which is how often any ONE chapter/
+# volume gets re-examined). Corruption doesn't develop minute to minute, so
+# there's no benefit to grabbing every idle window all day — previously the
+# loop woke every 10 min and processed up to MAX_PER_WAKE items on EVERY
+# idle window, which on a NAS with mechanical drives could mean many
+# multi-hundred-item batches competing for disk I/O across a single day.
+# Set to once/day here; change to `30 * 24 * 60 * 60` for once/month instead
+# — at MAX_PER_WAKE=500/day, a day still comfortably outpaces any realistic
+# personal library's item count well inside the ~3-month recheck window, so
+# daily doesn't risk falling behind the way monthly plausibly could for a
+# very large library.
+INTEGRITY_LOOP_MIN_INTERVAL_SECONDS = 24 * 60 * 60  # once a day
+
 # Guards every access to integrity_issues.json — the admin Recheck All action
 # can now fire several rechecks concurrently (each running in its own thread
 # via asyncio.to_thread). Re-entrant so a caller doing an atomic load-mutate-save
@@ -3340,9 +3354,16 @@ def _integrity_due_items() -> list:
 async def run_integrity_check_loop():
     """
     Idle-gated background pass — only ever runs when is_idle() (no session/
-    token-authenticated request recently), and bails out of the current batch
+    token-authenticated request recently) AND it's been at least
+    INTEGRITY_LOOP_MIN_INTERVAL_SECONDS since the last time a pass actually
+    started (persisted as last_check_run_at in integrity_issues.json, so a
+    container restart doesn't reset the clock and immediately re-trigger).
+    Still wakes every WAKE_INTERVAL_SECONDS just to check the gate — cheap,
+    just a timestamp comparison — not to run a check every time.
+
+    Once triggered, behaves exactly as before: bails out of the current batch
     the moment activity resumes, resuming at the same point (oldest-checked-
-    first) on the next idle window rather than needing any separate pause/
+    first) on the NEXT scheduled pass rather than needing any separate pause/
     resume bookkeeping.
     """
     WAKE_INTERVAL_SECONDS = 10 * 60
@@ -3352,14 +3373,37 @@ async def run_integrity_check_loop():
         try:
             if not is_idle():
                 continue
+
+            issues_data = await asyncio.to_thread(load_integrity_issues)
+            last_run_str = issues_data.get("last_check_run_at")
+            if last_run_str:
+                try:
+                    elapsed = (datetime.now() - datetime.fromisoformat(last_run_str)).total_seconds()
+                    if elapsed < INTEGRITY_LOOP_MIN_INTERVAL_SECONDS:
+                        continue
+                except Exception:
+                    pass  # unparseable timestamp -- treat as never run, proceed
+
+            # Record the attempt now, before doing any work — this is a rate
+            # limit on how often a pass STARTS, not on whether it found
+            # anything to do, so it can't be defeated by a burst of newly-
+            # due items (e.g. right after a fresh library scan) re-triggering
+            # on every subsequent idle wake for the rest of the day.
+            def _stamp_last_run():
+                with _integrity_issues_lock:
+                    fresh = load_integrity_issues()
+                    fresh["last_check_run_at"] = datetime.now().isoformat()
+                    save_integrity_issues(fresh)
+            await asyncio.to_thread(_stamp_last_run)
+
             due = await asyncio.to_thread(_integrity_due_items)
             if not due:
                 continue
-            print(f"[Integrity] {len(due)} item(s) due for a check, starting idle pass...")
+            print(f"[Integrity] {len(due)} item(s) due for a check, starting today's pass...")
             checked = 0
             for library_id, manga_id, manga_name, item in due:
                 if not is_idle():
-                    print("[Integrity] Activity resumed, pausing until next idle window.")
+                    print("[Integrity] Activity resumed, pausing until the next scheduled pass.")
                     break
                 dims = await asyncio.to_thread(load_manga_dims, library_id, manga_name)
                 await asyncio.to_thread(run_integrity_check_for_item, library_id, manga_id, manga_name, dims, item)
