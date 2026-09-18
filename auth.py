@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import threading
 import uuid
 import hashlib
 import hmac
@@ -287,12 +288,41 @@ def require_admin(request: Request) -> Optional[JSONResponse]:
 
 # ── PER-USER DATA FILE ────────────────────────────────────────────────────────
 
+# Per-username locks -- {username}.json has many independent load-modify-save
+# call sites across main.py (reading progress, bookmarks, favourites, cover
+# overrides, settings...), none of which ever coordinated with each other.
+# save_user_data() used a plain truncating open(path, "w") with no lock and
+# no atomic replace, so two writes racing (most concretely: a rescan's
+# _prune_stale_reading_history() touching every user's file at the same
+# moment as that same user's own live reading-progress save) could leave a
+# reader catching the file mid-truncate -- a real, confirmed-live incident
+# (2026-09-18): a genuine JSONDecodeError from a half-written file, which
+# then 500'd every endpoint that reads user data, breaking most of the
+# reader (it depends on settings/bookmarks/progress for nearly everything).
+# The file itself wasn't destroyed -- the next successful write overwrote it
+# with complete, correct content again -- but nothing should ever be able to
+# observe a torn file in the meantime. Fixed the same way every other JSON
+# store in this app already works: a lock per username (not one global lock,
+# so unrelated users' saves never contend) plus a real atomic write (temp
+# file + os.replace, which POSIX/Windows both guarantee either fully
+# succeeds or leaves the original file untouched -- there is no in-between
+# state a concurrent reader can ever observe).
+_user_data_locks: dict = {}
+_user_data_locks_guard = threading.Lock()
+
+
+def _user_data_lock(username: str) -> threading.Lock:
+    with _user_data_locks_guard:
+        return _user_data_locks.setdefault(username, threading.Lock())
+
+
 def load_user_data(username: str) -> dict:
     path = _user_data_file(username)
     if not path or not os.path.exists(path):
         return {}
-    with open(path, "r") as f:
-        return json.load(f)
+    with _user_data_lock(username):
+        with open(path, "r") as f:
+            return json.load(f)
 
 
 def save_user_data(username: str, data: dict):
@@ -300,8 +330,11 @@ def save_user_data(username: str, data: dict):
     if not path:
         return
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    with _user_data_lock(username):
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
 
 
 def get_allowed_tabs(username: str) -> Optional[list]:
