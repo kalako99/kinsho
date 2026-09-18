@@ -6431,6 +6431,19 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
     is_oneshot = bool(manga and manga.get("manga_type") == "oneshot")
+
+    if manga:
+        chapter = load_manga_dims(library_id, manga["name"]).get("chapters", {}).get(chapter_id)
+        if chapter:
+            total_pages = len(chapter.get("pages", []))
+            if total_pages > 0:
+                threading.Thread(
+                    target=warm_thumb_cache,
+                    args=(library_id, manga_id, chapter_id, chapter.get("source"),
+                          chapter.get("path", ""), chapter.get("prefix", ""), total_pages),
+                    daemon=True,
+                ).start()
+
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
@@ -6546,6 +6559,18 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
         # feature is purely additive, never a hard requirement.
         if volume and volume.get("source") == "epub" and epub_reader.is_parseable(volume["path"]):
             template_name = "epub_reader.html"
+
+        # No scrub-bar thumbnails to warm for the real-text EPUB reader --
+        # only the image-based reader has one.
+        if volume and template_name == "chapter_reader.html":
+            total_pages = len(volume.get("pages", []))
+            if total_pages > 0:
+                threading.Thread(
+                    target=warm_thumb_cache,
+                    args=(library_id, manga_id, volume_id, volume.get("source", "archive"),
+                          volume.get("path", ""), "", total_pages),
+                    daemon=True,
+                ).start()
 
     return templates.TemplateResponse(request, template_name, {
         "library_id": library_id,
@@ -6965,13 +6990,132 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
             headers={"Cache-Control": "public, max-age=86400, immutable"},
         )
 
-# ── THUMBNAIL ROUTES (on-demand, in-memory) ──
+# ── THUMBNAILS (on-demand generation, in-memory cache only, never written
+# to disk) ──
+#
+# _thumb_cache is the one thing that made removing the on-disk thumbnail
+# system (2026-09-19, same day) not cost real speed: scrubbing the progress
+# bar was "really, really slow" on loose-image manga specifically, because
+# every single thumbnail request had to read the FULL-resolution page off
+# disk and decode+resize it live, with nothing cached anywhere -- and
+# revisiting a page you'd already scrubbed past redid all of that work
+# again. A bounded in-memory cache (FIFO eviction, same shape as
+# _archive_page_cache above) fixes the "redo it every time" half of that for
+# free, with zero persistent disk cost -- cleared on every restart, capped
+# at a couple thousand entries (a few MB of small JPEGs at most).
+#
+# The other half -- the FIRST time you scrub over pages you've never seen
+# this session -- is what warm_thumb_cache() below is for: triggered once
+# per chapter/volume open (chapter_reader()/volume_reader()), it walks every
+# page of the just-opened source in the background and populates the same
+# cache ahead of time, so that by the time a real scrub actually happens,
+# get_thumb_on_demand() below is mostly just serving cache hits instead of
+# generating anything live.
+_thumb_cache: dict = {}
+_THUMB_CACHE_MAX = 2000
+
+
+def _generate_thumb_bytes(source_type: str, source_path: str, page_index: int, prefix: str = "") -> Optional[bytes]:
+    """Reads page `page_index` of a source and resizes it down to a
+    THUMB_WIDTH-wide JPEG. Returns None if the index is out of range or the
+    read/resize fails for any reason -- callers treat both the same way,
+    there's no separate "not found" vs. "failed" distinction worth keeping
+    once this is shared between a live request and a background warm-up
+    that doesn't have anyone waiting on a specific status code."""
+    raw = None
+    try:
+        if source_type == "archive":
+            all_images = _cached_archive_image_list(source_path)
+            images = [n for n in all_images if n.startswith(prefix)] if prefix else all_images
+            if page_index >= len(images):
+                return None
+            raw = _cached_archive_page(source_path, images[page_index])
+        elif source_type == "pdf":
+            try:
+                doc = pymupdf.open(source_path)
+                if page_index >= len(doc):
+                    doc.close()
+                    return None
+                page = doc.load_page(page_index)
+                pix  = page.get_pixmap(matrix=pymupdf.Matrix(0.2, 0.2), alpha=False)
+                img  = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                tw   = THUMB_WIDTH
+                th   = int(pix.height * tw / pix.width) if pix.width else tw
+                img  = img.resize((tw, th), Image.LANCZOS)
+                buf  = io.BytesIO()
+                img.save(buf, format="JPEG", quality=70)
+                raw  = buf.getvalue()
+                doc.close()
+            except Exception as e:
+                print(f"[Thumbs] PDF thumb failed page {page_index}: {e}")
+        elif source_type == "epub":
+            image_list = get_epub_image_list(source_path)
+            if page_index >= len(image_list):
+                return None
+            raw = _cached_epub_page(source_path, image_list[page_index])
+        else:
+            # Loose chapter/volume: read directly from disk
+            try:
+                files = sorted(
+                    [f for f in os.listdir(source_path)
+                     if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
+                    key=natural_sort_key
+                )
+                if page_index >= len(files):
+                    return None
+                with open(os.path.join(source_path, files[page_index]), "rb") as f:
+                    raw = f.read()
+            except Exception as e:
+                print(f"[Thumbs] Error reading loose page {page_index}: {e}")
+    except Exception as e:
+        print(f"[Thumbs] Error extracting page {page_index}: {e}")
+
+    if not raw:
+        return None
+    return _make_thumb_bytes(raw)
+
+
+def _get_cached_thumb(library_id: int, manga_id: str, source_id: str, page_index: int,
+                       source_type: str, source_path: str, prefix: str = "") -> Optional[bytes]:
+    """The one place both get_thumb_on_demand and warm_thumb_cache actually
+    touch _thumb_cache -- whichever of a real scrub request or the
+    background warm-up reaches a given page first wins, the other just
+    gets a cache hit."""
+    key = (library_id, manga_id, source_id, page_index)
+    if key in _thumb_cache:
+        return _thumb_cache[key]
+    thumb_bytes = _generate_thumb_bytes(source_type, source_path, page_index, prefix)
+    if thumb_bytes:
+        if len(_thumb_cache) >= _THUMB_CACHE_MAX:
+            _thumb_cache.pop(next(iter(_thumb_cache)))
+        _thumb_cache[key] = thumb_bytes
+    return thumb_bytes
+
+
+def warm_thumb_cache(library_id: int, manga_id: str, source_id: str,
+                      source_type: str, source_path: str, prefix: str, total_pages: int):
+    """Proactively generates every page's thumbnail for a just-opened
+    chapter/volume, in the background, before the user ever touches the
+    progress bar -- run in its own daemon thread by chapter_reader()/
+    volume_reader() below. Deliberately low priority: a short delay before
+    starting (so the real, urgent page-loading requests firing at the same
+    moment the reader opens get first claim on the CPU) and a small gap
+    between each page (keeps this from running as one tight, CPU-saturating
+    loop competing with actual reading -- there's no deadline here, it only
+    needs to finish sometime before the user opens the scrub bar, not
+    instantly)."""
+    time.sleep(2)
+    for page_index in range(total_pages):
+        _get_cached_thumb(library_id, manga_id, source_id, page_index, source_type, source_path, prefix)
+        time.sleep(0.03)
+
 
 @app.get("/api/manga/{library_id}/{manga_id}/thumb/{source_id}/{page_index:int}")
 def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source_id: str, page_index: int):
     """
-    Extract and return a single thumbnail on demand, in memory, never written to disk.
-    Reuses the existing page caches (_cached_archive_page, etc.).
+    Return a single thumbnail -- a cache hit if warm_thumb_cache() already
+    got to this page, generated on the spot otherwise. Never written to
+    disk either way.
     """
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
@@ -6998,75 +7142,11 @@ def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source
 
     source_type = source.get("source") if not is_volume else source.get("source", "archive")
     source_path = source.get("path", "")
+    prefix = source.get("prefix", "") if not is_volume else ""
 
-    # Every source type generates its scrub-bar thumbnail on demand, in
-    # memory, never written to disk (2026-09-19 -- small thumbnails used to
-    # be pre-generated to disk for archive/pdf sources during the post-scan
-    # background pass, at the cost of real, permanent disk space for
-    # something only glanced at while dragging the progress bar; removed
-    # entirely at the user's request). This is real per-request decode+
-    # resize cost with no cache, same as loose sources already had.
-
-    raw = None
-    try:
-        if source_type == "archive":
-            prefix = source.get("prefix", "") if not is_volume else ""
-            all_images = _cached_archive_image_list(source_path)
-            if prefix:
-                images = [n for n in all_images if n.startswith(prefix)]
-            else:
-                images = all_images
-            if page_index >= len(images):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            raw = _cached_archive_page(source_path, images[page_index])
-        elif source_type == "pdf":
-            # Pre-rendered thumb not on disk yet — render at minimal scale on demand
-            try:
-                doc  = pymupdf.open(source_path)
-                page = doc.load_page(page_index)
-                pix  = page.get_pixmap(matrix=pymupdf.Matrix(0.2, 0.2), alpha=False)
-                img  = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                tw   = THUMB_WIDTH
-                th   = int(pix.height * tw / pix.width) if pix.width else tw
-                img  = img.resize((tw, th), Image.LANCZOS)
-                buf  = io.BytesIO()
-                img.save(buf, format="JPEG", quality=70)
-                raw  = buf.getvalue()
-                doc.close()
-            except Exception as e:
-                print(f"[Thumbs] PDF on-demand thumb failed page {page_index}: {e}")
-        elif source_type == "epub":
-            image_list = get_epub_image_list(source_path)
-            if page_index >= len(image_list):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            raw = _cached_epub_page(source_path, image_list[page_index])
-        else:
-            # Loose chapter: read directly from disk
-            pages = source.get("pages", [])
-            if page_index >= len(pages):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            chapter_path = source_path
-            try:
-                files = sorted(
-                    [f for f in os.listdir(chapter_path)
-                     if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
-                    key=natural_sort_key
-                )
-                if page_index >= len(files):
-                    return JSONResponse({"error": "Page not found"}, status_code=404)
-                with open(os.path.join(chapter_path, files[page_index]), "rb") as f:
-                    raw = f.read()
-            except Exception as e:
-                print(f"[Thumbs] Error reading loose page {page_index}: {e}")
-    except Exception as e:
-        print(f"[Thumbs] Error extracting page {page_index} for {source_id}: {e}")
-
-    if not raw:
-        return JSONResponse({"error": "Failed to read page"}, status_code=500)
-
-    thumb_bytes = _make_thumb_bytes(raw)
+    thumb_bytes = _get_cached_thumb(library_id, manga_id, source_id, page_index, source_type, source_path, prefix)
     if not thumb_bytes:
-        return JSONResponse({"error": "Failed to make thumbnail"}, status_code=500)
+        return JSONResponse({"error": "Page not found"}, status_code=404)
 
     return Response(
         content=thumb_bytes,
