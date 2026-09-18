@@ -2352,7 +2352,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     any_subfolder_changed = True
                     break
 
-        if folder_unchanged and not any_subfolder_changed and _dims_paths_valid(manga_name):
+        dims_paths_valid = _dims_paths_valid(manga_name)
+        if folder_unchanged and not any_subfolder_changed and dims_paths_valid:
             print(f"[ScanLib] Skipping unchanged loose: {manga_name}")
             if existing.get("path") and existing["path"] != manga_path:
                 relocate_dims_paths(library_id, manga_name, existing["path"], manga_path)
@@ -2387,8 +2388,22 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 "manga_type":   "loose",
             }
 
-        # Only rescan content subfolders if something actually changed.
-        if folder_unchanged and not any_subfolder_changed:
+        # Only rescan content subfolders if something actually changed --
+        # but "changed" must include dims_paths_valid being False, not just
+        # the two mtime checks: a stale chapter/volume id whose path no
+        # longer exists doesn't move the manga's own folder mtime or any
+        # CURRENT subfolder's mtime (there's nothing left to bump -- the
+        # rename/removal that orphaned it may have happened scans ago), so
+        # without this the branch above correctly detects and reports
+        # "Rescanning" for exactly this reason, then this guard immediately
+        # returned anyway before ever reaching the valid_chapter_ids/
+        # valid_volume_ids pruning loop below -- the actual fix for a stale
+        # id, per the entries far above this in CLAUDE.md, silently never
+        # ran. Confirmed live: a manga stuck with both a renamed chapter's
+        # old id and its new one side by side in dims.json, unpruned across
+        # repeated rescans, until this same three-way condition was applied
+        # here too.
+        if folder_unchanged and not any_subfolder_changed and dims_paths_valid:
             return
 
         dims = _safe_load_manga_dims(library_id, manga_name)
