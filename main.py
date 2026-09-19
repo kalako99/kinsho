@@ -6432,18 +6432,6 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
     is_oneshot = bool(manga and manga.get("manga_type") == "oneshot")
 
-    if manga:
-        chapter = load_manga_dims(library_id, manga["name"]).get("chapters", {}).get(chapter_id)
-        if chapter:
-            total_pages = len(chapter.get("pages", []))
-            if total_pages > 0:
-                threading.Thread(
-                    target=warm_thumb_cache,
-                    args=(library_id, manga_id, chapter_id, chapter.get("source"),
-                          chapter.get("path", ""), chapter.get("prefix", ""), total_pages),
-                    daemon=True,
-                ).start()
-
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
@@ -6559,18 +6547,6 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
         # feature is purely additive, never a hard requirement.
         if volume and volume.get("source") == "epub" and epub_reader.is_parseable(volume["path"]):
             template_name = "epub_reader.html"
-
-        # No scrub-bar thumbnails to warm for the real-text EPUB reader --
-        # only the image-based reader has one.
-        if volume and template_name == "chapter_reader.html":
-            total_pages = len(volume.get("pages", []))
-            if total_pages > 0:
-                threading.Thread(
-                    target=warm_thumb_cache,
-                    args=(library_id, manga_id, volume_id, volume.get("source", "archive"),
-                          volume.get("path", ""), "", total_pages),
-                    daemon=True,
-                ).start()
 
     return templates.TemplateResponse(request, template_name, {
         "library_id": library_id,
@@ -6993,24 +6969,19 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
 # ── THUMBNAILS (on-demand generation, in-memory cache only, never written
 # to disk) ──
 #
-# _thumb_cache is the one thing that made removing the on-disk thumbnail
-# system (2026-09-19, same day) not cost real speed: scrubbing the progress
-# bar was "really, really slow" on loose-image manga specifically, because
-# every single thumbnail request had to read the FULL-resolution page off
-# disk and decode+resize it live, with nothing cached anywhere -- and
-# revisiting a page you'd already scrubbed past redid all of that work
-# again. A bounded in-memory cache (FIFO eviction, same shape as
-# _archive_page_cache above) fixes the "redo it every time" half of that for
-# free, with zero persistent disk cost -- cleared on every restart, capped
-# at a couple thousand entries (a few MB of small JPEGs at most).
-#
-# The other half -- the FIRST time you scrub over pages you've never seen
-# this session -- is what warm_thumb_cache() below is for: triggered once
-# per chapter/volume open (chapter_reader()/volume_reader()), it walks every
-# page of the just-opened source in the background and populates the same
-# cache ahead of time, so that by the time a real scrub actually happens,
-# get_thumb_on_demand() below is mostly just serving cache hits instead of
-# generating anything live.
+# The only remaining consumer of this is the long-strip reader's tier3
+# far-out placeholder (loadEntryTier3 in chapter_reader.html -- see the
+# GROUND RULE in CLAUDE.md): a thumbnail for a manifest slot far outside the
+# current prefetch radius, fetched a handful at a time as reading position
+# moves. The scrub-bar preview strip that used to be this cache's main
+# consumer, plus its proactive per-chapter/volume warm_thumb_cache()
+# background warm-up, were removed entirely (2026-09-19) -- decoding every
+# page of a chapter live, even off the request path, was too slow/CPU-heavy
+# to be usable (worse under this app's CPU-capped containers), and there's
+# no on-disk thumbnail to fall back to since that was removed the same day.
+# _thumb_cache (FIFO eviction, same shape as _archive_page_cache above) just
+# avoids redoing the same tier3 decode if the same far-out page is requested
+# again in one session -- zero persistent disk cost, cleared on restart.
 _thumb_cache: dict = {}
 _THUMB_CACHE_MAX = 2000
 
@@ -7077,10 +7048,9 @@ def _generate_thumb_bytes(source_type: str, source_path: str, page_index: int, p
 
 def _get_cached_thumb(library_id: int, manga_id: str, source_id: str, page_index: int,
                        source_type: str, source_path: str, prefix: str = "") -> Optional[bytes]:
-    """The one place both get_thumb_on_demand and warm_thumb_cache actually
-    touch _thumb_cache -- whichever of a real scrub request or the
-    background warm-up reaches a given page first wins, the other just
-    gets a cache hit."""
+    """The one place get_thumb_on_demand touches _thumb_cache -- a cache hit
+    if this exact page was already generated this session, generated fresh
+    otherwise."""
     key = (library_id, manga_id, source_id, page_index)
     if key in _thumb_cache:
         return _thumb_cache[key]
@@ -7092,30 +7062,12 @@ def _get_cached_thumb(library_id: int, manga_id: str, source_id: str, page_index
     return thumb_bytes
 
 
-def warm_thumb_cache(library_id: int, manga_id: str, source_id: str,
-                      source_type: str, source_path: str, prefix: str, total_pages: int):
-    """Proactively generates every page's thumbnail for a just-opened
-    chapter/volume, in the background, before the user ever touches the
-    progress bar -- run in its own daemon thread by chapter_reader()/
-    volume_reader() below. Deliberately low priority: a short delay before
-    starting (so the real, urgent page-loading requests firing at the same
-    moment the reader opens get first claim on the CPU) and a small gap
-    between each page (keeps this from running as one tight, CPU-saturating
-    loop competing with actual reading -- there's no deadline here, it only
-    needs to finish sometime before the user opens the scrub bar, not
-    instantly)."""
-    time.sleep(2)
-    for page_index in range(total_pages):
-        _get_cached_thumb(library_id, manga_id, source_id, page_index, source_type, source_path, prefix)
-        time.sleep(0.03)
-
-
 @app.get("/api/manga/{library_id}/{manga_id}/thumb/{source_id}/{page_index:int}")
 def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source_id: str, page_index: int):
     """
-    Return a single thumbnail -- a cache hit if warm_thumb_cache() already
-    got to this page, generated on the spot otherwise. Never written to
-    disk either way.
+    Return a single thumbnail -- a cache hit if something else (the reader's
+    own tier3 far-out placeholder) already requested this exact page this
+    session, generated on the spot otherwise. Never written to disk either way.
     """
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
@@ -7152,87 +7104,6 @@ def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source
         content=thumb_bytes,
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=3600"},
-    )
-
-@app.get("/api/manga/{library_id}/{manga_id}/thumb-full/{source_id}/{page_index:int}")
-def get_thumb_full_on_demand(request: Request, library_id: int, manga_id: str, source_id: str, page_index: int):
-    """
-    Return the full-resolution page image for a given source/page.
-    Used by the thumb strip to pre-load the actual image behind each visible thumbnail.
-    Delegates to the existing page endpoints' logic via the shared caches.
-    """
-    username = auth.get_current_user(request)
-    if not auth.can_access_library(username, library_id):
-        return JSONResponse({"error": "Library not found"}, status_code=404)
-    data = load_app_data()
-    manga_data = data.get("manga_data", {}).get(str(library_id))
-    if not manga_data:
-        return JSONResponse({"error": "Library not found"}, status_code=404)
-    manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
-    if not manga:
-        return JSONResponse({"error": "Manga not found"}, status_code=404)
-
-    dims = load_manga_dims(library_id, manga["name"])
-    if auth.is_manga_blocked(username, dims.get("tags", [])):
-        return JSONResponse({"error": "Manga not found"}, status_code=404)
-
-    source = dims.get("chapters", {}).get(source_id)
-    is_volume = source is None
-    if is_volume:
-        source = dims.get("volumes", {}).get(source_id)
-    if not source:
-        return JSONResponse({"error": "Source not found"}, status_code=404)
-
-    source_type = source.get("source") if not is_volume else source.get("source", "archive")
-    source_path = source.get("path", "")
-
-    raw = None
-    media_type = "image/jpeg"
-    try:
-        if source_type == "archive":
-            prefix = source.get("prefix", "") if not is_volume else ""
-            all_images = _cached_archive_image_list(source_path)
-            images = [n for n in all_images if n.startswith(prefix)] if prefix else all_images
-            if page_index >= len(images):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            raw = _cached_archive_page(source_path, images[page_index])
-            ext = os.path.splitext(images[page_index])[1].lower().lstrip(".")
-            media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                          "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
-        elif source_type == "pdf":
-            raw = _cached_pdf_page(source_path, page_index)
-            media_type = "image/png"
-        elif source_type == "epub":
-            image_list = get_epub_image_list(source_path)
-            if page_index >= len(image_list):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            raw = _cached_epub_page(source_path, image_list[page_index])
-            ext = os.path.splitext(image_list[page_index])[1].lower().lstrip(".")
-            media_type = f"image/{ext}" if ext != "jpg" else "image/jpeg"
-        else:
-            chapter_path = source_path
-            files = sorted(
-                [f for f in os.listdir(chapter_path)
-                 if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
-                key=natural_sort_key
-            )
-            if page_index >= len(files):
-                return JSONResponse({"error": "Page not found"}, status_code=404)
-            with open(os.path.join(chapter_path, files[page_index]), "rb") as f:
-                raw = f.read()
-            ext = os.path.splitext(files[page_index])[1].lower().lstrip(".")
-            media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
-                          "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
-    except Exception as e:
-        print(f"[ThumbFull] Error reading page {page_index} for {source_id}: {e}")
-
-    if not raw:
-        return JSONResponse({"error": "Failed to read page"}, status_code=500)
-
-    return StreamingResponse(
-        io.BytesIO(raw),
-        media_type=media_type,
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
 
 @app.get("/login")

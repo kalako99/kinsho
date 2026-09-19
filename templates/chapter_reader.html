@@ -1046,7 +1046,7 @@
       text-align: right;
     }
 
-    /* ── PAGE SLIDER + THUMB STRIP ── */
+    /* ── PAGE SLIDER ── */
     .page-slider-wrap {
       display: flex;
       flex-direction: column;
@@ -1064,59 +1064,6 @@
     .page-slider-wrap.visible {
       opacity: 1;
       pointer-events: all;
-    }
-    /* Thumb strip */
-    .thumb-strip {
-      display: none;
-      overflow: hidden;
-      position: relative;
-      width: 100%;
-      height: 174px; /* 150px thumb + 4px gap + label + 8px padding */
-      touch-action: none;
-      cursor: grab;
-      user-select: none;
-    }
-    .thumb-strip.active { display: block; }
-    .thumb-strip:active  { cursor: grabbing; }
-
-    /* inner track that slides */
-    .thumb-track {
-      position: absolute;
-      top: 8px;
-      left: 0;
-      height: 162px;
-      will-change: transform;
-    }
-    .thumb-cell {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-      cursor: pointer;
-      flex-shrink: 0;
-      width: 100px;
-    }
-    .thumb-cell-img-wrap {
-      width: 100px;
-      height: 150px;
-      background: rgba(0,0,0,0.55);
-      border-radius: 6px;
-      overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .thumb-cell-img-wrap img {
-      width: 100%;
-      height: 100%;
-      object-fit: contain;
-      display: block;
-    }
-    .thumb-cell-label {
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 0.62rem;
-      color: #aaa;
-      text-align: center;
     }
     /* Slider row */
     .page-slider-row {
@@ -1281,11 +1228,8 @@
 
 <div id="bottom-container">
 
-<!-- Page slider + thumb strip -->
+<!-- Page slider -->
 <div class="page-slider-wrap" id="pageSliderWrap">
-  <div class="thumb-strip" id="thumbStrip">
-    <div class="thumb-track" id="thumbTrack"></div>
-  </div>
   <div class="page-slider-row">
     <input class="page-slider-input" type="range" id="pageSliderInput" min="0" value="0">
     <span class="page-slider-label" id="pageSliderLabel">1 / 1</span>
@@ -1605,7 +1549,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     clearTimeout(barTimer);
     if (lastInputWasMouse) return;
     barTimer = setTimeout(() => {
-      if (stripVisible) return; // don't hide while thumb strip is active
       if (topbar.matches(':hover') || fragProgress.matches(':hover') || document.getElementById('bottombar').matches(':hover')) return;
       hideAll();
     }, 3000);
@@ -1619,6 +1562,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return topbar.contains(target) ||
       fragProgress.contains(target) ||
       document.getElementById('bottombar').contains(target) ||
+      document.getElementById('pageSliderWrap').contains(target) ||
       document.getElementById('settingsPanel').contains(target) ||
       document.getElementById('scrollerPanel').contains(target) ||
       document.getElementById('bookmarkPanel').contains(target) ||
@@ -3337,14 +3281,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   const pageSliderWrap  = document.getElementById('pageSliderWrap');
   const pageSliderInput = document.getElementById('pageSliderInput');
   const pageSliderLabel = document.getElementById('pageSliderLabel');
-  const thumbStrip      = document.getElementById('thumbStrip');
 
   pageSliderInput.max   = Math.max(0, globalManifest.length - 1);
   pageSliderInput.value = 0;
   pageSliderLabel.textContent = `1 / ${globalManifest.length}`;
 
   let sliderDragging    = false;
-  let stripVisible      = false;
 
   // Returns the current global page index based on scroll/single-page position
   function getCurrentGlobalPageIdx() {
@@ -3389,387 +3331,29 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       pageSliderWrap.classList.add('visible');
     } else {
       pageSliderWrap.classList.remove('visible');
-      hideThumbStrip();
     }
   }
 
   // ── SLIDER INPUT EVENTS ──
+  // No thumbnail preview strip (removed 2026-09-19 -- on-demand full-res
+  // decode for every dragged-over page was too slow/CPU-heavy to be usable,
+  // and there's no scan-time-generated thumbnail to fall back to). Dragging
+  // just live-updates the label; releasing ('change') navigates.
   pageSliderInput.addEventListener('mousedown', () => { sliderDragging = true; });
   pageSliderInput.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
 
   pageSliderInput.addEventListener('input', () => {
     const idx = Number(pageSliderInput.value);
     pageSliderLabel.textContent = `${idx + 1} / ${globalManifest.length}`;
-    if (!stripVisible) showThumbStrip(idx);
-    else buildThumbStrip(idx);
     clearTimeout(barTimer);
   });
 
-  pageSliderInput.addEventListener('mouseup', (e) => {
-    sliderDragging = false;
-    if (stripVisible) {
-      e.stopPropagation();
-      clearTimeout(barTimer);
-    }
+  pageSliderInput.addEventListener('change', () => {
+    navigateToGlobalIdx(Number(pageSliderInput.value));
   });
 
-  pageSliderInput.addEventListener('click', (e) => {
-    if (stripVisible) e.stopPropagation();
-  });
-
-  pageSliderInput.addEventListener('touchend', () => {
-    sliderDragging = false;
-    if (stripVisible) clearTimeout(barTimer);
-  }, { passive: true });
-
-  pageSliderWrap.addEventListener('click', (e) => {
-    if (e.target === pageSliderWrap) {
-      hideThumbStrip();
-      // Routed through the shared scheduleAutoHide() (was its own raw
-      // setTimeout) so this respects the same mouse-session "no passive
-      // auto-hide timer" policy -- otherwise a mouse user dismissing the
-      // thumb strip would still get a stale-activation hideAll() 3s later
-      // through this one remaining side door.
-      scheduleAutoHide();
-      return;
-    }
-    if (stripVisible) e.stopPropagation();
-  });
-
-  const thumbTrack   = document.getElementById('thumbTrack');
-  const THUMB_W      = 100; // px, matches CSS
-  const THUMB_GAP    = 6;   // px, matches CSS
-  const THUMB_STEP   = THUMB_W + THUMB_GAP; // px per thumb cell
-  const THUMB_BUFFER = 5;   // cells to render outside visible edges
-
-  let stripAbortCtrl  = null;
-  let stripCenterIdx  = 0;   // global manifest index at the center of the visible window
-  let _trackOffset    = 0;   // current translateX of the track (negative = scrolled right)
-  let _renderedLo     = 0;   // lowest global index currently in the DOM
-  let _renderedHi     = -1;  // highest global index currently in the DOM
-  let _cellMap        = {};  // gi → DOM cell element
-
-  // ── VELOCITY TRACKING ──
-  let _sliderLastIdx  = 0;
-  let _sliderLastTime = 0;
-  let _sliderVelocity = 0;
-  const VELOCITY_THRESHOLD = 12;
-  const THUMB_DEBOUNCE_MS  = 100;
-  let _thumbDebounceTimer  = null;
-
-  function _measureSliderVelocity(newIdx) {
-    const now = performance.now();
-    const dt  = (now - _sliderLastTime) / 1000;
-    if (dt > 0 && dt < 1.0) {
-      const instantV = Math.abs(newIdx - _sliderLastIdx) / dt;
-      _sliderVelocity = _sliderVelocity * 0.6 + instantV * 0.4;
-    } else {
-      _sliderVelocity = 0;
-    }
-    _sliderLastIdx  = newIdx;
-    _sliderLastTime = now;
-  }
-
-  function _cancelThumbLoading() {
-    if (stripAbortCtrl) { stripAbortCtrl.abort(); stripAbortCtrl = null; }
-    clearTimeout(_thumbDebounceTimer);
-    _thumbDebounceTimer = null;
-  }
-
-  // ── TRACK POSITION ──
-  // trackOffset for a given center global index:
-  // we want the center thumb to be at the middle of the strip window.
-  function _stripW() {
-    // getBoundingClientRect returns 0 before first paint (display:none → block transition)
-    // Use the slider wrap width as a reliable proxy since they share the same width.
-    const r = pageSliderWrap.getBoundingClientRect().width;
-    return r > 0 ? r : window.innerWidth - 40;
-  }
-
-  function _offsetForIdx(gi) {
-    const centerPx = gi * THUMB_STEP;
-    const targetX  = _stripW() / 2 - THUMB_W / 2;
-    return targetX - centerPx;
-  }
-
-  function _clampOffset(offset) {
-    const maxOff = _offsetForIdx(0);
-    const minOff = _offsetForIdx(globalManifest.length - 1);
-    return Math.max(minOff, Math.min(maxOff, offset));
-  }
-
-  function _idxAtOffset(offset) {
-    const centerPx = _stripW() / 2 - offset;
-    const gi       = Math.round((centerPx - THUMB_W / 2) / THUMB_STEP);
-    return Math.max(0, Math.min(globalManifest.length - 1, gi));
-  }
-
-  // ── RENDER WINDOW ──
-  // Work out which cells should exist in the DOM given current offset,
-  // add missing ones, remove ones that have gone out of range.
-  function _updateRenderWindow() {
-    const stripW     = _stripW();
-    const visibleLo  = _idxAtOffset(_trackOffset + stripW);
-    const visibleHi  = _idxAtOffset(_trackOffset);
-    const lo = Math.max(0, visibleLo - THUMB_BUFFER);
-    const hi = Math.min(globalManifest.length - 1, visibleHi + THUMB_BUFFER);
-
-    // Remove cells outside the new range
-    for (let gi = _renderedLo; gi <= _renderedHi; gi++) {
-      if (gi < lo || gi > hi) {
-        const cell = _cellMap[gi];
-        if (cell) { cell.remove(); delete _cellMap[gi]; }
-      }
-    }
-
-    // Add cells inside the new range that aren't yet in the DOM
-    for (let gi = lo; gi <= hi; gi++) {
-      if (_cellMap[gi]) continue;
-      const entry = globalManifest[gi];
-      if (!entry) continue;
-
-      const cell = document.createElement('div');
-      cell.className = 'thumb-cell';
-      // Position cell absolutely within the track at its natural slot
-      cell.style.position = 'absolute';
-      cell.style.left = (gi * THUMB_STEP) + 'px';
-
-      const imgWrap = document.createElement('div');
-      imgWrap.className = 'thumb-cell-img-wrap';
-      const img = document.createElement('img');
-      img.alt = '';
-      imgWrap.appendChild(img);
-
-      const label = document.createElement('div');
-      label.className = 'thumb-cell-label';
-      label.textContent = `${gi + 1}`;
-
-      cell.appendChild(imgWrap);
-      cell.appendChild(label);
-      thumbTrack.appendChild(cell);
-
-      cell.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (_stripDidDrag) { _stripDidDrag = false; return; }
-        navigateToGlobalIdx(gi);
-        hideAll();
-      });
-
-      _cellMap[gi] = cell;
-    }
-
-    _renderedLo = lo;
-    _renderedHi = hi;
-
-    // Set track width to fit all possible thumbs
-    thumbTrack.style.width = (globalManifest.length * THUMB_STEP) + 'px';
-  }
-
-  // Apply translateX to the track
-  function _applyTrackOffset(offset) {
-    _trackOffset = offset;
-    thumbTrack.style.transform = `translateX(${offset}px)`;
-    _updateRenderWindow();
-
-    // Sync slider to whichever thumb is now centered
-    const ci = _idxAtOffset(offset);
-    if (ci !== stripCenterIdx) {
-      stripCenterIdx = ci;
-      if (!sliderDragging) {
-        pageSliderInput.value = ci;
-        pageSliderLabel.textContent = `${ci + 1} / ${globalManifest.length}`;
-      }
-    }
-  }
-
-  // ── LOAD THUMBS IN VIEW ──
-  async function _loadVisibleThumbs(signal) {
-    const stripW    = _stripW();
-    const visibleLo = Math.max(0, _idxAtOffset(_trackOffset + stripW) - THUMB_BUFFER);
-    const visibleHi = Math.min(globalManifest.length - 1, _idxAtOffset(_trackOffset) + THUMB_BUFFER);
-    const center    = _idxAtOffset(_trackOffset);
-
-    // Build center-outward order
-    const ordered = [];
-    ordered.push(center);
-    for (let d = 1; d <= (visibleHi - visibleLo + THUMB_BUFFER); d++) {
-      if (center + d <= visibleHi) ordered.push(center + d);
-      if (center - d >= visibleLo) ordered.push(center - d);
-    }
-
-    // ── THUMBS: abortable fetch, center-outward ──
-    const thumbPromises = ordered.map(gi => {
-      if (signal.aborted) return;
-      const entry = globalManifest[gi];
-      if (!entry) return;
-      const cell = _cellMap[gi];
-      if (!cell) return;
-      const img = cell.querySelector('img');
-      if (!img || img.src) return; // already loaded
-      return fetch(
-        `/api/manga/${libraryId}/${mangaId}/thumb/${entry.chapterId}/${entry.localIdx}`,
-        { signal }
-      )
-        .then(r => r.ok ? r.blob() : null)
-        .then(blob => {
-          if (!blob || signal.aborted) return;
-          const url = URL.createObjectURL(blob);
-          img.src = url;
-          img.onload = () => URL.revokeObjectURL(url);
-        })
-        .catch(() => {}); // aborted or network error — silently ignore
-    });
-
-    // Wait for all thumbs to have their fetch initiated before starting full-res
-    await Promise.allSettled(thumbPromises);
-    if (signal.aborted) return;
-
-    // ── FULL-RES PRELOAD: abortable fetch, center-outward ──
-    for (const gi of ordered) {
-      if (signal.aborted) return;
-      const entry = globalManifest[gi];
-      if (!entry || entry.loaded || entry.url) continue;
-      ensureChapterUrls(entry.chapterId).then(urls => {
-        if (signal.aborted) return;
-        const url = urls[entry.localIdx] || '';
-        if (!url) return;
-        entry.url = url;
-        return fetch(url, { signal })
-          .then(r => r.ok ? r.blob() : null)
-          .then(blob => {
-            if (!blob || signal.aborted) return;
-            // Blob is discarded — the browser now has it cached for when the user navigates there
-          })
-          .catch(() => {});
-      }).catch(() => {});
-    }
-  }
-
-  function _scheduleThumbLoad() {
-    _cancelThumbLoading();
-    _thumbDebounceTimer = setTimeout(() => {
-      stripAbortCtrl = new AbortController();
-      _loadVisibleThumbs(stripAbortCtrl.signal);
-    }, 10);
-  }
-
-  // ── SNAP ON RELEASE ──
-  function _snapToNearest() {
-    const gi     = _idxAtOffset(_trackOffset);
-    const target = _offsetForIdx(gi);
-    _applyTrackOffset(_clampOffset(target));
-    stripCenterIdx = gi;
-    pageSliderInput.value = gi;
-    pageSliderLabel.textContent = `${gi + 1} / ${globalManifest.length}`;
-    _scheduleThumbLoad();
-  }
-
-  // ── PUBLIC: show strip at a given global index ──
-  function buildThumbStrip(centerGlobalIdx) {
-    _measureSliderVelocity(centerGlobalIdx);
-    _cancelThumbLoading();
-
-    stripCenterIdx = centerGlobalIdx;
-    const offset   = _clampOffset(_offsetForIdx(centerGlobalIdx));
-    _applyTrackOffset(offset);
-
-    if (_sliderVelocity > VELOCITY_THRESHOLD) {
-      _thumbDebounceTimer = setTimeout(() => {
-        _sliderVelocity = 0;
-        _scheduleThumbLoad();
-      }, THUMB_DEBOUNCE_MS);
-      return;
-    }
-
-    _scheduleThumbLoad();
-  }
-
-  function showThumbStrip(centerGlobalIdx) {
-    stripVisible = true;
-    thumbStrip.classList.add('active');
-    buildThumbStrip(centerGlobalIdx);
-    clearTimeout(barTimer);
-  }
-
-  function hideThumbStrip() {
-    stripVisible    = false;
-    _sliderVelocity = 0;
-    _sliderLastTime = 0;
-    thumbStrip.classList.remove('active');
-    _cancelThumbLoading();
-    // Clear DOM to free memory
-    thumbTrack.innerHTML = '';
-    _cellMap      = {};
-    _renderedLo   = 0;
-    _renderedHi   = -1;
-  }
-
-  // ── STRIP DRAG ──
-  let stripDragActive  = false;
-  let stripDragStartX  = 0;
-  let stripDragStartOffset = 0; // track offset at drag start
-  let stripDragMomentumV   = 0;
-  let stripDragLastX       = 0;
-  let stripDragLastTime    = 0;
-  let stripMomentumRaf     = null;
-
-  function _stopMomentum() {
-    if (stripMomentumRaf) { cancelAnimationFrame(stripMomentumRaf); stripMomentumRaf = null; }
-  }
-
-  function _momentumLoop() {
-    if (Math.abs(stripDragMomentumV) < 0.5) {
-      stripDragMomentumV = 0;
-      _snapToNearest();
-      return;
-    }
-    stripDragMomentumV *= 0.88;
-    _applyTrackOffset(_clampOffset(_trackOffset + stripDragMomentumV));
-    stripMomentumRaf = requestAnimationFrame(_momentumLoop);
-  }
-
-  let _stripDidDrag = false;
-
-  function _onStripDragStart(clientX) {
-    _stopMomentum();
-    _cancelThumbLoading();
-    stripDragActive      = true;
-    _stripDidDrag        = false;
-    stripDragStartX      = clientX;
-    stripDragStartOffset = _trackOffset;
-    stripDragMomentumV   = 0;
-    stripDragLastX       = clientX;
-    stripDragLastTime    = performance.now();
-  }
-
-  function _onStripDragMove(clientX) {
-    if (!stripDragActive) return;
-    const dx = clientX - stripDragStartX;
-    if (Math.abs(dx) > 4) _stripDidDrag = true; // only flag as drag after 4px movement
-    const now    = performance.now();
-    const dt     = now - stripDragLastTime || 1;
-    stripDragMomentumV = (clientX - stripDragLastX) / dt * 16;
-    stripDragLastX     = clientX;
-    stripDragLastTime  = now;
-    _applyTrackOffset(_clampOffset(stripDragStartOffset + dx));
-  }
-
-  function _onStripDragEnd() {
-    if (!stripDragActive) return;
-    stripDragActive = false;
-    if (_stripDidDrag && Math.abs(stripDragMomentumV) > 2) {
-      stripMomentumRaf = requestAnimationFrame(_momentumLoop);
-    }
-    _scheduleThumbLoad();
-  }
-
-  thumbStrip.addEventListener('mousedown', (e) => { _onStripDragStart(e.clientX); e.preventDefault(); });
-  window.addEventListener('mousemove',     (e) => { _onStripDragMove(e.clientX); });
-  window.addEventListener('mouseup',       ()  => { _onStripDragEnd(); });
-
-  thumbStrip.addEventListener('touchstart', (e) => { _onStripDragStart(e.touches[0].clientX); }, { passive: true });
-  thumbStrip.addEventListener('touchmove',  (e) => { e.preventDefault(); _onStripDragMove(e.touches[0].clientX); }, { passive: false });
-  thumbStrip.addEventListener('touchend',   ()  => { _onStripDragEnd(); }, { passive: true });
+  pageSliderInput.addEventListener('mouseup', () => { sliderDragging = false; });
+  pageSliderInput.addEventListener('touchend', () => { sliderDragging = false; }, { passive: true });
 
   function updateProgressBar() {
     // Everything below is UI bookkeeping for the progress bar/chapter
