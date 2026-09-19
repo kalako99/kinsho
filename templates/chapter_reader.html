@@ -243,6 +243,7 @@
       gap: 2px;
       padding: 4px 0;
       width: 6px;
+      touch-action: none;
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.25s ease, width 0.2s ease;
@@ -256,7 +257,8 @@
       opacity: 1;
       pointer-events: all;
     }
-    .frag-progress.visible:hover {
+    .frag-progress.visible:hover,
+    .frag-progress.visible.dragging {
       width: 18px;
       opacity: 1 !important;
     }
@@ -270,11 +272,13 @@
       flex-grow: 1;
       cursor: pointer;
       position: relative;
+      touch-action: none;
     }
     .frag-seg.active {
       background: var(--theme-primary, #e94560);
     }
-    .frag-seg:hover {
+    .frag-seg:hover,
+    .frag-seg.touch-target {
       background: var(--theme-primary, #e94560);
       filter: brightness(1.3);
     }
@@ -1069,45 +1073,14 @@
     .page-slider-row {
       display: flex;
       align-items: center;
-      gap: 8px;
+      justify-content: center;
       padding: 4px 0;
-    }
-    .page-slider-input {
-      flex: 1;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 4px;
-      border-radius: 2px;
-      background: rgba(255,255,255,0.45);
-      outline: none;
-      cursor: pointer;
-    }
-    .page-slider-input::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #ffffff;
-      border: 2px solid var(--theme-primary, #e94560);
-      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
-      cursor: pointer;
-    }
-    .page-slider-input::-moz-range-thumb {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #ffffff;
-      border: 2px solid var(--theme-primary, #e94560);
-      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
-      cursor: pointer;
     }
     .page-slider-label {
       font-family: 'Segoe UI', sans-serif;
-      font-size: 0.68rem;
-      color: #888;
-      min-width: 56px;
-      text-align: right;
+      font-size: 0.72rem;
+      color: #ccc;
+      text-align: center;
       white-space: nowrap;
     }
 
@@ -1228,11 +1201,10 @@
 
 <div id="bottom-container">
 
-<!-- Page slider -->
+<!-- Reading position readout (non-interactive) -->
 <div class="page-slider-wrap" id="pageSliderWrap">
   <div class="page-slider-row">
-    <input class="page-slider-input" type="range" id="pageSliderInput" min="0" value="0">
-    <span class="page-slider-label" id="pageSliderLabel">1 / 1</span>
+    <span class="page-slider-label" id="pageSliderLabel">1 / 1 · 0%</span>
   </div>
 </div>
 
@@ -3228,6 +3200,40 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   let chapterManifest = manifest.filter(e => e.chapterId === chapterId);
   let totalPages      = chapterManifest.length;
 
+  // Shared by mouseenter (hover) and the touch-drag handling below --
+  // positions/shows the left tooltip for segment `idx` of the currently-
+  // built chapter. Deliberately independent of each segment's own `.active`
+  // class, which is a *different* thing (updateProgressBar()'s "pages read
+  // so far" fill) that must never be touched by a transient hover/drag
+  // preview.
+  function _showLeftTooltipFor(idx) {
+    const seg = fragProgress.querySelectorAll('.frag-seg')[idx];
+    if (!seg) return;
+    leftTooltip.textContent = `${idx + 1} / ${totalPages}`;
+    const r = seg.getBoundingClientRect();
+    leftTooltip.style.left      = (r.right + 14) + 'px';
+    leftTooltip.style.top       = (r.top + r.height / 2) + 'px';
+    leftTooltip.style.transform = 'translateY(-50%)';
+    leftTooltip.classList.add('pinned');
+  }
+
+  // Shared by the per-segment click listener (mouse/plain tap) and the
+  // touch-drag handling below (release while a segment is targeted) --
+  // navigates to page `idx` of the currently-built chapter.
+  function navigateToChapterFragIdx(idx) {
+    const target = chapterManifest[idx];
+    if (!target) return;
+    if (readerSettings.mode === 'single-page') {
+      const spIdx = spManifest.indexOf(target);
+      if (spIdx !== -1) spGotoIdx(spIdx);
+      else goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${fragProgressChapterId}`);
+    } else {
+      setVirtualY(target.globalY);
+      const globalIdx = manifest.indexOf(target);
+      if (globalIdx !== -1) prefetchAroundIndex(globalIdx);
+    }
+  }
+
   function rebuildFragProgress(forChapterId) {
     fragProgressChapterId = forChapterId;
     chapterManifest = manifest.filter(e => e.chapterId === forChapterId);
@@ -3241,12 +3247,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
       seg.addEventListener('mouseenter', () => {
         leftHoveredIdx = i;
-        leftTooltip.textContent = `${i + 1} / ${totalPages}`;
-        const r = seg.getBoundingClientRect();
-        leftTooltip.style.left      = (r.right + 14) + 'px';
-        leftTooltip.style.top       = (r.top + r.height / 2) + 'px';
-        leftTooltip.style.transform = 'translateY(-50%)';
-        leftTooltip.classList.add('pinned');
+        _showLeftTooltipFor(i);
       });
       seg.addEventListener('mouseleave', () => {
         leftHoveredIdx = null;
@@ -3254,17 +3255,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       });
       seg.addEventListener('click', (e) => {
         e.stopPropagation();
-        const target = chapterManifest[i];
-        if (!target) return;
-        if (readerSettings.mode === 'single-page') {
-          const spIdx = spManifest.indexOf(target);
-          if (spIdx !== -1) spGotoIdx(spIdx);
-          else goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${forChapterId}`);
-        } else {
-          setVirtualY(target.globalY);
-          const globalIdx = manifest.indexOf(target);
-          if (globalIdx !== -1) prefetchAroundIndex(globalIdx);
-        }
+        navigateToChapterFragIdx(i);
       });
 
       fragProgress.appendChild(seg);
@@ -3274,19 +3265,90 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // Initial build for the opening chapter
   rebuildFragProgress(chapterId);
 
-  // ── GLOBAL PAGE SLIDER ──
+  // ── LEFT BAR: touch-drag-to-enlarge ──
+  // :hover already widens the bar for a mouse cursor (CSS above); touch has
+  // no hover, and the segments packed into a 6px-wide bar are otherwise too
+  // small to reliably tap. Dragging rightward off the bar widens it to the
+  // same size :hover does, then keeps tracking the touch vertically so the
+  // targeted page updates live (reusing the same .active/pinned-tooltip
+  // mechanism as mouseenter above); releasing while a page is targeted
+  // navigates to it. A plain tap with no rightward drag is untouched -- the
+  // browser still fires a normal click on whatever segment was tapped,
+  // handled by the per-segment listener above.
+  const FRAG_DRAG_THRESHOLD = 8; // px of rightward movement before widening
+  let fragDragActive    = false;
+  let fragDragStartX    = 0;
+  let fragDragWidened   = false;
+  let fragDragTargetIdx = -1;
+
+  function _fragSegIdxAtY(clientY) {
+    const segs = fragProgress.querySelectorAll('.frag-seg');
+    for (let i = 0; i < segs.length; i++) {
+      const r = segs[i].getBoundingClientRect();
+      if (clientY >= r.top && clientY <= r.bottom) return i;
+    }
+    return -1;
+  }
+
+  function _setFragDragTarget(idx) {
+    // .touch-target is a plain visual highlight (same look as :hover),
+    // kept deliberately separate from .active (the reading-progress fill)
+    // -- see the _showLeftTooltipFor comment above.
+    fragProgress.querySelectorAll('.frag-seg').forEach((s, i) => s.classList.toggle('touch-target', i === idx));
+    if (idx !== -1) {
+      leftHoveredIdx = idx;
+      _showLeftTooltipFor(idx);
+    } else {
+      leftHoveredIdx = null;
+      leftTooltip.classList.remove('pinned');
+    }
+  }
+
+  fragProgress.addEventListener('touchstart', (e) => {
+    fragDragActive    = true;
+    fragDragWidened   = false;
+    fragDragTargetIdx = -1;
+    fragDragStartX    = e.touches[0].clientX;
+    clearTimeout(barTimer); // don't let the chrome auto-hide mid-interaction
+  }, { passive: true });
+
+  fragProgress.addEventListener('touchmove', (e) => {
+    if (!fragDragActive) return;
+    const t = e.touches[0];
+    if (!fragDragWidened && (t.clientX - fragDragStartX) > FRAG_DRAG_THRESHOLD) {
+      fragDragWidened = true;
+      fragProgress.classList.add('dragging');
+    }
+    if (fragDragWidened) {
+      e.preventDefault(); // committed to the drag -- stop native page scroll
+      fragDragTargetIdx = _fragSegIdxAtY(t.clientY);
+      _setFragDragTarget(fragDragTargetIdx);
+      clearTimeout(barTimer);
+    }
+  }, { passive: false });
+
+  function _endFragDrag() {
+    if (!fragDragActive) return;
+    fragDragActive = false;
+    if (fragDragWidened) {
+      fragProgress.classList.remove('dragging');
+      if (fragDragTargetIdx !== -1) navigateToChapterFragIdx(fragDragTargetIdx);
+      _setFragDragTarget(-1);
+      scheduleAutoHide(); // resume the normal countdown now that the drag is done
+    }
+    fragDragWidened   = false;
+    fragDragTargetIdx = -1;
+  }
+
+  fragProgress.addEventListener('touchend',    _endFragDrag, { passive: true });
+  fragProgress.addEventListener('touchcancel', _endFragDrag, { passive: true });
+
+  // ── GLOBAL READING POSITION DISPLAY (non-interactive) ──
   // Flat ordered list of all pages across all chapters in reading order
   const globalManifest = manifest; // already in order
 
   const pageSliderWrap  = document.getElementById('pageSliderWrap');
-  const pageSliderInput = document.getElementById('pageSliderInput');
   const pageSliderLabel = document.getElementById('pageSliderLabel');
-
-  pageSliderInput.max   = Math.max(0, globalManifest.length - 1);
-  pageSliderInput.value = 0;
-  pageSliderLabel.textContent = `1 / ${globalManifest.length}`;
-
-  let sliderDragging    = false;
 
   // Returns the current global page index based on scroll/single-page position
   function getCurrentGlobalPageIdx() {
@@ -3303,57 +3365,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return idx;
   }
 
-  // Navigate reader to a global manifest index
-  function navigateToGlobalIdx(idx) {
-    const entry = globalManifest[idx];
-    if (!entry) return;
-    if (readerSettings.mode === 'single-page') {
-      if (entry.chapterId === chapterId) {
-        const spIdx = spManifest.indexOf(entry);
-        if (spIdx !== -1) { spGotoIdx(spIdx); return; }
-      }
-      goToChapter(
-        `/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${entry.chapterId}?page=${entry.localIdx}`
-      );
-    } else {
-      setVirtualY(entry.globalY);
-      prefetchAroundIndex(idx);
-    }
-    updateProgressBar();
+  // Plain "N / total · P%" readout -- not interactive (2026-09-19, replacing
+  // a draggable slider that went through several redesigns). Navigation now
+  // happens via the chapter/volume dropdown and the left fragmented bar.
+  function formatPositionLabel(globalIdx) {
+    const total = globalManifest.length;
+    const pct   = total > 0 ? Math.round((globalIdx + 1) / total * 100) : 0;
+    return `${globalIdx + 1} / ${total} · ${pct}%`;
   }
 
-  // ── SLIDER VISIBILITY ──
   function syncSliderVisibility() {
     if (barVisible) {
-      const globalIdx = getCurrentGlobalPageIdx();
-      pageSliderInput.value = globalIdx;
-      pageSliderLabel.textContent = `${globalIdx + 1} / ${globalManifest.length}`;
+      pageSliderLabel.textContent = formatPositionLabel(getCurrentGlobalPageIdx());
       pageSliderWrap.classList.add('visible');
     } else {
       pageSliderWrap.classList.remove('visible');
     }
   }
-
-  // ── SLIDER INPUT EVENTS ──
-  // No thumbnail preview strip (removed 2026-09-19 -- on-demand full-res
-  // decode for every dragged-over page was too slow/CPU-heavy to be usable,
-  // and there's no scan-time-generated thumbnail to fall back to). Dragging
-  // just live-updates the label; releasing ('change') navigates.
-  pageSliderInput.addEventListener('mousedown', () => { sliderDragging = true; });
-  pageSliderInput.addEventListener('touchstart', () => { sliderDragging = true; }, { passive: true });
-
-  pageSliderInput.addEventListener('input', () => {
-    const idx = Number(pageSliderInput.value);
-    pageSliderLabel.textContent = `${idx + 1} / ${globalManifest.length}`;
-    clearTimeout(barTimer);
-  });
-
-  pageSliderInput.addEventListener('change', () => {
-    navigateToGlobalIdx(Number(pageSliderInput.value));
-  });
-
-  pageSliderInput.addEventListener('mouseup', () => { sliderDragging = false; });
-  pageSliderInput.addEventListener('touchend', () => { sliderDragging = false; }, { passive: true });
 
   function updateProgressBar() {
     // Everything below is UI bookkeeping for the progress bar/chapter
@@ -3435,12 +3463,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // Update left tooltip
     updatePinnedTooltips();
 
-    // Update global page slider (only if user is not dragging it)
-    if (!sliderDragging) {
-      const globalIdx = getCurrentGlobalPageIdx();
-      pageSliderInput.value = globalIdx;
-      pageSliderLabel.textContent = `${globalIdx + 1} / ${globalManifest.length}`;
-    }
+    // Update the global reading position readout
+    pageSliderLabel.textContent = formatPositionLabel(getCurrentGlobalPageIdx());
   }
 
   function updatePinnedTooltips() {
