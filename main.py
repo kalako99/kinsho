@@ -438,7 +438,7 @@ def get_cover_image(request: Request, library_id: int, manga_name: str, filename
 
     lib_manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
     manga = next((m for m in (lib_manga_data or {}).get("mangas", []) if m.get("name") == manga_name), None)
-    if manga and auth.is_manga_blocked(username, load_manga_dims(library_id, manga_name).get("tags", [])):
+    if manga and auth.is_manga_blocked(username, load_manga_dims_cached(library_id, manga_name).get("tags", [])):
         return JSONResponse({"error": "Not found"}, status_code=404)
 
     covers_dir = get_covers_dir()
@@ -569,27 +569,77 @@ def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
               f"Manually-added tags/genres/description for this manga are lost unless a backup exists.")
         return {"chapters": {}, "tags": [], "genres": [], "description": ""}
 
-# Keyed by dims.json's own path -> (mtime at last read, parsed dict). All
-# three current callers of _load_dims_or_flag_for_repair (get_mangas,
-# get_mangas_for_search, the favourites/last-read/random category list) only
-# ever READ from the dict they get back -- never mutate it -- which is what
-# makes sharing a cached object across requests safe here specifically
-# (unlike load_manga_dims' other, mutate-then-save call sites elsewhere,
-# which this cache does not touch at all). mtime-keyed so a real rescan-
-# driven rewrite (save_manga_dims always does an atomic replace, which
-# always bumps mtime) is picked up on the very next read with no separate
-# invalidation hook needed anywhere.
+# Keyed by dims.json's own path -> (mtime at last read, parsed dict). Shared
+# by every READ-ONLY dims accessor below (_load_dims_or_flag_for_repair and
+# load_manga_dims_cached) -- both are thin wrappers around _read_dims_cached,
+# differing only in how they handle a corrupted file. Never used by
+# load_manga_dims' other, mutate-then-save call sites elsewhere (tag/genre
+# edits, metadata apply, scan_library, cover processing, renames...) --
+# sharing a cached object across a mutate-then-save request would let one
+# request's in-progress edit leak into another's read before it's ever
+# saved, which is exactly the kind of race the whole point of this cache is
+# NOT to introduce. mtime-keyed so a real rescan-driven rewrite
+# (save_manga_dims always does an atomic replace, which always bumps mtime)
+# is picked up on the very next read with no separate invalidation hook
+# needed anywhere.
 #
 # Confirmed live (2026-09-19) as the actual cause behind "switching library
 # tabs / searching / going back is slow": a library with many large-webtoon
 # dims.json files (one real example: 152 manga, 60MB combined) meant every
-# hit to one of these three endpoints did up to 152 separate full JSON
-# parses -- not disk I/O (the files are OS-page-cache-hot) but the CPU-bound
-# parsing itself, made much more noticeable once both containers were capped
-# to 0.75 CPU cores. Naturally bounded by manga count (one entry per manga
-# ever seen), unlike the page/thumbnail caches elsewhere in this file -- no
-# eviction needed.
+# hit to one of the read-only listing/detail endpoints below did up to N
+# separate full JSON parses -- not disk I/O (the files are OS-page-cache-hot)
+# but the CPU-bound parsing itself, made much more noticeable once both
+# containers were capped to 0.75 CPU cores. A single manga's own dims.json
+# can be large enough on its own to matter too (one real example: a 308-
+# chapter webtoon's dims.json is 4MB, ~30-80ms to parse alone under the CPU
+# cap) -- confirmed via the manga detail page reading it up to four separate
+# times in one navigation (the page route twice, plus two of its own
+# fetches), which is why "going back" specifically stayed slow after the
+# listing endpoints were fixed. Naturally bounded by manga count (one entry
+# per manga ever seen), unlike the page/thumbnail caches elsewhere in this
+# file -- no eviction needed. Warmed proactively at startup by
+# _warm_dims_read_cache() so even the very first request after a restart
+# benefits, not just the second one for a given manga.
 _dims_read_cache: dict = {}
+
+
+def _read_dims_cached(path: str) -> dict:
+    """The actual cache-check-then-parse logic, keyed on the file's own
+    mtime. Raises json.JSONDecodeError on a corrupted file, exactly like a
+    plain open()+json.load() would -- callers decide how to handle that,
+    see _load_dims_or_flag_for_repair vs. load_manga_dims_cached below."""
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if mtime is not None:
+        cached = _dims_read_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
+    with open(path, "r") as f:
+        dims = json.load(f)
+
+    if mtime is not None:
+        _dims_read_cache[path] = (mtime, dims)
+    return dims
+
+
+def load_manga_dims_cached(library_id: int, manga_name: str) -> dict:
+    """Read-only cached variant of load_manga_dims -- for GET endpoints that
+    only ever read from the result (get_manga, get_chapters, get_volumes,
+    get_manga_dims, manga_detail()'s own page route). Do NOT use this for
+    any call site that mutates the returned dict before calling
+    save_manga_dims() -- see _dims_read_cache's own comment for why. A
+    corrupted file raises json.JSONDecodeError same as load_manga_dims
+    always has -- unlike _load_dims_or_flag_for_repair below, this doesn't
+    hide/repair it, since a single-manga page 500ing on its own corrupted
+    file is the existing, unchanged behavior this is a drop-in replacement
+    for."""
+    path = get_manga_dims_file(library_id, manga_name)
+    if not path or not os.path.exists(path):
+        return {"chapters": {}, "tags": [], "genres": [], "description": ""}
+    return _read_dims_cached(path)
 
 
 def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[dict]:
@@ -611,17 +661,7 @@ def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[
         return {"chapters": {}, "tags": [], "genres": [], "description": ""}
 
     try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        mtime = None
-    if mtime is not None:
-        cached = _dims_read_cache.get(path)
-        if cached and cached[0] == mtime:
-            return cached[1]
-
-    try:
-        with open(path, "r") as f:
-            dims = json.load(f)
+        return _read_dims_cached(path)
     except json.JSONDecodeError as e:
         # enqueue_library_scan() already atomically dedupes -- a flood of
         # concurrent requests hitting this same corrupted manga only ever
@@ -647,7 +687,7 @@ def _is_manga_id_blocked(username: str, library_id: int, manga_id: str) -> bool:
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
     if not manga:
         return False
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     return auth.is_manga_blocked(username, dims.get("tags", []))
 
 def save_manga_dims(library_id: int, manga_name: str, data: dict):
@@ -3480,7 +3520,15 @@ def _startup_heal_corrupted_dims():
     real source files -- this function only detects and triggers, it doesn't
     repair anything itself. Does NOT recover tags/genres/description; those
     aren't derivable from the source images, so if a backup doesn't have a
-    good copy, they're genuinely gone for whatever manga this catches."""
+    good copy, they're genuinely gone for whatever manga this catches.
+
+    Reads every manga's dims.json through _read_dims_cached (2026-09-19),
+    not a bare open()+json.load() -- this pass was already parsing every
+    manga in every library once at startup just to check for corruption, so
+    routing it through the same cache the read-only listing/detail endpoints
+    use populates that cache as a free side effect. That's what makes the
+    very first request after a restart fast too, not just the second one --
+    no separate warm-up pass needed."""
     data = load_app_data()
     affected_libraries = set()
     for lib in data.get("libraries", []):
@@ -3496,8 +3544,7 @@ def _startup_heal_corrupted_dims():
             if not path or not os.path.exists(path):
                 continue
             try:
-                with open(path, "r") as f:
-                    json.load(f)
+                _read_dims_cached(path)
             except json.JSONDecodeError as e:
                 print(f"[StartupCheck] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
                       f"-- queuing library {library_id} for an immediate rescan to rebuild it.")
@@ -4287,7 +4334,7 @@ def get_manga(request: Request, library_id: int, manga_id: str):
         f["library_id"] == library_id and f["manga_id"] == manga_id
         for f in favourites
     )
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     perms = auth.resolve_permissions(username)
     blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
     if blocked_tags and any(t in blocked_tags for t in dims.get("tags", [])):
@@ -4887,7 +4934,7 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
@@ -5885,7 +5932,7 @@ async def save_reading_progress(request: Request):
     manga_data = data.get("manga_data", {}).get(library_id, {})
     manga = next((m for m in manga_data.get("mangas", []) if m["id"] == manga_id), None)
     manga_name = manga["name"] if manga else None
-    dims = load_manga_dims(int(library_id), manga["name"]) if manga else {}
+    dims = load_manga_dims_cached(int(library_id), manga["name"]) if manga else {}
     if manga and auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     is_volume_manga = (manga.get("manga_type") == "case2" or bool(dims.get("volumes"))) if manga else False
@@ -6106,7 +6153,7 @@ def get_reading_history(request: Request, library_id: int):
         if not manga:
             continue
 
-        dims = load_manga_dims(library_id, manga["name"])
+        dims = load_manga_dims_cached(library_id, manga["name"])
         if auth.is_manga_blocked(username, dims.get("tags", [])):
             continue
         is_volume_manga = manga.get("manga_type") == "case2"
@@ -6251,7 +6298,7 @@ def get_category_list(
         entry = lib_history.get(manga_id)
         progress = 0
         if entry:
-            dims = load_manga_dims(library_id, m["name"])
+            dims = load_manga_dims_cached(library_id, m["name"])
             is_volume_manga = m.get("manga_type") == "case2"
             # "X of Y chapters read" -- a plain count of chapters actually
             # marked completed, not furthest_chapter/furthest_volume's
@@ -6286,7 +6333,7 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
-    dims_for_check = load_manga_dims(library_id, manga["name"]) if manga else {}
+    dims_for_check = load_manga_dims_cached(library_id, manga["name"]) if manga else {}
     is_volume_manga = (manga.get("manga_type") == "case2" or bool(dims_for_check.get("volumes"))) if manga else False
 
     completed_ids = [
@@ -6408,7 +6455,11 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id), {})
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
-    if manga and auth.is_manga_blocked(username, load_manga_dims(library_id, manga["name"]).get("tags", [])):
+    # One read reused for both checks below (this used to read dims.json
+    # twice -- see load_manga_dims_cached's own comment for the rest of the
+    # redundant reads this same navigation used to do).
+    dims = load_manga_dims_cached(library_id, manga["name"]) if manga else {}
+    if manga and auth.is_manga_blocked(username, dims.get("tags", [])):
         return RedirectResponse("/", status_code=302)
     manga_type = manga.get("manga_type", "loose") if manga else "loose"
     if manga_type == "oneshot":
@@ -6421,7 +6472,6 @@ def manga_detail(request: Request, library_id: int, manga_id: str):
     if manga_type == "case2":
         template = "volume_detail.html"
     elif manga_type == "loose":
-        dims = load_manga_dims(library_id, manga["name"]) if manga else {}
         template = "volume_detail.html" if dims.get("volumes") else "manga_detail.html"
     else:
         template = "manga_detail.html"
@@ -6496,7 +6546,7 @@ def get_chapters(request: Request, library_id: int, manga_id: str):
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapters = [
@@ -6519,7 +6569,7 @@ def get_manga_dims(request: Request, library_id: int, manga_id: str):
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
@@ -6557,7 +6607,7 @@ def get_volumes(request: Request, library_id: int, manga_id: str):
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     volumes = [
@@ -6583,7 +6633,7 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
     manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
     if manga:
-        dims = load_manga_dims(library_id, manga["name"])
+        dims = load_manga_dims_cached(library_id, manga["name"])
         volume = dims.get("volumes", {}).get(volume_id)
         # Real text rendering only for EPUBs that actually parse -- anything
         # else (ebooklib not installed, a corrupt file) falls straight
@@ -6611,7 +6661,7 @@ def get_volume_pages(request: Request, library_id: int, manga_id: str, volume_id
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     volume = dims.get("volumes", {}).get(volume_id)
@@ -6689,7 +6739,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     volume = dims.get("volumes", {}).get(volume_id)
@@ -6819,7 +6869,7 @@ def _load_epub_volume(username: str, library_id: int, manga_id: str, volume_id: 
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return None, None, JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return None, None, JSONResponse({"error": "Manga not found"}, status_code=404)
     volume = dims.get("volumes", {}).get(volume_id)
@@ -6891,7 +6941,7 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapter = dims.get("chapters", {}).get(chapter_id)
@@ -6932,7 +6982,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
     chapter = dims.get("chapters", {}).get(chapter_id)
@@ -7124,7 +7174,7 @@ def get_thumb_on_demand(request: Request, library_id: int, manga_id: str, source
     if not manga:
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
-    dims = load_manga_dims(library_id, manga["name"])
+    dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"error": "Manga not found"}, status_code=404)
 
