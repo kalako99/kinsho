@@ -569,6 +569,29 @@ def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
               f"Manually-added tags/genres/description for this manga are lost unless a backup exists.")
         return {"chapters": {}, "tags": [], "genres": [], "description": ""}
 
+# Keyed by dims.json's own path -> (mtime at last read, parsed dict). All
+# three current callers of _load_dims_or_flag_for_repair (get_mangas,
+# get_mangas_for_search, the favourites/last-read/random category list) only
+# ever READ from the dict they get back -- never mutate it -- which is what
+# makes sharing a cached object across requests safe here specifically
+# (unlike load_manga_dims' other, mutate-then-save call sites elsewhere,
+# which this cache does not touch at all). mtime-keyed so a real rescan-
+# driven rewrite (save_manga_dims always does an atomic replace, which
+# always bumps mtime) is picked up on the very next read with no separate
+# invalidation hook needed anywhere.
+#
+# Confirmed live (2026-09-19) as the actual cause behind "switching library
+# tabs / searching / going back is slow": a library with many large-webtoon
+# dims.json files (one real example: 152 manga, 60MB combined) meant every
+# hit to one of these three endpoints did up to 152 separate full JSON
+# parses -- not disk I/O (the files are OS-page-cache-hot) but the CPU-bound
+# parsing itself, made much more noticeable once both containers were capped
+# to 0.75 CPU cores. Naturally bounded by manga count (one entry per manga
+# ever seen), unlike the page/thumbnail caches elsewhere in this file -- no
+# eviction needed.
+_dims_read_cache: dict = {}
+
+
 def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[dict]:
     """Listing/serving-path-safe dims loader. A corrupted dims.json here
     would otherwise 500 the entire request -- e.g. one bad manga taking down
@@ -579,9 +602,26 @@ def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[
     was supposed to hide). Also enqueues a repair rescan of the whole
     library (see enqueue_library_scan), same as the startup self-heal check,
     so the very next request sees it repaired instead of it staying
-    invisible until someone happens to trigger a manual Reload."""
+    invisible until someone happens to trigger a manual Reload.
+
+    Cached (see _dims_read_cache above) -- callers must treat the returned
+    dict as read-only."""
+    path = get_manga_dims_file(library_id, manga_name)
+    if not path or not os.path.exists(path):
+        return {"chapters": {}, "tags": [], "genres": [], "description": ""}
+
     try:
-        return load_manga_dims(library_id, manga_name)
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if mtime is not None:
+        cached = _dims_read_cache.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+
+    try:
+        with open(path, "r") as f:
+            dims = json.load(f)
     except json.JSONDecodeError as e:
         # enqueue_library_scan() already atomically dedupes -- a flood of
         # concurrent requests hitting this same corrupted manga only ever
@@ -591,6 +631,10 @@ def _load_dims_or_flag_for_repair(library_id: int, manga_name: str) -> Optional[
             print(f"[Serving] CORRUPTED dims.json for '{manga_name}' (library {library_id}): {e} "
                   f"-- hiding it from this response and triggering a repair rescan.")
         return None
+
+    if mtime is not None:
+        _dims_read_cache[path] = (mtime, dims)
+    return dims
 
 def _is_manga_id_blocked(username: str, library_id: int, manga_id: str) -> bool:
     """
