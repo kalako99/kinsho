@@ -3624,21 +3624,20 @@ def _startup_cleanup_oneshot_covers():
 
 
 def _startup_convert_covers_to_jpeg():
-    """Called once at app startup (see lifespan). Re-encodes any top-level
-    cover thumbnail (cover_mtimes only -- see below for why unit covers are
-    deliberately excluded) still sitting on disk in its original, non-JPEG
-    format. Covers generated before 2026-09-20 preserved the source's own
-    format (a fetched PNG stayed PNG), and PIL's PNG encoder ignores
-    quality= entirely (a JPEG-only parameter), so those thumbnails came out
-    6-13x larger than an equivalent JPEG at the same pixel size for no
-    visual benefit -- confirmed live as the direct cause of the cover picker
-    feeling slow to open even for a manga with only two candidate covers.
-    Going forward this is handled at generation time
-    (process_manga_covers/process_cover_from_bytes always emit .jpg now);
-    this migration is only for what was already written under the old
-    scheme, since nothing else would ever naturally re-touch an
-    already-generated, already-unchanged cover (a plain rescan only
-    reprocesses a loose cover if its SOURCE file's own mtime changed; a
+    """Called once at app startup (see lifespan). Re-encodes every cover
+    thumbnail -- top-level candidates AND per-chapter/volume unit covers --
+    still sitting on disk in its original, non-JPEG format. Covers generated
+    before 2026-09-20 preserved the source's own format (a fetched PNG
+    stayed PNG), and PIL's PNG encoder ignores quality= entirely (a
+    JPEG-only parameter), so those thumbnails came out 6-13x larger than an
+    equivalent JPEG at the same pixel size for no visual benefit -- confirmed
+    live as the direct cause of the cover picker feeling slow to open even
+    for a manga with only two candidate covers. Going forward this is
+    handled at generation time (process_manga_covers/process_cover_from_bytes
+    always emit .jpg now); this migration is only for what was already
+    written under the old scheme, since nothing else would ever naturally
+    re-touch an already-generated, already-unchanged cover (a plain rescan
+    only reprocesses a loose cover if its SOURCE file's own mtime changed; a
     metadata re-fetch is a manual per-manga action, not something a rescan
     triggers).
 
@@ -3649,16 +3648,19 @@ def _startup_convert_covers_to_jpeg():
     every future re-fetch to always fully reprocess rather than being
     skipped as "unchanged" against a meaningless constant source_mtime=0.0
     -- there's no real mtime for an HTTP download) -- so a cover_mtimes-only
-    scan would silently miss every already-fetched PNG, exactly the case
-    this migration exists to fix. Still deliberately SKIPS anything tracked
-    in unit_cover_mtimes: a unit cover's filename is also referenced by that
-    exact chapter/volume's own cover_image field in dims.json (used to
-    render chapter-list thumbnails elsewhere), so converting it here without
-    also updating every dims.json that points at it would swap one bug (a
-    bloated PNG) for another (a broken thumbnail) -- out of scope for what
-    was actually reported. Updates manga["cover"] and any matching
-    cover_mtimes key so future scans/lookups see the new filename. Idempotent
-    -- nothing left to convert is a no-op."""
+    scan would silently miss every already-fetched PNG, confirmed live on
+    the first version of this migration.
+
+    A unit cover's filename is ALSO referenced by that exact chapter/volume's
+    own cover_image field in dims.json (used to render chapter-list
+    thumbnails elsewhere) -- converting the file without updating every
+    reference to it would swap one bug (a bloated PNG) for another (a broken
+    thumbnail), so for any manga where at least one unit cover gets
+    converted, this loads that manga's dims.json once, updates every
+    chapter/volume cover_image that pointed at an old filename, and saves
+    once (batched per manga, not per file). Updates manga["cover"] and any
+    matching cover_mtimes/unit_cover_mtimes key the same way. Idempotent --
+    nothing left to convert is a no-op."""
     covers_root = get_covers_dir()
     if not covers_root or not os.path.isdir(covers_root):
         return
@@ -3675,6 +3677,7 @@ def _startup_convert_covers_to_jpeg():
 
     converted_files = 0
     touched_manga = set()
+    dims_touched_manga = 0
     data_dirty = False
 
     try:
@@ -3701,14 +3704,14 @@ def _startup_convert_covers_to_jpeg():
                 entries = os.listdir(manga_dir)
             except Exception:
                 continue
+
+            renames = {}  # old_name -> new_name, this manga only
             for entry in entries:
                 stem, ext = os.path.splitext(entry)
                 if not stem.endswith('+') or ext.lower() in ('.jpg', '.jpeg'):
                     continue
                 base_stem = stem[:-1]
                 old_name = base_stem + ext
-                if old_name in unit_covers:
-                    continue
                 old_small = os.path.join(manga_dir, old_name)
                 old_large = os.path.join(manga_dir, entry)
                 new_small = os.path.join(manga_dir, base_stem + '.jpg')
@@ -3731,21 +3734,52 @@ def _startup_convert_covers_to_jpeg():
                     continue
                 converted_files += 1
                 touched_manga.add((lib_id_str, manga_name))
-                if manga is not None:
+                renames[old_name] = base_stem + '.jpg'
+
+            if not renames:
+                continue
+
+            if manga is not None:
+                for old_name, new_name in renames.items():
                     if manga.get("cover") == old_name:
-                        manga["cover"] = base_stem + '.jpg'
+                        manga["cover"] = new_name
                         data_dirty = True
                     cover_mtimes = manga.get("cover_mtimes")
                     if cover_mtimes and old_name in cover_mtimes:
-                        cover_mtimes[base_stem + '.jpg'] = cover_mtimes.pop(old_name)
+                        cover_mtimes[new_name] = cover_mtimes.pop(old_name)
                         data_dirty = True
+                    if old_name in unit_covers:
+                        unit_covers[new_name] = unit_covers.pop(old_name)
+                        data_dirty = True
+
+            # unit_covers was already mutated above (old_name popped, new_name
+            # set in its place for anything that was a unit cover), so
+            # membership is checked against the NEW name here.
+            unit_renames = {old: new for old, new in renames.items() if new in unit_covers}
+            if unit_renames:
+                try:
+                    library_id = int(lib_id_str)
+                    dims = load_manga_dims(library_id, manga_name)
+                    dims_dirty = False
+                    for bucket_name in ("chapters", "volumes"):
+                        for item in dims.get(bucket_name, {}).values():
+                            old_cover = item.get("cover_image")
+                            if old_cover in unit_renames:
+                                item["cover_image"] = unit_renames[old_cover]
+                                dims_dirty = True
+                    if dims_dirty:
+                        save_manga_dims(library_id, manga_name, dims)
+                        dims_touched_manga += 1
+                except Exception as e:
+                    print(f"[StartupCheck] failed updating dims.json cover_image for "
+                          f"'{manga_name}' (library {lib_id_str}): {e}")
 
     if data_dirty:
         save_app_data(data)
     converted_manga = len(touched_manga)
     if converted_files:
         print(f"[StartupCheck] converted {converted_files} legacy cover file(s) to JPEG "
-              f"across {converted_manga} manga.")
+              f"across {converted_manga} manga ({dims_touched_manga} dims.json updated).")
 
 
 def _startup_fix_stale_user_cover_selections():
