@@ -83,6 +83,7 @@ async def lifespan(app):
     _startup_migrate_unit_cover_mtimes()
     _startup_cleanup_oneshot_covers()
     _startup_convert_covers_to_jpeg()
+    _startup_fix_stale_user_cover_selections()
     _startup_purge_duplicate_page_issues()
     _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
@@ -3745,8 +3746,83 @@ def _startup_convert_covers_to_jpeg():
     if converted_files:
         print(f"[StartupCheck] converted {converted_files} legacy cover file(s) to JPEG "
               f"across {converted_manga} manga.")
-        print(f"[StartupCheck] converted {converted_files} legacy top-level cover file(s) to "
-              f"JPEG across {converted_manga} manga.")
+
+
+def _startup_fix_stale_user_cover_selections():
+    """Called once at app startup (see lifespan), after the two cover
+    migrations above. A per-user selected-cover override
+    (user_data["covers"][lib_id][manga_id], set via the cover picker) is
+    stored as a bare filename with no link back to cover_mtimes, so the
+    oneshot-cleanup and JPEG-conversion migrations above -- which rename or
+    delete cover files on disk -- have no way to know which users had one of
+    those exact files selected as their preference. Confirmed live: an
+    account that had picked a since-converted fetched cover pointed at a
+    filename that no longer existed, 404ing that manga's poster for them
+    specifically until they happened to reopen the picker and reselect.
+
+    Rather than try to precisely track every rename (fragile, and wouldn't
+    cover every future cause of the same class of staleness -- a manually
+    deleted cover file has the identical failure mode), this just drops any
+    per-user selection whose file no longer exists. Every cover lookup
+    already falls back to the manga's own current default cover
+    (manga["cover"]) when no override is set (see get_manga_covers's
+    `selected or manga.get("cover")`), which is the correct behavior for a
+    picked cover that's gone missing for any reason. Idempotent -- nothing
+    stale is a no-op."""
+    try:
+        users_data = auth._load_users()
+    except Exception as e:
+        print(f"[StartupCheck] could not load users for stale-cover-selection cleanup: {e}")
+        return
+    try:
+        app_data = load_app_data()
+    except Exception as e:
+        print(f"[StartupCheck] could not load app data for stale-cover-selection cleanup: {e}")
+        return
+    covers_root = get_covers_dir()
+    if not covers_root:
+        return
+
+    manga_name_by_id = {}
+    for lib_id_str, bucket in app_data.get("manga_data", {}).items():
+        for manga in bucket.get("mangas", []):
+            manga_name_by_id[(lib_id_str, manga.get("id"))] = manga.get("name")
+
+    fixed_users = 0
+    fixed_entries = 0
+    for user in users_data.get("users", []):
+        username = user.get("username")
+        if not username:
+            continue
+        try:
+            user_data = auth.load_user_data(username)
+        except Exception as e:
+            print(f"[StartupCheck] could not load user data for '{username}': {e}")
+            continue
+        covers_pref = user_data.get("covers")
+        if not covers_pref:
+            continue
+        dirty = False
+        for lib_id_str in list(covers_pref.keys()):
+            lib_covers = covers_pref[lib_id_str]
+            if not isinstance(lib_covers, dict):
+                continue
+            for manga_id in list(lib_covers.keys()):
+                filename = lib_covers[manga_id]
+                manga_name = manga_name_by_id.get((lib_id_str, manga_id))
+                if not manga_name:
+                    continue
+                file_path = os.path.join(covers_root, lib_id_str, manga_name, filename)
+                if not os.path.isfile(file_path):
+                    del lib_covers[manga_id]
+                    dirty = True
+                    fixed_entries += 1
+        if dirty:
+            auth.save_user_data(username, user_data)
+            fixed_users += 1
+    if fixed_entries:
+        print(f"[StartupCheck] cleared {fixed_entries} stale per-user cover selection(s) "
+              f"across {fixed_users} user(s).")
 
 
 def _startup_purge_duplicate_page_issues():
