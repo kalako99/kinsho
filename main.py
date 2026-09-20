@@ -605,12 +605,23 @@ def _safe_load_manga_dims(library_id: int, manga_name: str) -> dict:
 # benefits, not just the second one for a given manga.
 _dims_read_cache: dict = {}
 
+# TEMPORARY diagnostic kill-switch (2026-09-20) -- flip to True to bypass
+# _dims_read_cache entirely (every call re-reads+re-parses from disk, same
+# as before the 2026-09-19 caching work) so a live reader-performance issue
+# can be tested with the cache ruled out as a variable. Revert to False
+# (or remove this flag) once that test is done -- not meant to stay on.
+_DIMS_CACHE_DISABLED = True
+
 
 def _read_dims_cached(path: str) -> dict:
     """The actual cache-check-then-parse logic, keyed on the file's own
     mtime. Raises json.JSONDecodeError on a corrupted file, exactly like a
     plain open()+json.load() would -- callers decide how to handle that,
     see _load_dims_or_flag_for_repair vs. load_manga_dims_cached below."""
+    if _DIMS_CACHE_DISABLED:
+        with open(path, "r") as f:
+            return json.load(f)
+
     try:
         mtime = os.path.getmtime(path)
     except OSError:
