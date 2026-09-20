@@ -610,7 +610,7 @@ _dims_read_cache: dict = {}
 # as before the 2026-09-19 caching work) so a live reader-performance issue
 # can be tested with the cache ruled out as a variable. Revert to False
 # (or remove this flag) once that test is done -- not meant to stay on.
-_DIMS_CACHE_DISABLED = True
+_DIMS_CACHE_DISABLED = False
 
 
 def _read_dims_cached(path: str) -> dict:
