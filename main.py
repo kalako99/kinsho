@@ -3641,42 +3641,77 @@ def _startup_convert_covers_to_jpeg():
     metadata re-fetch is a manual per-manga action, not something a rescan
     triggers).
 
-    Deliberately scoped to cover_mtimes only, NOT unit_cover_mtimes: a unit
-    cover's filename is also referenced by that exact chapter/volume's own
-    cover_image field in dims.json (used to render chapter-list thumbnails
-    elsewhere) -- renaming it here without also updating every dims.json
-    that points at it would swap one bug (a bloated PNG) for another (a
-    broken thumbnail). cover_mtimes entries have no such external reference,
-    so they're safe to rename in place. Renames the cover_mtimes key to
-    match (stem + '.jpg') so future scans recognize it as already current,
-    not re-process or orphan-delete it. Idempotent -- nothing left to
-    convert is a no-op."""
+    Walks the covers directories directly (ground truth) rather than
+    cover_mtimes: a metadata-fetched cover is deliberately never recorded
+    there at all (its apply-metadata caller passes stored_mtimes={} and
+    discards process_cover_from_bytes' returned dict on purpose, forcing
+    every future re-fetch to always fully reprocess rather than being
+    skipped as "unchanged" against a meaningless constant source_mtime=0.0
+    -- there's no real mtime for an HTTP download) -- so a cover_mtimes-only
+    scan would silently miss every already-fetched PNG, exactly the case
+    this migration exists to fix. Still deliberately SKIPS anything tracked
+    in unit_cover_mtimes: a unit cover's filename is also referenced by that
+    exact chapter/volume's own cover_image field in dims.json (used to
+    render chapter-list thumbnails elsewhere), so converting it here without
+    also updating every dims.json that points at it would swap one bug (a
+    bloated PNG) for another (a broken thumbnail) -- out of scope for what
+    was actually reported. Updates manga["cover"] and any matching
+    cover_mtimes key so future scans/lookups see the new filename. Idempotent
+    -- nothing left to convert is a no-op."""
+    covers_root = get_covers_dir()
+    if not covers_root or not os.path.isdir(covers_root):
+        return
     try:
         data = load_app_data()
     except Exception as e:
         print(f"[StartupCheck] could not load app data for cover JPEG conversion: {e}")
         return
-    covers_root = get_covers_dir()
-    if not covers_root:
-        return
 
-    converted_manga = 0
-    converted_files = 0
+    manga_index = {}
     for lib_id_str, manga_bucket in data.get("manga_data", {}).items():
         for manga in manga_bucket.get("mangas", []):
-            cover_mtimes = manga.get("cover_mtimes")
-            if not cover_mtimes:
+            manga_index[(lib_id_str, manga.get("name"))] = manga
+
+    converted_files = 0
+    touched_manga = set()
+    data_dirty = False
+
+    try:
+        lib_dirs = os.listdir(covers_root)
+    except Exception as e:
+        print(f"[StartupCheck] cannot list covers root: {e}")
+        return
+
+    for lib_id_str in lib_dirs:
+        lib_dir = os.path.join(covers_root, lib_id_str)
+        if not os.path.isdir(lib_dir):
+            continue
+        try:
+            manga_dirs = os.listdir(lib_dir)
+        except Exception:
+            continue
+        for manga_name in manga_dirs:
+            manga_dir = os.path.join(lib_dir, manga_name)
+            if not os.path.isdir(manga_dir):
                 continue
-            manga_covers_dir = os.path.join(covers_root, lib_id_str, manga["name"])
-            touched = False
-            for old_name in list(cover_mtimes.keys()):
-                stem, ext = os.path.splitext(old_name)
-                if ext.lower() in ('.jpg', '.jpeg'):
+            manga = manga_index.get((lib_id_str, manga_name))
+            unit_covers = (manga or {}).get("unit_cover_mtimes") or {}
+            try:
+                entries = os.listdir(manga_dir)
+            except Exception:
+                continue
+            for entry in entries:
+                stem, ext = os.path.splitext(entry)
+                if not stem.endswith('+') or ext.lower() in ('.jpg', '.jpeg'):
                     continue
-                old_small = os.path.join(manga_covers_dir, old_name)
-                old_large = os.path.join(manga_covers_dir, stem + '+' + ext)
-                new_small = os.path.join(manga_covers_dir, stem + '.jpg')
-                new_large = os.path.join(manga_covers_dir, stem + '+.jpg')
+                base_stem = stem[:-1]
+                old_name = base_stem + ext
+                if old_name in unit_covers:
+                    continue
+                old_small = os.path.join(manga_dir, old_name)
+                old_large = os.path.join(manga_dir, entry)
+                new_small = os.path.join(manga_dir, base_stem + '.jpg')
+                new_large = os.path.join(manga_dir, base_stem + '+.jpg')
                 ok = True
                 for src, dst in ((old_small, new_small), (old_large, new_large)):
                     if not os.path.isfile(src):
@@ -3691,16 +3726,25 @@ def _startup_convert_covers_to_jpeg():
                     except Exception as e:
                         print(f"[StartupCheck] failed converting {src}: {e}")
                         ok = False
-                if ok:
-                    cover_mtimes[stem + '.jpg'] = cover_mtimes.pop(old_name)
-                    converted_files += 1
-                    touched = True
+                if not ok:
+                    continue
+                converted_files += 1
+                touched_manga.add((lib_id_str, manga_name))
+                if manga is not None:
                     if manga.get("cover") == old_name:
-                        manga["cover"] = stem + '.jpg'
-            if touched:
-                converted_manga += 1
-    if converted_manga:
+                        manga["cover"] = base_stem + '.jpg'
+                        data_dirty = True
+                    cover_mtimes = manga.get("cover_mtimes")
+                    if cover_mtimes and old_name in cover_mtimes:
+                        cover_mtimes[base_stem + '.jpg'] = cover_mtimes.pop(old_name)
+                        data_dirty = True
+
+    if data_dirty:
         save_app_data(data)
+    converted_manga = len(touched_manga)
+    if converted_files:
+        print(f"[StartupCheck] converted {converted_files} legacy cover file(s) to JPEG "
+              f"across {converted_manga} manga.")
         print(f"[StartupCheck] converted {converted_files} legacy top-level cover file(s) to "
               f"JPEG across {converted_manga} manga.")
 
