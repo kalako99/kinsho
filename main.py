@@ -81,6 +81,8 @@ async def lifespan(app):
     auth._ensure_admin_exists()
     _startup_migrate_retired_visual_themes()
     _startup_migrate_unit_cover_mtimes()
+    _startup_cleanup_oneshot_covers()
+    _startup_convert_covers_to_jpeg()
     _startup_purge_duplicate_page_issues()
     _startup_heal_corrupted_dims()
     bg_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
@@ -1725,7 +1727,8 @@ def _classify_loose_folder(folder_path: str) -> dict:
         "nested_manga_paths": nested_manga_paths,
     }
 
-def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stored_mtimes: dict) -> tuple[str | None, dict]:
+def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stored_mtimes: dict,
+                          only_files: list[str] | None = None) -> tuple[str | None, dict]:
     extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
     covers_dir = get_covers_dir()
     if not covers_dir:
@@ -1743,18 +1746,30 @@ def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stor
          and os.path.splitext(f)[1].lower() in extensions],
         key=natural_sort_key
     )
+    # Restricts which source images are ever considered candidate covers --
+    # used by oneshot scanning (_register_oneshot_manga) so only the first
+    # page is ever processed, not every page in the folder (a oneshot has no
+    # chapter/volume subfolders, so every page sits directly in manga_path --
+    # without this, every page got treated as its own loose cover candidate).
+    if only_files is not None:
+        only_set = set(only_files)
+        images = [f for f in images if f in only_set]
 
     manga_covers_dir = os.path.join(covers_dir, str(library_id), manga_name)
     os.makedirs(manga_covers_dir, exist_ok=True)
 
-    # Delete covers for images no longer in the manga folder
+    # Delete covers for images no longer a valid candidate -- removed from
+    # disk, or (only_files) no longer in the narrowed candidate set. Cleans
+    # up both the current .jpg output and any pre-JPEG-conversion leftover
+    # under the source's own original extension.
     current_filenames = set(images)
     for stored_filename in list(stored_mtimes.keys()):
         if stored_filename not in current_filenames:
             name, ext = os.path.splitext(stored_filename)
-            small_dest = os.path.join(manga_covers_dir, stored_filename)
-            large_dest = os.path.join(manga_covers_dir, name + '+' + ext)
-            for f in [small_dest, large_dest]:
+            for f in (os.path.join(manga_covers_dir, stored_filename),
+                      os.path.join(manga_covers_dir, name + '+' + ext),
+                      os.path.join(manga_covers_dir, name + '.jpg'),
+                      os.path.join(manga_covers_dir, name + '+.jpg')):
                 if os.path.exists(f):
                     try:
                         os.remove(f)
@@ -1767,12 +1782,19 @@ def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stor
         return None, stored_mtimes
 
     new_mtimes = dict(stored_mtimes)
+    default_cover = None
 
     for image_filename in images:
         src_path = os.path.join(manga_path, image_filename)
         name, ext = os.path.splitext(image_filename)
-        small_dest = os.path.join(manga_covers_dir, image_filename)
-        large_dest = os.path.join(manga_covers_dir, name + '+' + ext)
+        # Thumbnails are always re-encoded as JPEG regardless of the source
+        # format -- see process_cover_from_bytes for why (a source PNG/webp
+        # saved via PIL's own encoder ignores quality= entirely, a JPEG-only
+        # parameter, and stays several times larger for no visual benefit at
+        # thumbnail size).
+        out_name   = name + '.jpg'
+        small_dest = os.path.join(manga_covers_dir, out_name)
+        large_dest = os.path.join(manga_covers_dir, name + '+.jpg')
 
         current_mtime = os.path.getmtime(src_path)
         stored_mtime  = stored_mtimes.get(image_filename)
@@ -1780,19 +1802,35 @@ def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stor
         both_exist = os.path.exists(small_dest) and os.path.exists(large_dest)
         if both_exist and stored_mtime is not None and current_mtime == stored_mtime:
             print(f"[Covers] Skipping unchanged: {image_filename}")
+            if default_cover is None:
+                default_cover = out_name
             continue
 
         try:
             img = Image.open(src_path)
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             small = img.copy()
             small.thumbnail((300, 450))
-            small.save(small_dest, optimize=True, quality=85)
+            small.save(small_dest, format='JPEG', optimize=True, quality=85)
 
             large = img.copy()
             large.thumbnail((600, 900))
-            large.save(large_dest, optimize=True, quality=85)
+            large.save(large_dest, format='JPEG', optimize=True, quality=85)
 
             new_mtimes[image_filename] = current_mtime
+            # A previous run's pre-conversion output (same source, old
+            # extension) is now dead weight -- the picker lists every file it
+            # finds, so a leftover old-extension pair would show up as a
+            # duplicate candidate alongside the new JPEG one.
+            if ext.lower() not in ('.jpg', '.jpeg'):
+                for stale in (os.path.join(manga_covers_dir, image_filename),
+                              os.path.join(manga_covers_dir, name + '+' + ext)):
+                    if os.path.exists(stale):
+                        try:
+                            os.remove(stale)
+                        except Exception:
+                            pass
             print(f"[Covers] Processed {image_filename} -> small + large")
         except Exception as e:
             print(f"[Covers] Failed processing {image_filename}: {e}")
@@ -1803,7 +1841,10 @@ def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stor
             except Exception as e2:
                 print(f"[Covers] Raw copy also failed: {e2}")
 
-    return images[0], new_mtimes
+        if default_cover is None:
+            default_cover = out_name
+
+    return default_cover, new_mtimes
 
 def process_cover_from_bytes(
     img_bytes: bytes,
@@ -1815,9 +1856,11 @@ def process_cover_from_bytes(
     large_size: tuple = (600, 900),
 ) -> tuple[str | None, dict]:
     """
-    Given raw image bytes (extracted from an archive or PDF), save small+large
-    cover thumbnails to the covers directory. Returns (cover_filename, new_mtimes).
-    filename is used as the key and destination filename.
+    Given raw image bytes (extracted from an archive/PDF, or downloaded from
+    a metadata provider), save small+large cover thumbnails to the covers
+    directory. Returns (cover_filename, new_mtimes). filename is used as the
+    tracking key (a source's own identity, stable across re-encodes); the
+    actual destination filename is always re-encoded to .jpg -- see below.
     """
     covers_dir = get_covers_dir()
     if not covers_dir:
@@ -1827,32 +1870,53 @@ def process_cover_from_bytes(
     os.makedirs(manga_covers_dir, exist_ok=True)
 
     name, ext = os.path.splitext(filename)
-    small_dest = os.path.join(manga_covers_dir, filename)
-    large_dest = os.path.join(manga_covers_dir, name + '+' + ext)
+    # Thumbnails are always re-encoded as JPEG regardless of the source
+    # format -- a fetched cover is commonly a PNG (AniList/MangaDex both
+    # serve PNG), and PIL's PNG encoder ignores quality= entirely (a
+    # JPEG-only parameter), so optimize=True, quality=85 did nothing for
+    # those: confirmed live 2026-09-20, a fetched PNG thumbnail came out
+    # 6-13x the size of an equivalent JPEG at the same pixel dimensions --
+    # the actual cause of the cover picker feeling slow to open even for a
+    # manga with only two candidate covers.
+    out_name   = name + '.jpg'
+    small_dest = os.path.join(manga_covers_dir, out_name)
+    large_dest = os.path.join(manga_covers_dir, name + '+.jpg')
 
     stored_mtime = stored_mtimes.get(filename)
     both_exist = os.path.exists(small_dest) and os.path.exists(large_dest)
     if both_exist and stored_mtime is not None and source_mtime == stored_mtime:
         print(f"[Covers] Skipping unchanged: {filename}")
-        return filename, stored_mtimes
+        return out_name, stored_mtimes
 
     new_mtimes = dict(stored_mtimes)
     try:
         img = Image.open(io.BytesIO(img_bytes))
-        if ext.lower() in ('.jpg', '.jpeg') and img.mode != 'RGB':
+        if img.mode != 'RGB':
             img = img.convert('RGB')
         small = img.copy()
         small.thumbnail((300, 450))
-        small.save(small_dest, optimize=True, quality=85)
+        small.save(small_dest, format='JPEG', optimize=True, quality=85)
         large = img.copy()
         large.thumbnail(large_size)
-        large.save(large_dest, optimize=True, quality=85)
+        large.save(large_dest, format='JPEG', optimize=True, quality=85)
         new_mtimes[filename] = source_mtime
+        # A pre-conversion leftover pair under the old extension is now dead
+        # weight -- the picker lists every file it finds, so it would show
+        # up as a duplicate candidate alongside the new JPEG one.
+        if ext.lower() not in ('.jpg', '.jpeg'):
+            for stale in (os.path.join(manga_covers_dir, filename),
+                          os.path.join(manga_covers_dir, name + '+' + ext)):
+                if os.path.exists(stale):
+                    try:
+                        os.remove(stale)
+                    except Exception:
+                        pass
         print(f"[Covers] Processed {filename} -> small + large")
     except Exception as e:
         print(f"[Covers] Failed processing {filename}: {e}")
+        return None, stored_mtimes
 
-    return filename, new_mtimes
+    return out_name, new_mtimes
 
 # Target width (px) for a fetched cover. AniList's largest cover tops out
 # around 500px, too soft for the full-width detail backdrop — when the
@@ -2518,8 +2582,13 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             return
 
         print(f"[ScanLib] Scanning oneshot: {manga_name}")
+        # only_files=[files[0]] -- a oneshot has no chapter/volume subfolders,
+        # every page sits directly in manga_path, so without this restriction
+        # process_manga_covers treats every single page as its own candidate
+        # cover (confirmed live 2026-09-20: a 459-page oneshot had accumulated
+        # 459 cover files). Only the first page should ever be a candidate.
         default_cover, new_cover_mtimes = process_manga_covers(
-            manga_path, library_id, manga_name, stored_cover_mtimes
+            manga_path, library_id, manga_name, stored_cover_mtimes, only_files=[files[0]]
         )
         mangas[manga_path] = {
             "id":           manga_id,
@@ -2739,8 +2808,11 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                 img_bytes, fname, library_id, manga_name,
                                 new_cover_mtimes, current_mtime
                             )
-                            if default_cover is None:
-                                default_cover = fname
+                            # cover_filename (the actual saved file, always
+                            # .jpg now -- see process_cover_from_bytes), NOT
+                            # fname (the source entry's own name/extension).
+                            if default_cover is None and cover_filename:
+                                default_cover = cover_filename
 
                     # If no loose covers, use first image of first chapter
                     if default_cover is None and chapter_dirs:
@@ -2758,7 +2830,11 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                     img_bytes, fname, library_id, manga_name,
                                     new_cover_mtimes, current_mtime
                                 )
-                                default_cover = fname
+                                # cover_filename (the actual saved file,
+                                # always .jpg now), NOT fname (the source
+                                # entry's own name/extension).
+                                if cover_filename:
+                                    default_cover = cover_filename
 
                     # Scan chapters and page dims
                     dims = _safe_load_manga_dims(library_id, manga_name)
@@ -3003,18 +3079,26 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                         if cover_bytes:
                                             # unit_cover_mtimes, NOT cover_mtimes -- see the
                                             # comment on stored_unit_cover_mtimes above.
-                                            # The result dict is intentionally not captured
+                                            # The dict itself is intentionally not captured
                                             # here (matches the direct-mutation pattern
                                             # below) -- reassigning this name to
                                             # process_cover_from_bytes' returned dict would
                                             # silently detach it from the same object
                                             # already stored in mangas[manga_path], which is
                                             # exactly what the old 'pdf' branch below did.
-                                            process_cover_from_bytes(
+                                            # The returned FILENAME is still needed though --
+                                            # the saved thumbnail is always .jpg now regardless
+                                            # of cover_entry's own extension (see
+                                            # process_cover_from_bytes), so cover_fname must be
+                                            # corrected to match what's actually on disk before
+                                            # it's used as dims' cover_image below.
+                                            result_fname, _ = process_cover_from_bytes(
                                                 cover_bytes, cover_fname,
                                                 library_id, manga_name,
                                                 new_unit_cover_mtimes, vol_mtime
                                             )
+                                            if result_fname:
+                                                cover_fname = result_fname
                                             new_unit_cover_mtimes[cover_fname] = vol_mtime
 
                             elif vol_type == 'pdf':
@@ -3474,6 +3558,151 @@ def _startup_migrate_unit_cover_mtimes():
     if migrated:
         save_app_data(data)
         print(f"[StartupCheck] unit-cover-mtimes migration touched {migrated} manga total.")
+
+
+def _startup_cleanup_oneshot_covers():
+    """Called once at app startup (see lifespan). Fixes existing oneshot
+    manga whose covers folder accumulated one cover per PAGE instead of just
+    the first page. Root cause (fixed going forward 2026-09-20):
+    _register_oneshot_manga called process_manga_covers on the oneshot's own
+    content folder, where every page sits directly with no chapter/volume
+    subfolder to separate them from a real loose cover file -- confirmed
+    live, a 459-page oneshot had accumulated 459 cover files, which is what
+    made its cover picker (and, worse, any oneshot like it) take forever to
+    open. A plain rescan alone won't reprocess an already-scanned oneshot
+    under the fixed code, since the oneshot's own folder_mtime hasn't
+    changed -- nothing on disk changed, only how many of its pages get
+    treated as cover candidates -- so this migration forces it once,
+    regardless of mtime. Idempotent -- a oneshot with only one cover
+    candidate already is left untouched, safe to run on every startup."""
+    try:
+        data = load_app_data()
+    except Exception as e:
+        print(f"[StartupCheck] could not load app data for oneshot-cover cleanup: {e}")
+        return
+    cleaned = 0
+    for lib_id_str, manga_bucket in data.get("manga_data", {}).items():
+        try:
+            library_id = int(lib_id_str)
+        except ValueError:
+            continue
+        for manga in manga_bucket.get("mangas", []):
+            if manga.get("manga_type") != "oneshot":
+                continue
+            cover_mtimes = manga.get("cover_mtimes") or {}
+            if len(cover_mtimes) <= 1:
+                continue
+            manga_path = manga.get("path")
+            if not manga_path or not os.path.isdir(manga_path):
+                continue
+            try:
+                files = sorted(
+                    [f for f in os.listdir(manga_path)
+                     if os.path.isfile(os.path.join(manga_path, f))
+                     and os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS],
+                    key=natural_sort_key
+                )
+            except Exception as e:
+                print(f"[StartupCheck] cannot list {manga_path}: {e}")
+                continue
+            if not files:
+                continue
+            before = len(cover_mtimes)
+            default_cover, new_cover_mtimes = process_manga_covers(
+                manga_path, library_id, manga["name"], cover_mtimes, only_files=[files[0]]
+            )
+            manga["cover_mtimes"] = new_cover_mtimes
+            if default_cover:
+                manga["cover"] = default_cover
+            cleaned += 1
+            print(f"[StartupCheck] trimmed oneshot '{manga['name']}' (library {lib_id_str}) "
+                  f"from {before} cover candidate(s) down to 1")
+    if cleaned:
+        save_app_data(data)
+        print(f"[StartupCheck] oneshot-cover cleanup touched {cleaned} manga total.")
+
+
+def _startup_convert_covers_to_jpeg():
+    """Called once at app startup (see lifespan). Re-encodes any top-level
+    cover thumbnail (cover_mtimes only -- see below for why unit covers are
+    deliberately excluded) still sitting on disk in its original, non-JPEG
+    format. Covers generated before 2026-09-20 preserved the source's own
+    format (a fetched PNG stayed PNG), and PIL's PNG encoder ignores
+    quality= entirely (a JPEG-only parameter), so those thumbnails came out
+    6-13x larger than an equivalent JPEG at the same pixel size for no
+    visual benefit -- confirmed live as the direct cause of the cover picker
+    feeling slow to open even for a manga with only two candidate covers.
+    Going forward this is handled at generation time
+    (process_manga_covers/process_cover_from_bytes always emit .jpg now);
+    this migration is only for what was already written under the old
+    scheme, since nothing else would ever naturally re-touch an
+    already-generated, already-unchanged cover (a plain rescan only
+    reprocesses a loose cover if its SOURCE file's own mtime changed; a
+    metadata re-fetch is a manual per-manga action, not something a rescan
+    triggers).
+
+    Deliberately scoped to cover_mtimes only, NOT unit_cover_mtimes: a unit
+    cover's filename is also referenced by that exact chapter/volume's own
+    cover_image field in dims.json (used to render chapter-list thumbnails
+    elsewhere) -- renaming it here without also updating every dims.json
+    that points at it would swap one bug (a bloated PNG) for another (a
+    broken thumbnail). cover_mtimes entries have no such external reference,
+    so they're safe to rename in place. Renames the cover_mtimes key to
+    match (stem + '.jpg') so future scans recognize it as already current,
+    not re-process or orphan-delete it. Idempotent -- nothing left to
+    convert is a no-op."""
+    try:
+        data = load_app_data()
+    except Exception as e:
+        print(f"[StartupCheck] could not load app data for cover JPEG conversion: {e}")
+        return
+    covers_root = get_covers_dir()
+    if not covers_root:
+        return
+
+    converted_manga = 0
+    converted_files = 0
+    for lib_id_str, manga_bucket in data.get("manga_data", {}).items():
+        for manga in manga_bucket.get("mangas", []):
+            cover_mtimes = manga.get("cover_mtimes")
+            if not cover_mtimes:
+                continue
+            manga_covers_dir = os.path.join(covers_root, lib_id_str, manga["name"])
+            touched = False
+            for old_name in list(cover_mtimes.keys()):
+                stem, ext = os.path.splitext(old_name)
+                if ext.lower() in ('.jpg', '.jpeg'):
+                    continue
+                old_small = os.path.join(manga_covers_dir, old_name)
+                old_large = os.path.join(manga_covers_dir, stem + '+' + ext)
+                new_small = os.path.join(manga_covers_dir, stem + '.jpg')
+                new_large = os.path.join(manga_covers_dir, stem + '+.jpg')
+                ok = True
+                for src, dst in ((old_small, new_small), (old_large, new_large)):
+                    if not os.path.isfile(src):
+                        ok = False
+                        continue
+                    try:
+                        img = Image.open(src)
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        img.save(dst, format='JPEG', optimize=True, quality=85)
+                        os.remove(src)
+                    except Exception as e:
+                        print(f"[StartupCheck] failed converting {src}: {e}")
+                        ok = False
+                if ok:
+                    cover_mtimes[stem + '.jpg'] = cover_mtimes.pop(old_name)
+                    converted_files += 1
+                    touched = True
+                    if manga.get("cover") == old_name:
+                        manga["cover"] = stem + '.jpg'
+            if touched:
+                converted_manga += 1
+    if converted_manga:
+        save_app_data(data)
+        print(f"[StartupCheck] converted {converted_files} legacy top-level cover file(s) to "
+              f"JPEG across {converted_manga} manga.")
 
 
 def _startup_purge_duplicate_page_issues():
