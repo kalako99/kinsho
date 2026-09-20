@@ -7171,7 +7171,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             return JSONResponse({"error": "Failed to read page"}, status_code=500)
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
 
     try:
@@ -7191,7 +7191,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
                       "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
 
     elif vol_type == "pdf":
@@ -7203,7 +7203,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             return Response(
                 content=_pdf_page_cache[cache_key],
                 media_type="image/jpeg",
-                headers={"Cache-Control": "public, max-age=86400, immutable"},
+                headers={"Cache-Control": "public, max-age=480"},
             )
         thumbs_dir = get_thumbs_dir(library_id, manga["name"], volume_id)
         # Serve pre-rendered disk file at default scale, and warm the in-memory cache
@@ -7218,7 +7218,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
                 return Response(
                     content=img_bytes,
                     media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=86400, immutable"},
+                    headers={"Cache-Control": "public, max-age=480"},
                 )
         # Render on demand at requested scale
         img_bytes = _cached_pdf_page(volume["path"], page_index, scale=scale)
@@ -7227,7 +7227,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         return Response(
             content=img_bytes,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
 
     elif vol_type == "epub":
@@ -7241,7 +7241,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         media_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
 
     return JSONResponse({"error": "Unknown volume type"}, status_code=500)
@@ -7406,7 +7406,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
                       "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
         return StreamingResponse(
             io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
     elif filename_or_index.isdigit():
         # Numeric index into the sorted file list — same convention as
@@ -7439,7 +7439,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
         return FileResponse(
             os.path.join(chapter["path"], picked_name),
             media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
     else:
         file_path = os.path.join(chapter["path"], filename_or_index)
@@ -7451,7 +7451,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
         return FileResponse(
             file_path,
             media_type=media_type,
-            headers={"Cache-Control": "public, max-age=86400, immutable"},
+            headers={"Cache-Control": "public, max-age=480"},
         )
 
 # ── THUMBNAILS (on-demand generation, in-memory cache only, never written
