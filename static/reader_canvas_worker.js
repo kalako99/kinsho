@@ -9,7 +9,13 @@
 //
 // Message protocol (main -> worker), all fire-and-forget:
 //   {type:'init',    segments:[{index, canvas /* transferred OffscreenCanvas */}], widthCss, dpr}
-//   {type:'assign',  segmentIndex, startGlobalY}          -- segment reassigned to a new logical range, clear it
+//   {type:'assign',  segmentIndex, startGlobalY, heightPx} -- segment reassigned to a new
+//                    logical range; heightPx is that range's own height (segments are
+//                    page-aligned, not a fixed grid, so this varies -- see chapter_reader.html's
+//                    cbBuildChainCentered). dpr isn't sent -- the worker already tracks its own
+//                    from init/setWidth. Resizing a canvas clears it AND resets the 2D context's
+//                    transform, so this re-applies ctx.scale(dpr, dpr) too -- a separate
+//                    clearRect is never needed here.
 //   {type:'paint',   segmentIndex, jobs:[{url, iw, ih, sy0, sy1, destY, destH}]}
 //   {type:'releaseUrl', url}                              -- a page fell out of every segment's range
 //   {type:'setWidth', widthCss}                           -- reader width changed (zoom/rotate)
@@ -91,7 +97,15 @@ self.onmessage = (e) => {
     case 'assign': {
       const ctx = ctxBySegment.get(msg.segmentIndex);
       if (ctx) {
-        ctx.clearRect(0, 0, widthCss, ctx.canvas.height / dpr);
+        // Segments are page-aligned now (2026-09-22), not a fixed grid, so
+        // a reassigned segment's own height can differ from what it had
+        // before -- resize the backing store to match. This already
+        // clears the canvas and resets the 2D context's transform (per
+        // spec, changing width/height does both, even to the same value),
+        // so the scale has to be re-applied right after.
+        ctx.canvas.width  = Math.round(widthCss * dpr);
+        ctx.canvas.height = Math.round(msg.heightPx * dpr);
+        ctx.scale(dpr, dpr);
       }
       break;
     }
