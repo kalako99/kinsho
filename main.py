@@ -439,7 +439,7 @@ def get_cover_image(request: Request, library_id: int, manga_name: str, filename
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Not found"}, status_code=404)
 
-    lib_manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    lib_manga_data = load_app_data_cached().get("manga_data", {}).get(str(library_id))
     manga = next((m for m in (lib_manga_data or {}).get("mangas", []) if m.get("name") == manga_name), None)
     if manga and auth.is_manga_blocked(username, load_manga_dims_cached(library_id, manga_name).get("tags", [])):
         return JSONResponse({"error": "Not found"}, status_code=404)
@@ -518,6 +518,40 @@ def load_app_data() -> dict:
         return {"data_path": get_data_path() or "", "libraries": []}
     with open(data_file, "r") as f:
         return json.load(f)
+
+# Keyed by data_file's own mtime -> parsed dict, same pattern as
+# _dims_read_cache below (see its own comment for the full reasoning) --
+# only ever used by read-only call sites, never anything that later calls
+# save_app_data() on the same object, for the identical reason that cache
+# is scoped the same way. 2026-09-22: found the same class of bug the
+# 2026-09-19 dims work fixed, just for data.json instead -- get_cover_image()
+# re-parsed the WHOLE app data.json (libraries + every library's full manga
+# index) from scratch on every single cover request, plus a linear O(n) scan
+# to find the one manga, with zero caching -- and the search screen can fire
+# 50-150+ of these in a burst (one per visible cover tile), which is what
+# was actually behind "covers take 5-10 seconds to load".
+_app_data_cache = None  # (mtime, data) or None if never read yet
+
+
+def load_app_data_cached() -> dict:
+    """Read-only accessor -- callers must treat the returned dict as
+    read-only (see _dims_read_cache's identical convention for
+    load_manga_dims_cached). Falls back to an uncached load_app_data() call
+    if the file's mtime can't be read (matches load_app_data's own
+    missing-file behavior) rather than caching a guess."""
+    global _app_data_cache
+    data_file = get_data_file()
+    if not data_file:
+        return load_app_data()
+    try:
+        mtime = os.path.getmtime(data_file)
+    except OSError:
+        return load_app_data()
+    if _app_data_cache is not None and _app_data_cache[0] == mtime:
+        return _app_data_cache[1]
+    data = load_app_data()
+    _app_data_cache = (mtime, data)
+    return data
 
 def save_app_data(data: dict):
     data_file = get_data_file()
@@ -4671,7 +4705,7 @@ def get_mangas_for_search(request: Request, library_id: int):
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"mangas": []})
-    data = load_app_data()
+    data = load_app_data_cached()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
         return JSONResponse({"mangas": []})
