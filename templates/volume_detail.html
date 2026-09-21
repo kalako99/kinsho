@@ -1567,7 +1567,7 @@
   <div class="popup-overlay" v-if="showAddPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddPopup = false)">
     <div class="popup">
       <div class="popup-title">Add Tag</div>
-      <input type="text" v-model="tagInput" placeholder="Type a tag…" @keyup.enter="saveTag" ref="tagInputRef"/>
+      <input type="text" v-model="tagInput" placeholder="Type a tag…" @keyup.enter="saveTag" @input="onTagInput($event)" ref="tagInputRef"/>
       <div class="popup-suggestions">
         <button v-for="s in filteredSuggestions" :key="s" class="suggestion-pill" @click="tagInput = s">{{ s }}</button>
       </div>
@@ -1598,7 +1598,7 @@
   <div class="popup-overlay" v-if="showAddGenrePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddGenrePopup = false)">
     <div class="popup">
       <div class="popup-title">Add Genre</div>
-      <input type="text" v-model="genreInput" placeholder="Type a genre…" @keyup.enter="saveGenre" ref="genreInputRef"/>
+      <input type="text" v-model="genreInput" placeholder="Type a genre…" @keyup.enter="saveGenre" @input="onGenreInput($event)" ref="genreInputRef"/>
       <div class="popup-suggestions">
         <button v-for="s in filteredGenreSuggestions" :key="s" class="suggestion-pill" @click="genreInput = s">{{ s }}</button>
       </div>
@@ -1824,6 +1824,9 @@ createApp({
       // tags
       allTags:              [],
       tagInput:             '',
+      // Same IME-composition fix as search_page.html's liveQuery
+      // (2026-09-22) -- see manga_detail.html's identical comment.
+      liveTagInput:         '',
       showAddPopup:         false,
       deleteMode:           false,
       selectedTags:         [],
@@ -1831,6 +1834,7 @@ createApp({
       // genres
       allGenres:            [],
       genreInput:           '',
+      liveGenreInput:       '',
       showAddGenrePopup:    false,
       genreDeleteMode:      false,
       selectedGenres:       [],
@@ -1890,14 +1894,14 @@ createApp({
   
   computed: {
     filteredSuggestions() {
-      const input = this.tagInput.trim().toLowerCase();
+      const input = this.liveTagInput.trim().toLowerCase();
       return this.allTags
         .filter(t => input === '' || t.toLowerCase().includes(input))
         .slice(0, 10);
     },
 
     filteredGenreSuggestions() {
-      const input = this.genreInput.trim().toLowerCase();
+      const input = this.liveGenreInput.trim().toLowerCase();
       return this.allGenres
         .filter(g => input === '' || g.toLowerCase().includes(input))
         .slice(0, 10);
@@ -2666,9 +2670,13 @@ createApp({
 
     openAddGenre() {
       this.genreInput = '';
+      this.liveGenreInput = '';
       this.showAddGenrePopup = true;
       this.$nextTick(() => { if (this.$refs.genreInputRef) this.$refs.genreInputRef.focus(); });
     },
+
+    onTagInput(e) { this.liveTagInput = e.target.value; },
+    onGenreInput(e) { this.liveGenreInput = e.target.value; },
 
     async saveGenre() {
       const genre = this.genreInput.trim();
@@ -2747,6 +2755,7 @@ createApp({
 
     openAddTag() {
       this.tagInput = '';
+      this.liveTagInput = '';
       this.showAddPopup = true;
       this.$nextTick(() => { if (this.$refs.tagInputRef) this.$refs.tagInputRef.focus(); });
     },

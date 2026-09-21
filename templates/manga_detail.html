@@ -1515,7 +1515,7 @@
   <div class="popup-overlay" v-if="showAddPopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddPopup = false)">
     <div class="popup">
       <div class="popup-title">Add Tag</div>
-      <input type="text" v-model="tagInput" placeholder="Type a tag…" @keyup.enter="saveTag" ref="tagInputRef"/>
+      <input type="text" v-model="tagInput" placeholder="Type a tag…" @keyup.enter="saveTag" @input="onTagInput($event)" ref="tagInputRef"/>
       <div class="popup-suggestions">
         <button v-for="s in filteredSuggestions" :key="s" class="suggestion-pill" @click="tagInput = s">{{ s }}</button>
       </div>
@@ -1546,7 +1546,7 @@
   <div class="popup-overlay" v-if="showAddGenrePopup" @mousedown="onOverlayMouseDown" @click="onOverlayClick($event, () => showAddGenrePopup = false)">
     <div class="popup">
       <div class="popup-title">Add Genre</div>
-      <input type="text" v-model="genreInput" placeholder="Type a genre…" @keyup.enter="saveGenre" ref="genreInputRef"/>
+      <input type="text" v-model="genreInput" placeholder="Type a genre…" @keyup.enter="saveGenre" @input="onGenreInput($event)" ref="genreInputRef"/>
       <div class="popup-suggestions">
         <button v-for="s in filteredGenreSuggestions" :key="s" class="suggestion-pill" @click="genreInput = s">{{ s }}</button>
       </div>
@@ -1773,6 +1773,16 @@ createApp({
       // tags
       allTags:              [],
       tagInput:             '',
+      // Mirrors tagInput, updated straight from the input's native 'input'
+      // event instead of through v-model -- same IME-composition fix as
+      // search_page.html's liveQuery (2026-09-22): v-model withholds
+      // updates while Android's default keyboards are mid-composition
+      // (true for ordinary English typing too when predictive text is on),
+      // which made tag suggestions only refresh once the keyboard closed
+      // instead of live per-keystroke. filteredSuggestions reads from this;
+      // tagInput itself stays v-model-bound and IME-safe for what's shown
+      // in the box and what actually gets saved.
+      liveTagInput:         '',
       showAddPopup:         false,
       deleteMode:           false,
       selectedTags:         [],
@@ -1780,6 +1790,7 @@ createApp({
       // genres
       allGenres:            [],
       genreInput:           '',
+      liveGenreInput:       '',  // same IME-composition fix as liveTagInput above
       showAddGenrePopup:    false,
       genreDeleteMode:      false,
       selectedGenres:       [],
@@ -1838,14 +1849,14 @@ createApp({
   
   computed: {
     filteredSuggestions() {
-      const input = this.tagInput.trim().toLowerCase();
+      const input = this.liveTagInput.trim().toLowerCase();
       return this.allTags
         .filter(t => input === '' || t.toLowerCase().includes(input))
         .slice(0, 10);
     },
 
     filteredGenreSuggestions() {
-      const input = this.genreInput.trim().toLowerCase();
+      const input = this.liveGenreInput.trim().toLowerCase();
       return this.allGenres
         .filter(g => input === '' || g.toLowerCase().includes(input))
         .slice(0, 10);
@@ -2457,6 +2468,7 @@ createApp({
 
     openAddGenre() {
       this.genreInput = '';
+      this.liveGenreInput = '';
       this.showAddGenrePopup = true;
       this.$nextTick(() => { if (this.$refs.genreInputRef) this.$refs.genreInputRef.focus(); });
     },
@@ -2538,9 +2550,13 @@ createApp({
 
     openAddTag() {
       this.tagInput = '';
+      this.liveTagInput = '';
       this.showAddPopup = true;
       this.$nextTick(() => { if (this.$refs.tagInputRef) this.$refs.tagInputRef.focus(); });
     },
+
+    onTagInput(e) { this.liveTagInput = e.target.value; },
+    onGenreInput(e) { this.liveGenreInput = e.target.value; },
 
     async saveTag() {
       const tag = this.tagInput.trim();

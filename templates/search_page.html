@@ -357,7 +357,7 @@
         @click="genresExpanded = !genresExpanded"
       >{{ genresExpanded ? 'Show less' : 'Show all' }}</button>
     </div>
-    <input class="filter-search" type="text" v-model="genreSearch" placeholder="Filter genres…">
+    <input class="filter-search" type="text" v-model="genreSearch" placeholder="Filter genres…" @input="onGenreSearchInput($event)">
     <div class="pills-row" :class="{ collapsed: !genresExpanded }">
       <span v-if="allGenres.length === 0" class="no-filters">No genres yet.</span>
       <span
@@ -377,7 +377,7 @@
         @click="tagsExpanded = !tagsExpanded"
       >{{ tagsExpanded ? 'Show less' : 'Show all' }}</button>
     </div>
-    <input class="filter-search" type="text" v-model="tagSearch" placeholder="Filter tags…">
+    <input class="filter-search" type="text" v-model="tagSearch" placeholder="Filter tags…" @input="onTagSearchInput($event)">
     <div class="pills-row" :class="{ collapsed: !tagsExpanded }">
       <span v-if="allTags.length === 0" class="no-filters">No tags yet.</span>
       <span
@@ -512,6 +512,13 @@ createApp({
       tagsExpanded:   !!preTag,
       genreSearch:    '',
       tagSearch:      '',
+      // Same IME-composition fix as liveQuery above, applied to the
+      // genre/tag filter boxes (2026-09-22) -- these were missed when the
+      // main search box was fixed, so typing into them on Android only
+      // updated the filtered pill list once composition ended (keyboard
+      // dismissed), not live per-keystroke like the browser.
+      liveGenreSearch: '',
+      liveTagSearch:   '',
       onlyCompleted:  false,
       selectedCollection:   null,
       showCollectionFilterDropdown: false,
@@ -549,12 +556,12 @@ createApp({
       });
     },
     filteredGenres() {
-      const q = this.genreSearch.trim().toLowerCase();
+      const q = this.liveGenreSearch.trim().toLowerCase();
       if (!q) return this.allGenres;
       return this.allGenres.filter(g => g.toLowerCase().includes(q));
     },
     filteredTagList() {
-      const q = this.tagSearch.trim().toLowerCase();
+      const q = this.liveTagSearch.trim().toLowerCase();
       if (!q) return this.allTags;
       return this.allTags.filter(t => t.toLowerCase().includes(q));
     },
@@ -718,6 +725,8 @@ createApp({
     },
 
     onInput(e) { this.liveQuery = e.target.value; },
+    onGenreSearchInput(e) { this.liveGenreSearch = e.target.value; },
+    onTagSearchInput(e) { this.liveTagSearch = e.target.value; },
   },
 }).directive('click-outside', {
   mounted(el, binding) {
