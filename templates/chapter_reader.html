@@ -224,6 +224,23 @@
       user-select: none;
     }
 
+    /* ── CANVAS BUFFER (opt-in, 2026-09-21) ──
+       Fixed-height segments, decoupled from page boundaries -- see the
+       "CANVAS BUFFER" JS section below for the full design. Unlike
+       .page-slot, these are created once per chapter/volume open and never
+       torn down during ordinary scrolling; height is always exactly
+       CB_SEGMENT_HEIGHT_PX (block flow handles positioning, same as
+       .page-slot). No margin-bottom/page-gap here -- gaps between pages
+       fall out naturally from the globalY-based row mapping (a gap row
+       simply has no paint job dispatched for it, leaving the canvas's own
+       cleared background showing through), not from CSS spacing between
+       segments. */
+    .canvas-segment {
+      display: block;
+      width: 100%;
+      background: #000;
+    }
+
     /* ── PROGRESS BAR ── */
     .frag-progress {
       position: fixed;
@@ -1282,6 +1299,25 @@
     </div>
   </div>
 
+  <!-- Canvas buffer (long-strip only, opt-in experimental) -->
+  <div id="settingsCanvasBufferWrap" style="display:none">
+    <div class="settings-section-title">Canvas buffer (experimental)</div>
+    <div class="settings-row">
+      <span class="settings-row-label">Use canvas buffer</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsCanvasBufferToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
+    <div class="settings-preload" id="settingsCanvasBufferSegmentsWrap" style="display:none">
+      <span class="settings-preload-label">Buffer size</span>
+      <div class="settings-preload-right">
+        <input class="settings-preload-range" type="range" min="5" max="40" step="1" value="15" id="settingsCanvasBufferRange">
+        <span class="settings-preload-value" id="settingsCanvasBufferValue">15</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Single page settings -->
   <div id="settingsSingleOptions" style="display:none">
     <div class="settings-section-title">Single page settings</div>
@@ -1819,7 +1855,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
-    { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1 },
+    { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
+      canvasBufferEnabled: false, canvasBufferSegments: 15 },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -1837,6 +1874,28 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     TIER2_RADIUS = r * 2;
     document.getElementById('settingsPreloadValue').textContent = `±${r}`;
     document.getElementById('settingsPreloadRange').value = r;
+  }
+
+  // Both defined further below (CANVAS BUFFER section) -- declared with
+  // `function` (hoisted) so forward-referencing them here is safe.
+  function applyCanvasBufferEnabled(enabled) {
+    readerSettings.canvasBufferEnabled = enabled;
+    const wrap = document.getElementById('settingsCanvasBufferSegmentsWrap');
+    if (wrap) wrap.style.display = enabled ? '' : 'none';
+    if (readerSettings.mode !== 'long-strip') return; // takes effect next time long-strip activates
+    if (enabled) {
+      cbActivate();
+    } else {
+      cbDeactivate();
+      setVirtualY(virtualY);
+    }
+  }
+
+  function applyCanvasBufferSegments(n) {
+    readerSettings.canvasBufferSegments = n;
+    const valEl = document.getElementById('settingsCanvasBufferValue');
+    if (valEl) valEl.textContent = String(n);
+    if (cbActive) { cbDeactivate(); cbActivate(); }
   }
 
   // Build manifest with current padding setting
@@ -2755,6 +2814,296 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
+  // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21) ──────────────────
+  // An alternative long-strip renderer, active only when
+  // readerSettings.canvasBufferEnabled is on -- a fully parallel path next
+  // to the <img> slot pool above, never touching it (mirrors this file's
+  // existing single-page-vs-long-strip separation). See CLAUDE.md's errors
+  // log for why this exists: canvas content bypasses the browser's own
+  // predictive tile-raster scheduling entirely (fixes the black-flick/
+  // laggy-decel bugs), but the 2026-09-03 canvas attempt did every
+  // ctx.drawImage() call synchronously on the main thread across up to 80
+  // full-page-height canvases recreated on every scroll shift, which is
+  // the likely cause of the Android freeze that got it reverted.
+  //
+  // This version fixes both of that version's structural risks:
+  //   1. A small, FIXED number of FIXED-HEIGHT (CB_SEGMENT_HEIGHT_PX)
+  //      canvases, decoupled from page boundaries entirely -- created once
+  //      per activation and recycled by reassignment (cbRecenter), never
+  //      torn down/recreated during ordinary scrolling.
+  //   2. Every decode (fetch+createImageBitmap) and every drawImage() call
+  //      happens inside static/reader_canvas_worker.js via
+  //      transferControlToOffscreen() -- zero canvas API calls on the main
+  //      thread. The main thread only computes geometry and posts small
+  //      {segmentIndex, url, row-range} job descriptions.
+  //
+  // Painting is incremental and direction-aware, not a whole-segment blit:
+  // each not-yet-fully-painted segment tracks filledFromTop/filledFromBottom
+  // independently, and canvasBufferTick (called from the same native-scroll
+  // pipeline as the <img> path -- see syncScrollPosition/scrollend/
+  // _settledTick below) advances whichever edge is nearest the current
+  // scroll direction by a bounded chunk each tick. This means whichever
+  // pixels the user will reach soonest get painted first, and a single
+  // scroll gesture never triggers one huge synchronous paint.
+  const CB_SEGMENT_HEIGHT_PX = 1000;
+  const CB_FILL_CHUNK_PX     = 300;   // rows advanced per candidate segment per tick
+  const CB_MAX_SEGS_PER_TICK = 3;     // how many segments get work in a single tick
+
+  let cbWorker       = null;
+  let cbActive        = false;
+  let cbSegments      = [];  // ordered array; DOM order === ascending startGlobalY, always
+  let cbLastVirtualY  = null;
+
+  function cbSegmentCount() {
+    return Math.max(1, Math.round(readerSettings.canvasBufferSegments ?? 15));
+  }
+
+  function cbEnsureWorker() {
+    if (!cbWorker) cbWorker = new Worker(apiUrl('/static/reader_canvas_worker.js'));
+    return cbWorker;
+  }
+
+  function cbGridFloor(y) {
+    return Math.floor(y / CB_SEGMENT_HEIGHT_PX) * CB_SEGMENT_HEIGHT_PX;
+  }
+
+  // Manifest entries overlapping [y0, y1) -- same firstIndexAfter binary
+  // search already used elsewhere in this file for the identical lookup.
+  function cbPagesOverlapping(y0, y1) {
+    if (manifest.length === 0) return [];
+    const startIdx = Math.max(0, firstIndexAfter(y0));
+    const out = [];
+    for (let i = startIdx; i < manifest.length; i++) {
+      const entry = manifest[i];
+      if (entry.globalY >= y1) break;
+      if (entry.globalY + entry.scaledH > y0) out.push(entry);
+    }
+    return out;
+  }
+
+  function cbNaturalDims(entry) {
+    const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
+    const p = chDims?.pages?.[entry.localIdx];
+    return p ? { iw: p.w, ih: p.h } : null;
+  }
+
+  // Proactively resolves entry.url for any given entries missing it (same
+  // ensureChapterUrls used by the <img> path's own loadEntry) -- called
+  // whenever segments are (re)assigned so cbBuildJobs, which only ever
+  // reads an already-resolved entry.url, rarely finds one missing.
+  function cbEnsureUrlsFor(entries) {
+    const byChapter = new Map();
+    for (const e of entries) {
+      if (e.url) continue;
+      if (!byChapter.has(e.chapterId)) byChapter.set(e.chapterId, []);
+      byChapter.get(e.chapterId).push(e);
+    }
+    for (const [cid, list] of byChapter) {
+      ensureChapterUrls(cid).then(urls => {
+        for (const e of list) if (!e.url) e.url = urls[e.localIdx] || '';
+      });
+    }
+  }
+
+  // Builds drawImage row-range jobs covering [y0, y1) of one segment
+  // (segStartY = that segment's own startGlobalY, for the destY offset).
+  // A page whose url/dims aren't resolved yet is simply skipped for this
+  // call -- cbEnsureUrlsFor above makes that rare in practice; a missed
+  // range gets a fresh full pass next time this segment is reassigned.
+  function cbBuildJobs(segStartY, y0, y1) {
+    const jobs = [];
+    for (const entry of cbPagesOverlapping(y0, y1)) {
+      if (!entry.url) continue;
+      const nat = cbNaturalDims(entry);
+      if (!nat) continue;
+      const pageTop = entry.globalY, pageBottom = entry.globalY + entry.scaledH;
+      const dy0 = Math.max(y0, pageTop), dy1 = Math.min(y1, pageBottom);
+      if (dy1 <= dy0) continue;
+      const scaleY = entry.scaledH / nat.ih; // dest px per source px
+      jobs.push({
+        url: entry.url,
+        iw:  nat.iw,
+        sy0: (dy0 - pageTop) / scaleY,
+        sy1: (dy1 - pageTop) / scaleY,
+        destY: dy0 - segStartY,
+        destH: dy1 - dy0,
+      });
+    }
+    return jobs;
+  }
+
+  // Recomputes which grid-aligned [start, start+CB_SEGMENT_HEIGHT_PX) range
+  // each of the N segments should cover, centered on centerY. Segments
+  // already covering a still-wanted range are left completely untouched
+  // (existing paint progress preserved) -- only segments whose range fell
+  // out of the window get reassigned, pulled from whichever segments are
+  // now stale. Mirrors _shiftConveyorWindow's "only touch what changed"
+  // principle, but recycles existing elements instead of destroying them.
+  function cbRecenter(centerY, force = false) {
+    if (cbSegments.length === 0) return;
+    const n = cbSegmentCount();
+    const maxStart = Math.max(0, cbGridFloor(Math.max(0, cursorY - 1)) - (n - 1) * CB_SEGMENT_HEIGHT_PX);
+    let bufStart = cbGridFloor(centerY) - Math.floor(n / 2) * CB_SEGMENT_HEIGHT_PX;
+    bufStart = Math.max(0, Math.min(bufStart, maxStart));
+
+    const curStart = cbSegments[0].startGlobalY;
+    if (!force && curStart === bufStart) return;
+
+    const wanted = [];
+    for (let i = 0; i < n; i++) wanted.push(bufStart + i * CB_SEGMENT_HEIGHT_PX);
+    const wantedSet = new Set(wanted);
+
+    const have  = new Map(cbSegments.filter(s => wantedSet.has(s.startGlobalY)).map(s => [s.startGlobalY, s]));
+    const stale = cbSegments.filter(s => !wantedSet.has(s.startGlobalY));
+    let staleIdx = 0;
+    const next = [];
+    for (const w of wanted) {
+      let seg = have.get(w);
+      if (!seg) {
+        seg = stale[staleIdx++];
+        seg.startGlobalY     = w;
+        seg.endGlobalY       = w + CB_SEGMENT_HEIGHT_PX;
+        seg.filledFromTop    = 0;
+        seg.filledFromBottom = 0;
+        cbWorker?.postMessage({ type: 'assign', segmentIndex: seg.workerIndex, startGlobalY: w });
+      }
+      next.push(seg);
+    }
+    cbSegments = next;
+
+    // Re-parent every segment into a single fragment in ascending-Y order,
+    // then reinsert as one block -- correct (idempotent) whether or not a
+    // given segment's DOM position actually needs to change, and keeps DOM
+    // order === array order === ascending Y, which native scroll layout
+    // depends on.
+    const frag = document.createDocumentFragment();
+    for (const seg of cbSegments) frag.appendChild(seg.el);
+    readerInner.insertBefore(frag, bottomSpacer);
+
+    const newCoordOffset = _computeCoordOffset(centerY);
+    if (newCoordOffset !== coordOffset) {
+      const delta = coordOffset - newCoordOffset;
+      coordOffset = newCoordOffset;
+      reader.scrollTop += delta;
+    }
+    cbSyncSpacers();
+    cbEnsureUrlsFor(cbPagesOverlapping(bufStart, bufStart + n * CB_SEGMENT_HEIGHT_PX));
+  }
+
+  // Pixel-space analog of _syncSpacers -- segments have fixed, known
+  // start/end so this needs no manifest[windowLo/windowHi] lookup.
+  function cbSyncSpacers() {
+    if (cbSegments.length === 0) {
+      topSpacer.style.height = '0px';
+      bottomSpacer.style.height = '0px';
+      return;
+    }
+    topSpacer.style.height = (cbSegments[0].startGlobalY - coordOffset) + 'px';
+    const windowEndY = cbSegments[cbSegments.length - 1].endGlobalY;
+    const safeWindowEndY = Math.min(cursorY, coordOffset + SAFE_PHYSICAL_HEIGHT);
+    bottomSpacer.style.height = Math.max(0, safeWindowEndY - windowEndY) + 'px';
+  }
+
+  // Advances whichever not-fully-painted segments are nearest the viewport
+  // in the current scroll direction by a bounded chunk each call -- see the
+  // section header above for why this is incremental rather than a whole-
+  // segment blit. Safe to call every tick; a fully-painted segment is
+  // filtered out up front and costs nothing.
+  function cbDispatchFill(scrollingDown) {
+    if (cbSegments.length === 0) return;
+    const candidates = cbSegments.filter(s => s.filledFromTop + s.filledFromBottom < CB_SEGMENT_HEIGHT_PX);
+    candidates.sort((a, b) => scrollingDown ? a.startGlobalY - b.startGlobalY : b.startGlobalY - a.startGlobalY);
+    for (const seg of candidates.slice(0, CB_MAX_SEGS_PER_TICK)) {
+      const remaining = CB_SEGMENT_HEIGHT_PX - seg.filledFromTop - seg.filledFromBottom;
+      const chunk = Math.min(CB_FILL_CHUNK_PX, remaining);
+      let y0, y1;
+      if (scrollingDown) {
+        y0 = seg.startGlobalY + seg.filledFromTop;
+        y1 = y0 + chunk;
+        seg.filledFromTop += chunk;
+      } else {
+        y1 = seg.endGlobalY - seg.filledFromBottom;
+        y0 = y1 - chunk;
+        seg.filledFromBottom += chunk;
+      }
+      const jobs = cbBuildJobs(seg.startGlobalY, y0, y1);
+      if (jobs.length) cbWorker?.postMessage({ type: 'paint', segmentIndex: seg.workerIndex, jobs });
+    }
+  }
+
+  // ── ACTIVATE / DEACTIVATE ──
+  // widthCssOverride lets geometry-change callers (zoom/padding/resize)
+  // pass the just-recomputed width directly rather than relying on
+  // currentLongStripEffectiveW() re-reading potentially-stale layout.
+  function cbActivate(widthCssOverride) {
+    if (cbActive) return;
+    cbActive = true;
+    _clearSlotPool();
+    windowLo = 0; windowHi = -1;
+
+    const n = cbSegmentCount();
+    const widthCss = widthCssOverride ?? currentLongStripEffectiveW();
+    const dpr = window.devicePixelRatio || 1;
+    cbSegments = [];
+    const frag = document.createDocumentFragment();
+    const initSegments = [];
+    for (let i = 0; i < n; i++) {
+      const el = document.createElement('canvas');
+      el.className = 'canvas-segment';
+      el.style.height = CB_SEGMENT_HEIGHT_PX + 'px';
+      el.width  = Math.round(widthCss * dpr);
+      el.height = Math.round(CB_SEGMENT_HEIGHT_PX * dpr);
+      frag.appendChild(el);
+      cbSegments.push({ el, workerIndex: i, startGlobalY: -1, endGlobalY: -1, filledFromTop: 0, filledFromBottom: 0 });
+      initSegments.push({ index: i, canvas: el.transferControlToOffscreen() });
+    }
+    readerInner.insertBefore(frag, bottomSpacer);
+
+    cbEnsureWorker().postMessage(
+      { type: 'init', segments: initSegments, widthCss, dpr },
+      initSegments.map(s => s.canvas)
+    );
+
+    cbLastVirtualY = virtualY;
+    cbRecenter(virtualY, true);
+    // Prime the immediately-visible area faster than the normal per-tick
+    // chunk rate would -- activation isn't itself a scroll tick, so
+    // without this the buffer would sit blank until the user first moves.
+    // Repeated calls are cheap: each just advances filledFromTop/Bottom
+    // counters and posts more (small) paint jobs; the worker processes its
+    // own queue at whatever rate real decodes actually finish.
+    for (let i = 0; i < 12; i++) cbDispatchFill(true);
+  }
+
+  function cbDeactivate() {
+    if (!cbActive) return;
+    cbActive = false;
+    for (const seg of cbSegments) seg.el.remove();
+    cbSegments = [];
+    if (cbWorker) { cbWorker.terminate(); cbWorker = null; }
+  }
+
+  // ── TICK: called from the same native-scroll pipeline as the <img>
+  // path's syncScrollPosition/scrollend/_settledTick (see the call sites
+  // below) -- direction is derived from virtualY's own delta since the
+  // last tick, which already accounts for both native touch/fling scroll
+  // and the BLE scroller's own scrollTop-driven loop, since both funnel
+  // through the same reader.scrollTop -> virtualY path. ──
+  function canvasBufferTick(isSettled = false) {
+    if (manifest.length === 0 || cbSegments.length === 0) return;
+    const deltaY = cbLastVirtualY === null ? 0 : (virtualY - cbLastVirtualY);
+    const scrollingDown = deltaY >= 0;
+    cbLastVirtualY = virtualY;
+
+    const bufStart = cbSegments[0].startGlobalY;
+    const bufEnd   = cbSegments[cbSegments.length - 1].endGlobalY;
+    const margin = 2 * CB_SEGMENT_HEIGHT_PX;
+    if (isSettled || virtualY - bufStart < margin || bufEnd - virtualY < margin) {
+      cbRecenter(virtualY, isSettled);
+    }
+    cbDispatchFill(scrollingDown);
+  }
+
   // updateProgressBar()/scheduleProgressSave() each do several full-manifest
   // linear scans (getCurrentGlobalPageIdx, checkChapterCompletion, the
   // active-chapter/active-page lookups inside updateProgressBar itself) plus
@@ -2825,6 +3174,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         saveReadingProgress(chapterList[chapterList.length - 1].id);
       }
     }
+    if (readerSettings.canvasBufferEnabled && cbActive) {
+      canvasBufferTick();
+      return;
+    }
     const idxAtTop = firstIndexAfter(virtualY);
     if (idxAtTop - windowLo < EDGE_MARGIN || windowHi - idxAtTop < EDGE_MARGIN) {
       recenterConveyor();
@@ -2874,7 +3227,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }, { passive: true });
 
   if (supportsScrollEnd) {
-    reader.addEventListener('scrollend', () => recenterConveyor(true), { passive: true });
+    reader.addEventListener('scrollend', () => {
+      (readerSettings.canvasBufferEnabled && cbActive) ? canvasBufferTick(true) : recenterConveyor(true);
+    }, { passive: true });
   }
 
   // Screen lock/unlock (or any other backgrounding of the WebView) can leave
@@ -2918,7 +3273,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const cur = reader.scrollTop;
     if (cur === _settledLast) {
       _settledTicks++;
-      if (_settledTicks >= 2) { _settledRaf = null; recenterConveyor(true); return; }
+      if (_settledTicks >= 2) {
+        _settledRaf = null;
+        (readerSettings.canvasBufferEnabled && cbActive) ? canvasBufferTick(true) : recenterConveyor(true);
+        return;
+      }
     } else {
       _settledTicks = 0;
       _settledLast  = cur;
@@ -2931,10 +3290,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const maxY = Math.max(0, cursorY - viewH);
     virtualY = Math.max(0, Math.min(newY, maxY));
     if (manifest.length === 0) return;
-    const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
-    const count  = Math.min(SLOT_COUNT, manifest.length);
-    const target = Math.max(0, Math.min(currentIdx - Math.floor(count / 2), manifest.length - count));
-    _rebuildConveyorWindow(target, virtualY);
+    if (readerSettings.canvasBufferEnabled && cbActive) {
+      cbRecenter(virtualY, true);
+      for (let i = 0; i < 12; i++) cbDispatchFill(true);
+    } else {
+      const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+      const count  = Math.min(SLOT_COUNT, manifest.length);
+      const target = Math.max(0, Math.min(currentIdx - Math.floor(count / 2), manifest.length - count));
+      _rebuildConveyorWindow(target, virtualY);
+    }
     updateProgressBar();
     scheduleProgressSave();
   }
@@ -2963,14 +3327,25 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   if (manifest.length > 0) {
-    const count  = Math.min(SLOT_COUNT, manifest.length);
-    const target = Math.max(0, Math.min(startGlobalIdx - Math.floor(count / 2), manifest.length - count));
-    _rebuildConveyorWindow(target, virtualY);
+    if (readerSettings.canvasBufferEnabled && readerSettings.mode === 'long-strip') {
+      cbActivate();
+    } else {
+      const count  = Math.min(SLOT_COUNT, manifest.length);
+      const target = Math.max(0, Math.min(startGlobalIdx - Math.floor(count / 2), manifest.length - count));
+      _rebuildConveyorWindow(target, virtualY);
+    }
   }
 
   // Prime the URL cache for the opening chapter, then let the tier system
-  // load only the pages around the starting position.
+  // load only the pages around the starting position. Skipped when the
+  // canvas buffer is the active long-strip renderer -- it does its own
+  // fetching inside the worker (see cbActivate/cbEnsureUrlsFor); the <img>
+  // tier1/tier2 system's own slot-pool guards make this harmless to call
+  // regardless (assignedSlot stays all -1 so nothing touches an empty
+  // slotPool), but it would still dispatch duplicate fetches for the same
+  // opening pages for no benefit.
   ensureChapterUrls(chapterId).then(() => {
+    if (readerSettings.canvasBufferEnabled && readerSettings.mode === 'long-strip') return;
     prefetchAroundIndex(startGlobalIdx);
   });
 
@@ -3499,10 +3874,24 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const anchorGlobalIdx = manifest.indexOf(anchorEntry);
 
     recomputeGeometry(readerSettings.padding, effectiveW);
-    applyManifestToSlots();
 
-    setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
-    prefetchAroundIndex(anchorGlobalIdx);
+    const targetY = manifest[anchorGlobalIdx].globalY + offsetIntoPage;
+    if (readerSettings.canvasBufferEnabled && cbActive) {
+      // Segment canvases ARE sized to the reader's width, which is exactly
+      // what changed here (zoom/rotate/resize) -- a full reactivate at the
+      // new width is simplest and correct; see applyPaddingSetting's own
+      // comment for why this path always fully reactivates rather than
+      // resizing segments in place.
+      cbDeactivate();
+      virtualY = targetY;
+      cbActivate(effectiveW);
+      updateProgressBar();
+      scheduleProgressSave();
+    } else {
+      applyManifestToSlots();
+      setVirtualY(targetY);
+      prefetchAroundIndex(anchorGlobalIdx);
+    }
   }
 
   // Zoom slider label update (no-op on layout for now)
@@ -3569,6 +3958,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   const settingsPaddingToggle    = document.getElementById('settingsPaddingToggle');
   const settingsDirLTR           = document.getElementById('settingsDirLTR');
   const settingsDirRTL           = document.getElementById('settingsDirRTL');
+  const settingsCanvasBufferToggle = document.getElementById('settingsCanvasBufferToggle');
 
   function openSettingsPanel() {
     settingsPanel.classList.add('open');
@@ -3600,6 +3990,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const r = readerSettings.preloadRadius ?? 7;
     document.getElementById('settingsPreloadValue').textContent = `±${r}`;
     document.getElementById('settingsPreloadRange').value = r;
+    // Canvas buffer: long-strip only, mirrors the preload slider's own
+    // shown-only-when-relevant pattern.
+    const canvasBufferWrap = document.getElementById('settingsCanvasBufferWrap');
+    if (canvasBufferWrap) canvasBufferWrap.style.display = isLong ? '' : 'none';
+    settingsCanvasBufferToggle.checked = !!readerSettings.canvasBufferEnabled;
+    document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
+      readerSettings.canvasBufferEnabled ? '' : 'none';
+    const cbN = readerSettings.canvasBufferSegments ?? 15;
+    document.getElementById('settingsCanvasBufferValue').textContent = String(cbN);
+    document.getElementById('settingsCanvasBufferRange').value = cbN;
     // PDF quality: only show for PDF sources
     const pdfQualityWrap = document.getElementById('settingsPdfQualityWrap');
     if (pdfQualityWrap) pdfQualityWrap.style.display = isPdf ? '' : 'none';
@@ -3661,6 +4061,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     saveReaderSettings();
   });
 
+  // Canvas buffer toggle + size slider
+  settingsCanvasBufferToggle.addEventListener('change', () => {
+    applyCanvasBufferEnabled(settingsCanvasBufferToggle.checked);
+    saveReaderSettings();
+  });
+  document.getElementById('settingsCanvasBufferRange').addEventListener('input', (e) => {
+    applyCanvasBufferSegments(Number(e.target.value));
+    saveReaderSettings();
+  });
+
   // ── PDF QUALITY ──
 
   function syncPdfQualityUI(val) {
@@ -3713,9 +4123,23 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     recomputeGeometry(readerSettings.padding);
     applyPageGapVar(readerSettings.padding);
-    applyManifestToSlots();
 
-    setVirtualY(manifest[anchorGlobalIdx].globalY + offsetIntoPage);
+    const targetY = manifest[anchorGlobalIdx].globalY + offsetIntoPage;
+    if (readerSettings.canvasBufferEnabled && cbActive) {
+      // Segment canvases don't need to change size for a padding toggle
+      // (width is unaffected), but their content is now positioned
+      // against the freshly-recomputed geometry above -- simplest to
+      // fully reactivate rather than try to reconcile partially-painted
+      // segments against shifted page boundaries in place.
+      cbDeactivate();
+      virtualY = targetY;
+      cbActivate();
+      updateProgressBar();
+      scheduleProgressSave();
+    } else {
+      applyManifestToSlots();
+      setVirtualY(targetY);
+    }
   }
 
   // ── SINGLE PAGE MODE ──
@@ -4510,10 +4934,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
           newAnchor = chEntries[chEntries.length - 1] || manifest[0];
         }
         const newTargetY = newAnchor ? newAnchor.globalY + Math.min(offsetIntoPage, newAnchor.scaledH) : 0;
-        // setVirtualY always does a full _rebuildConveyorWindow (no
-        // shift-only path, unlike spGotoIdx above), so every slot in the
-        // window genuinely reloads.
-        setVirtualY(newTargetY);
+        if (readerSettings.canvasBufferEnabled && cbActive) {
+          // buildManifest() just replaced every manifest entry (fresh
+          // dims.json), so any canvas segment whose numeric [start, end)
+          // range happens to still match its pre-refresh range would
+          // otherwise be left showing stale painted content -- cbRecenter
+          // only repaints segments whose range actually changed. A full
+          // deactivate/reactivate guarantees every segment gets a fresh
+          // paint against the new manifest, same principle as the padding/
+          // zoom geometry-change paths above.
+          cbDeactivate();
+          virtualY = newTargetY;
+          cbActivate();
+          updateProgressBar();
+          scheduleProgressSave();
+        } else {
+          // setVirtualY always does a full _rebuildConveyorWindow (no
+          // shift-only path, unlike spGotoIdx above), so every slot in the
+          // window genuinely reloads.
+          setVirtualY(newTargetY);
+        }
       }
     } catch (e) {
       // best-effort -- leave whatever was already showing
