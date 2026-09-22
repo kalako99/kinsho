@@ -1060,6 +1060,15 @@
       text-align: right;
     }
 
+    /* Canvas buffer's own slider row sits directly under a .settings-row
+       toggle switch with no gap between them (unlike the section-title-led
+       Preload slider above, which gets its own clearance from the title's
+       margin-bottom) -- the switch was visually crowding the "Buffer size"
+       label right underneath it. */
+    #settingsCanvasBufferSegmentsWrap {
+      margin-top: 12px;
+    }
+
     /* ── PAGE SLIDER ── */
     .page-slider-wrap {
       display: flex;
