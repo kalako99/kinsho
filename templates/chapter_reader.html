@@ -3853,7 +3853,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     item.addEventListener('click', (e) => {
       e.stopPropagation();
       closeBbMenu();
-      if (ch.id !== chapterId) {
+      // Compare against the ACTUALLY-current chapter (activeChapDropdownIdx,
+      // kept live by updateProgressBar), not the frozen chapterId this page
+      // was opened with -- both modes can now carry the reader many chapters
+      // past that opening point without a reload, so a stale chapterId
+      // compare would silently no-op a click on the real current chapter the
+      // moment it stopped being the one originally opened.
+      if (i !== activeChapDropdownIdx) {
         goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${ch.id}`);
       }
     });
@@ -3912,26 +3918,31 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   bbPrevChap.disabled = currentChapIdx <= 0;
   bbNextChap.disabled = currentChapIdx >= chapterList.length - 1;
 
+  // Both handlers navigate relative to activeChapDropdownIdx (the actually-
+  // visible chapter, kept live by updateProgressBar), not the frozen
+  // currentChapIdx this page was opened with -- see the dropdown item click
+  // handler's own comment above for why that distinction now matters.
   bbPrevChap.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (currentChapIdx > 0) {
-      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx - 1].id}`);
+    if (activeChapDropdownIdx > 0) {
+      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[activeChapDropdownIdx - 1].id}`);
     }
   });
   bbNextChap.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (currentChapIdx < chapterList.length - 1) {
+    if (activeChapDropdownIdx < chapterList.length - 1) {
       // goToChapter() is a hard navigation (location.replace) -- it never
       // gives long-strip's scroll-crossing detection or single-page mode's
-      // own spForward hook a chance to fire, so clicking straight to the
-      // next chapter (instead of scrolling/flipping past the actual seam)
-      // silently never marked the chapter being left as read, no matter how
-      // much of it had actually been read. An explicit "next chapter" click
-      // is as clear a "done with this one" signal as either of those, so it
-      // marks completion the same way. saveReadingProgress's fetch is
-      // keepalive, so it's safe to fire-and-forget right before navigating.
-      saveReadingProgress(chapterId);
-      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx + 1].id}`);
+      // own checkChapterCompletion hook a chance to fire, so clicking
+      // straight to the next chapter (instead of scrolling/flipping past the
+      // actual seam) silently never marked the chapter being left as read,
+      // no matter how much of it had actually been read. An explicit "next
+      // chapter" click is as clear a "done with this one" signal as either
+      // of those, so it marks completion the same way. saveReadingProgress's
+      // fetch is keepalive, so it's safe to fire-and-forget right before
+      // navigating.
+      saveReadingProgress(chapterList[activeChapDropdownIdx].id);
+      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[activeChapDropdownIdx + 1].id}`);
     }
   });
 
@@ -4260,9 +4271,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   const singlePageView = document.getElementById('singlePageView');
   const spStrip         = document.getElementById('spStrip');
 
-  // All pages flattened in order (same order as manifest)
-  let spCurrentIdx = 0; // index into manifest for current chapter pages
-  const spManifest = manifest.filter(e => e.chapterId === chapterId);
+  // Same flat, whole-manga array as long-strip's own `manifest` -- not a
+  // per-chapter slice. Chapter transitions used to be a full browser reload
+  // (window.location.replace) specifically because this was filtered down
+  // to just the opening chapter, so spGotoIdx had nowhere left to go but a
+  // real navigation the moment idx ran off either end of that slice. Aliasing
+  // the whole manifest instead means a page-turn that crosses a chapter
+  // boundary is just an ordinary index increment -- same prefetch buffer,
+  // same slot-window code, no reload -- exactly like long-strip already
+  // works. See getVisibleChapterId()/updateProgressBar(), which already
+  // read spManifest[spCurrentIdx].chapterId/.localIdx generically and never
+  // assumed a single-chapter slice in the first place.
+  let spCurrentIdx = 0; // global index into spManifest (=== manifest)
+  const spManifest = manifest;
   let lastSeenChapterId = chapterId;
   // Guards checkChapterCompletion's multi-chapter catch-up loop against
   // re-entrancy: it awaits its saves sequentially (see that function), but it
@@ -4733,23 +4754,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function spGotoIdx(idx) {
-    if (idx < 0) {
-      if (currentChapIdx > 0) {
-        const prevChap = chapterList[currentChapIdx - 1];
-        const prevChapPages = manifest.filter(e => e.chapterId === prevChap.id);
-        const lastPageIdx = prevChapPages.length > 0 ? prevChapPages[prevChapPages.length - 1].localIdx : 0;
-        goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${prevChap.id}?page=${lastPageIdx}`);
-      }
-      return;
-    }
-    if (idx >= spManifest.length) {
-      if (currentChapIdx < chapterList.length - 1) {
-        goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${chapterList[currentChapIdx + 1].id}`);
-      } else {
-        showLastPagePopup();
-      }
-      return;
-    }
+    // spManifest is the whole manga now (see its own declaration comment),
+    // so these are only the true start/end of the manga, never a chapter
+    // seam -- an ordinary chapter-to-chapter flip falls straight through to
+    // the normal path below like any other page turn.
+    if (idx < 0) return;
+    if (idx >= spManifest.length) { showLastPagePopup(); return; }
 
     _spMeasureVelocity(idx);
     _spLastFlipDir = idx > spCurrentIdx ? 1 : -1;
@@ -4794,30 +4804,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     updateProgressBar();
 
-    // ── EAGER CHAPTER BOUNDARY PREFETCH ──
-    // Within 5 pages of a chapter edge: load the first/last few pages of the
-    // neighboring chapter so entry.url is populated before the user flips there.
-    const SP_CHAP_PREFETCH_THRESHOLD = 5;
-    const SP_CHAP_PREFETCH_PAGES     = 4; // how many boundary pages to fully load
-    const _pagesFromEnd   = spManifest.length - 1 - idx;
-    const _pagesFromStart = idx;
-    if (_pagesFromEnd <= SP_CHAP_PREFETCH_THRESHOLD && currentChapIdx < chapterList.length - 1) {
-      const nextChapId = chapterList[currentChapIdx + 1].id;
-      const nextStart  = chapterStart[nextChapId];
-      if (nextStart !== undefined) {
-        const hi = Math.min(manifest.length - 1, nextStart + SP_CHAP_PREFETCH_PAGES - 1);
-        for (let i = nextStart; i <= hi; i++) loadEntryTier1(manifest[i]);
-      }
-    }
-    if (_pagesFromStart <= SP_CHAP_PREFETCH_THRESHOLD && currentChapIdx > 0) {
-      const prevChapId = chapterList[currentChapIdx - 1].id;
-      const prevStart  = chapterStart[prevChapId];
-      if (prevStart !== undefined) {
-        const chLen = manifest.filter(e => e.chapterId === prevChapId).length;
-        const lo    = Math.max(prevStart, prevStart + chLen - SP_CHAP_PREFETCH_PAGES);
-        for (let i = lo; i < prevStart + chLen; i++) loadEntryTier1(manifest[i]);
-      }
-    }
+    // No separate chapter-boundary prefetch needed anymore -- _spSchedulePrefetch
+    // just above already reaches ahead/behind by the same tier1/tier2 radius
+    // regardless of chapterId (prefetchAroundIndex operates on flat manifest
+    // indices), so a page a few spots from a chapter seam is buffered exactly
+    // like any other page. The old fixed 4-page eager prefetch here was a
+    // workaround for spManifest being chapter-scoped; it's gone now that
+    // crossing a boundary is just a normal index step.
 
     clearTimeout(spProgressSaveTimer);
     spProgressSaveTimer = setTimeout(() => {
@@ -4969,13 +4962,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const anchorChapId = curEntry ? curEntry.chapterId : chapterId;
         const anchorLocal  = curEntry ? curEntry.localIdx  : 0;
 
+        // spManifest === manifest (same array reference, see its own
+        // declaration) -- buildManifest() already repopulates manifest in
+        // place with entries for every chapter, so spManifest reflects that
+        // automatically; no separate re-filter/re-push needed here anymore.
         buildManifest(readerSettings.padding, viewW);
-        // spManifest is a `const` array (this chapter's slice of
-        // manifest, filtered once at boot) -- buildManifest() above just
-        // replaced manifest's CONTENTS with brand new entry objects, so
-        // this needs re-deriving in place (same reasoning as dims above).
-        spManifest.length = 0;
-        spManifest.push(...manifest.filter(e => e.chapterId === chapterId));
 
         let newIdx = spManifest.findIndex(e => e.chapterId === anchorChapId && e.localIdx === anchorLocal);
         if (newIdx === -1) newIdx = Math.min(Math.max(0, anchorLocal), spManifest.length - 1);
@@ -5388,19 +5379,25 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   async function checkChapterCompletion() {
-    if (readerSettings.mode !== 'long-strip') return;
+    // Mode-agnostic now that single-page mode's spManifest is the same
+    // whole-manga array as long-strip's -- getVisibleChapterId() already
+    // handles both (spManifest[spCurrentIdx].chapterId for single-page,
+    // scroll-position lookup for long-strip).
     if (_creditingInFlight) return;
-    const midY = currentTrackingY();
-
-    let visibleChapterId = chapterId;
-    for (const entry of manifest) {
-      if (midY >= entry.globalY) visibleChapterId = entry.chapterId;
-      else break;
-    }
+    const visibleChapterId = getVisibleChapterId();
 
     if (visibleChapterId !== lastSeenChapterId) {
       const newChapEntries = manifest.filter(e => e.chapterId === visibleChapterId);
-      const readyToCredit = newChapEntries.length < 2 || virtualY >= newChapEntries[1].globalY;
+      // "At least 2 pages into the new chapter before crediting the old one"
+      // -- long-strip measures that in scroll pixels (virtualY); single-page
+      // has no virtualY of its own (it drives spStrip.scrollLeft instead), so
+      // the equivalent check there is the same comparison in global manifest-
+      // index space (spCurrentIdx, since spManifest === manifest).
+      const readyToCredit = newChapEntries.length < 2 || (
+        readerSettings.mode === 'single-page'
+          ? spCurrentIdx >= manifest.indexOf(newChapEntries[1])
+          : virtualY >= newChapEntries[1].globalY
+      );
       if (!readyToCredit) return;
 
       // A big jump (a fast fling, or resuming after the app/WebView was
@@ -5964,7 +5961,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function jumpToPosition(pos) {
     if (pos.chapterId === chapterId) {
       if (readerSettings.mode === 'single-page') {
-        const idx = spManifest.findIndex(e => e.localIdx === pos.pageIdx);
+        // Must match chapterId too now that spManifest spans the whole manga
+        // -- every chapter has its own localIdx 0, 1, 2..., so matching on
+        // localIdx alone (safe back when spManifest was one chapter's own
+        // slice) could land on some other chapter's page sharing the same
+        // number, landing earlier in the flat array.
+        const idx = spManifest.findIndex(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
         if (idx !== -1) spGotoIdx(idx);
       } else {
         const entry = manifest.find(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
@@ -6043,35 +6045,24 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     jumpToPosition(next.firstBm.start);
   }
 
-  // ── SINGLE PAGE COMPLETION HOOK ──
-  const _origSpForward = spForward;
-  spForward = function() {
-    if (readerSettings.mode === 'single-page' && spCurrentIdx >= spManifest.length - 1) {
-      const lastPageIdx = spManifest.length > 0 ? spManifest[spManifest.length - 1].localIdx : 0;
-      // keepalive: true -- same reasoning as saveReadingProgress() above; flipping
-      // past the last page here is immediately followed by leaving the reader.
-      fetch(apiUrl('/api/reading/progress'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          library_id:           libraryId,
-          manga_id:             mangaId,
-          chapter_id:           chapterId,
-          page:                 lastPageIdx,
-          completed_chapter_id: chapterId,
-        }),
-        keepalive: true,
-      });
-    }
-    _origSpForward();
-  };
-
-  // Hook end-to-end check into page changes
-  // scheduleProgressSave (called by setVirtualY) handles long-strip.
-  // For single-page: wrap spGotoIdx.
+  // Hook chapter-completion + end-to-end checks into single-page mode's own
+  // page changes. scheduleProgressSave (called by setVirtualY) already
+  // covers long-strip; single-page mode has no equivalent scroll event to
+  // hang this off, so it's wrapped here instead.
+  //
+  // This used to be a bespoke "did we just leave the last page of the
+  // manifest" check (spForward-only, so it never caught a big jump like a
+  // bookmark click into a much-later chapter), back when spManifest was
+  // filtered to one chapter and reaching its end always meant a real
+  // navigation. Now that spManifest is the whole manga, reusing
+  // checkChapterCompletion() directly gives single-page mode the exact same
+  // multi-chapter-catch-up crediting long-strip already relies on (a big
+  // jump correctly credits every chapter skipped over, not just the
+  // adjacent one), for both ordinary flips and jumpToPosition() jumps.
   const _origSpGotoIdxE2E = spGotoIdx;
   spGotoIdx = function(idx) {
     _origSpGotoIdxE2E(idx);
+    checkChapterCompletion();
     if (bmEndToEndActive) checkEndToEnd();
   };
 
