@@ -1,5 +1,5 @@
 // ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21; one canvas per
-// page 2026-09-23) ──────────────────────────────────────────────────────
+// page 2026-09-22) ──────────────────────────────────────────────────────
 // Owns a small, fixed set of OffscreenCanvas elements transferred from the
 // main-thread long-strip reader (see the "CANVAS BUFFER" section of
 // chapter_reader.html) -- one per PAGE now, not an arbitrary multi-page
@@ -80,7 +80,7 @@ function paintJob(job) {
     // no-ack design (see file header) -- revisit if real-device testing
     // shows this needs a retry.
     //
-    // Logged (2026-09-23) -- a real-device test found EVERY segment black
+    // Logged (2026-09-22) -- a real-device test found EVERY segment black
     // with no other symptom, which this silent catch could fully explain on
     // its own (every single paint job failing the same way, e.g. an auth/
     // cookie issue specific to a fetch() made from inside a worker) --
@@ -93,7 +93,7 @@ function paintJob(job) {
 
 self.onmessage = (e) => {
   const msg = e.data;
-  // Wrapped in try/catch (added 2026-09-23) -- a real-device test found
+  // Wrapped in try/catch (added 2026-09-22) -- a real-device test found
   // EVERY segment black with no other symptom and refresh not recovering
   // it, which a synchronous throw right here (e.g. canvas.getContext('2d')
   // returning null on a device without OffscreenCanvas 2D context support,
@@ -122,8 +122,8 @@ self.onmessage = (e) => {
     case 'assign': {
       const ctx = ctxBySegment.get(msg.segmentIndex);
       if (ctx) {
-        // Segments are page-aligned now (2026-09-22), not a fixed grid, so
-        // a reassigned segment's own height can differ from what it had
+        // Each slot is exactly one page now, and pages vary in height, so
+        // a reassigned slot's own height can differ from what it had
         // before -- resize the backing store to match. This already
         // clears the canvas and resets the 2D context's transform (per
         // spec, changing width/height does both, even to the same value),

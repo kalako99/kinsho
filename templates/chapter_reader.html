@@ -224,7 +224,7 @@
       user-select: none;
     }
 
-    /* ── CANVAS BUFFER (opt-in, 2026-09-21; one canvas per page 2026-09-23)
+    /* ── CANVAS BUFFER (opt-in, 2026-09-21; one canvas per page 2026-09-22)
        See the "CANVAS BUFFER" JS section below for the full design. Unlike
        .page-slot, these are created once per chapter/volume open and never
        torn down during ordinary scrolling; height is set per-canvas in JS
@@ -2910,7 +2910,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21; simplified to
-  // one-canvas-per-page 2026-09-23) ──────────────────────────────────────
+  // one-canvas-per-page 2026-09-22) ──────────────────────────────────────
   // An alternative long-strip renderer, active only when
   // readerSettings.canvasBufferEnabled is on -- a fully parallel path next
   // to the <img> slot pool above, never touching it (mirrors this file's
@@ -2974,7 +2974,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // (404, syntax error, an unsupported-Worker-feature exception before
       // the script's own try/catch in onmessage could ever run) fires this
       // event on the main thread with zero other symptom beyond "nothing
-      // ever paints," matching the 2026-09-23 real-device report exactly.
+      // ever paints," matching the 2026-09-22 real-device report exactly.
       cbWorker.onerror = (e) => {
         console.error('[canvas buffer] worker error', e.message, e.filename, e.lineno);
       };
