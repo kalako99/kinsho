@@ -224,22 +224,21 @@
       user-select: none;
     }
 
-    /* ── CANVAS BUFFER (opt-in, 2026-09-21; page-aligned 2026-09-22) ──
-       Segments sized to roughly CB_SEGMENT_TARGET_HEIGHT_PX but snapped to
-       real page boundaries -- see the "CANVAS BUFFER" JS section below for
-       the full design (and why: a fixed pixel grid caused a visible seam
-       every few images). Unlike .page-slot, these are created once per
-       chapter/volume open and never torn down during ordinary scrolling;
-       height is set per-segment in JS to match its own assigned range
-       (block flow handles positioning, same as .page-slot). No
-       margin-bottom/page-gap here -- gaps between pages fall out naturally
-       from the globalY-based row mapping (a gap row simply has no paint
-       job dispatched for it, leaving the canvas's own cleared background
-       showing through), not from CSS spacing between segments. */
+    /* ── CANVAS BUFFER (opt-in, 2026-09-21; one canvas per page 2026-09-23)
+       See the "CANVAS BUFFER" JS section below for the full design. Unlike
+       .page-slot, these are created once per chapter/volume open and never
+       torn down during ordinary scrolling; height is set per-canvas in JS
+       to match its own assigned page's scaledH (block flow handles
+       positioning, same as .page-slot). Unlike the old multi-page-segment
+       version, a canvas now maps 1:1 to one page, so the padding-between-
+       images gap needs the same real margin-bottom .page-slot already uses
+       -- there's no "segment interior" left to leave an unpainted gap row
+       inside of. */
     .canvas-segment {
       display: block;
       width: 100%;
       background: #000;
+      margin-bottom: var(--page-gap, 0px);
     }
 
     /* ── PROGRESS BAR ── */
@@ -2910,7 +2909,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21) ──────────────────
+  // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21; simplified to
+  // one-canvas-per-page 2026-09-23) ──────────────────────────────────────
   // An alternative long-strip renderer, active only when
   // readerSettings.canvasBufferEnabled is on -- a fully parallel path next
   // to the <img> slot pool above, never touching it (mirrors this file's
@@ -2922,51 +2922,48 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // full-page-height canvases recreated on every scroll shift, which is
   // the likely cause of the Android freeze that got it reverted.
   //
-  // This version fixes both of that version's structural risks:
-  //   1. A small, FIXED number of canvases, each sized to hold roughly
-  //      CB_SEGMENT_TARGET_HEIGHT_PX worth of content but snapped to real
-  //      page boundaries (2026-09-22, see the seam-bug note below) --
-  //      created once per activation and recycled by reassignment
-  //      (cbRecenter), never torn down/recreated during ordinary scrolling.
+  // This is a deliberate return to that original design's simplicity --
+  // one canvas per PAGE, not an arbitrary multi-page segment -- now that
+  // the actual freeze mechanism is understood and fixed differently:
+  //   1. A small number of canvases (user-adjustable, see
+  //      readerSettings.canvasBufferSegments -- not renamed, still just a
+  //      count of pool slots), each sized to exactly one page and created
+  //      once per activation, then recycled by reassignment (cbRecenter)
+  //      -- never torn down/recreated during ordinary scrolling. This
+  //      alone was never the actual freeze cause (confirmed 2026-09-21 by
+  //      reading the reverted commit) but keeping it anyway costs nothing
+  //      and matches this file's established "recycle, don't recreate"
+  //      principle for every other slot pool in the reader.
   //   2. Every decode (fetch+createImageBitmap) and every drawImage() call
-  //      happens inside static/reader_canvas_worker.js via
+  //      still happens inside static/reader_canvas_worker.js via
   //      transferControlToOffscreen() -- zero canvas API calls on the main
-  //      thread. The main thread only computes geometry and posts small
-  //      {segmentIndex, url, row-range} job descriptions.
+  //      thread. THIS is the actual fix for the 2026-09-03 freeze; the
+  //      per-segment-vs-per-page granularity was never the culprit.
   //
-  // Segment boundaries snap to page edges, never a raw pixel grid
-  // (2026-09-22): a <canvas> is promoted to its own independent GPU
-  // compositor layer even with no CSS hint requesting it (this project's
-  // own history -- see the reverted 75b2e35's design comment), so two
-  // adjacent segments' shared edge can round to different device pixels
-  // depending on exact scroll position -- the identical mechanism behind
-  // the pre-2026-08-12 <img> seam bug. A fixed-pixel-grid first version of
-  // this put that edge in the middle of arbitrary page content, which read
-  // as an obvious seam every few images on real-device testing; snapping
-  // every boundary to an actual page-to-page transition means any residual
-  // rounding mismatch lands on an already-natural content break instead --
-  // the same way the old per-page canvas mode (one canvas per page, so
-  // every boundary was already page-aligned by construction) apparently
-  // never had this reported against it.
+  // One canvas per page also sidesteps the whole page-aligned-segment-
+  // boundary problem the 2026-09-21/22 segment version needed real work to
+  // solve: a <canvas> is promoted to its own independent GPU compositor
+  // layer even with no CSS hint requesting it, so two adjacent canvases'
+  // shared edge can round to different device pixels depending on exact
+  // scroll position (the identical mechanism as the pre-2026-08-12 <img>
+  // seam bug). With one canvas per page, that shared edge is ALWAYS a real
+  // page boundary by construction -- there is no "segment interior" for it
+  // to ever land in the middle of -- matching how the original 2026-09-03
+  // per-page canvas mode apparently never had this reported at all.
   //
-  // Painting is incremental and direction-aware, not a whole-segment blit:
-  // each not-yet-fully-painted segment tracks filledFromTop/filledFromBottom
-  // independently, and canvasBufferTick (called from the same native-scroll
-  // pipeline as the <img> path -- see syncScrollPosition/scrollend/
-  // _settledTick below) advances whichever edge is nearest the current
-  // scroll direction by a bounded chunk each tick. This means whichever
-  // pixels the user will reach soonest get painted first, and a single
-  // scroll gesture never triggers one huge synchronous paint.
-  const CB_SEGMENT_TARGET_HEIGHT_PX = 1000;
-  const CB_FILL_CHUNK_PX     = 300;   // rows advanced per candidate segment per tick
-  const CB_MAX_SEGS_PER_TICK = 3;     // how many segments get work in a single tick
+  // Painting is atomic per page (a single drawImage per canvas, not an
+  // incremental row-by-row fill -- there's no "partially painted page" to
+  // speak of), and priority-ordered: cbDispatchFill always paints whichever
+  // assigned-but-not-yet-painted pages are numerically closest to the
+  // current reading position first, a bounded number per tick.
+  const CB_MAX_PAGES_PER_TICK = 4;  // how many not-yet-painted canvases get dispatched per tick
 
-  let cbWorker       = null;
-  let cbActive        = false;
-  let cbSegments      = [];  // ordered array; DOM order === ascending startGlobalY, always
-  let cbLastVirtualY  = null;
+  let cbWorker    = null;
+  let cbActive    = false;
+  let cbPages     = [];  // ordered array of {el, workerIndex, globalIdx, painted}; DOM order === array order === ascending globalIdx
+  let cbWindowLo  = 0, cbWindowHi = -1;  // in manifest GLOBAL INDEX space (unlike the old segment version's pixel-Y space)
 
-  function cbSegmentCount() {
+  function cbPageCount() {
     return Math.max(1, Math.round(readerSettings.canvasBufferSegments ?? 15));
   }
 
@@ -2985,81 +2982,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return cbWorker;
   }
 
-  // One segment's [start, end) starting exactly at fromY (must itself
-  // already be a real page boundary -- 0, or some earlier segment's own
-  // end), extending through consecutive whole pages until reaching roughly
-  // CB_SEGMENT_TARGET_HEIGHT_PX -- always at least one full page even if
-  // that page alone exceeds the target, since a segment must never split a
-  // page across its boundary (see the seam-bug note above). Returns null
-  // once fromY is at/past the true end of the manifest.
-  function cbSegmentForward(fromY) {
-    if (manifest.length === 0 || fromY >= cursorY) return null;
-    let idx = firstIndexAfter(fromY);
-    if (idx >= manifest.length) return null;
-    let endY = manifest[idx].globalY + manifest[idx].scaledH;
-    idx++;
-    while (endY - fromY < CB_SEGMENT_TARGET_HEIGHT_PX && idx < manifest.length) {
-      endY = manifest[idx].globalY + manifest[idx].scaledH;
-      idx++;
-    }
-    return [fromY, endY];
-  }
-
-  // Mirror image of cbSegmentForward: one segment ending exactly at toY,
-  // walking backward through whole pages instead.
-  function cbSegmentBackward(toY) {
-    if (manifest.length === 0 || toY <= 0) return null;
-    let idx = Math.min(manifest.length - 1, firstIndexAfter(toY - 1));
-    let startY = manifest[idx].globalY;
-    idx--;
-    while (toY - startY < CB_SEGMENT_TARGET_HEIGHT_PX && idx >= 0) {
-      startY = manifest[idx].globalY;
-      idx--;
-    }
-    return [startY, toY];
-  }
-
-  // Up to n contiguous, page-aligned [start,end) ranges covering the buffer
-  // centered on centerY -- the "wanted" plan cbRecenter reconciles the
-  // existing segment pool against. Walks forward from a rough starting
-  // point first, then backfills backward if the manifest end was reached
-  // before n ranges were built (keeps the buffer full-sized near the end
-  // of a series instead of just shrinking it).
-  function cbBuildChainCentered(centerY, n) {
-    if (manifest.length === 0) return [];
-    const roughStartY = Math.max(0, centerY - Math.floor(n / 2) * CB_SEGMENT_TARGET_HEIGHT_PX);
-    const roughIdx = Math.min(manifest.length - 1, firstIndexAfter(roughStartY));
-    let cursor = manifest[roughIdx].globalY;
-
-    const ranges = [];
-    while (ranges.length < n) {
-      const seg = cbSegmentForward(cursor);
-      if (!seg) break;
-      ranges.push(seg);
-      cursor = seg[1];
-    }
-    while (ranges.length < n && ranges.length > 0 && ranges[0][0] > 0) {
-      const seg = cbSegmentBackward(ranges[0][0]);
-      if (!seg) break;
-      ranges.unshift(seg);
-    }
-    return ranges;
-  }
-
-  // Manifest entries overlapping [y0, y1) -- same firstIndexAfter binary
-  // search already used elsewhere in this file for the identical lookup.
-  function cbPagesOverlapping(y0, y1) {
-    if (manifest.length === 0) return [];
-    const startIdx = Math.max(0, firstIndexAfter(y0));
-    const out = [];
-    for (let i = startIdx; i < manifest.length; i++) {
-      const entry = manifest[i];
-      if (entry.globalY >= y1) break;
-      if (entry.globalY + entry.scaledH > y0) out.push(entry);
-    }
-    return out;
-  }
-
   function cbNaturalDims(entry) {
     const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
     const p = chDims?.pages?.[entry.localIdx];
@@ -3068,8 +2990,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   // Proactively resolves entry.url for any given entries missing it (same
   // ensureChapterUrls used by the <img> path's own loadEntry) -- called
-  // whenever segments are (re)assigned so cbBuildJobs, which only ever
-  // reads an already-resolved entry.url, rarely finds one missing.
+  // whenever the window is (re)built so cbBuildJob, which only ever reads
+  // an already-resolved entry.url, rarely finds one missing.
   function cbEnsureUrlsFor(entries) {
     const byChapter = new Map();
     for (const e of entries) {
@@ -3084,92 +3006,85 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // Builds drawImage row-range jobs covering [y0, y1) of one segment
-  // (segStartY = that segment's own startGlobalY, for the destY offset).
-  // A page whose url/dims aren't resolved yet is simply skipped for this
-  // call -- cbEnsureUrlsFor above makes that rare in practice; a missed
-  // range gets a fresh full pass next time this segment is reassigned.
-  function cbBuildJobs(segStartY, y0, y1) {
-    const jobs = [];
-    for (const entry of cbPagesOverlapping(y0, y1)) {
-      if (!entry.url) continue;
-      const nat = cbNaturalDims(entry);
-      if (!nat) continue;
-      const pageTop = entry.globalY, pageBottom = entry.globalY + entry.scaledH;
-      const dy0 = Math.max(y0, pageTop), dy1 = Math.min(y1, pageBottom);
-      if (dy1 <= dy0) continue;
-      const scaleY = entry.scaledH / nat.ih; // dest px per source px
-      jobs.push({
-        url: entry.url,
-        iw:  nat.iw,
-        sy0: (dy0 - pageTop) / scaleY,
-        sy1: (dy1 - pageTop) / scaleY,
-        destY: dy0 - segStartY,
-        destH: dy1 - dy0,
-      });
-    }
-    return jobs;
+  // One page = one whole-image drawImage job filling its entire canvas --
+  // no row-range slicing needed now that a canvas never spans more than one
+  // page. null if the url/natural dims aren't resolved yet (cbEnsureUrlsFor
+  // makes that rare; a missed page gets picked up again next recenter).
+  function cbBuildJob(entry) {
+    if (!entry.url) return null;
+    const nat = cbNaturalDims(entry);
+    if (!nat) return null;
+    return { url: entry.url, iw: nat.iw, sy0: 0, sy1: nat.ih, destY: 0, destH: entry.scaledH };
   }
 
-  // Recomputes which page-aligned [start, end) range each of the N
-  // segments should cover, centered on centerY (see cbBuildChainCentered).
-  // Segments already covering a still-wanted range are left completely
-  // untouched (existing paint progress preserved) -- only segments whose
-  // range fell out of the window get reassigned, pulled from whichever
-  // segments are now stale, including a resize of their canvas (segment
-  // heights vary now that boundaries snap to page edges, unlike the old
-  // fixed-grid version). Mirrors _shiftConveyorWindow's "only touch what
-  // changed" principle, but recycles existing elements instead of
-  // destroying them.
+  // Assigns pool slot `slot` to manifest[globalIdx] (or blanks it if -1,
+  // only possible when the manifest is shorter than the pool itself),
+  // resizing its canvas to that page's own height and telling the worker to
+  // paint it fresh. Never creates/destroys a canvas -- transferControlTo
+  // OffscreenCanvas can only ever happen once per element, at cbActivate.
+  function cbAssignSlot(slot, globalIdx) {
+    slot.globalIdx = globalIdx;
+    slot.painted   = false;
+    if (globalIdx === -1) {
+      slot.el.style.height = '0px';
+      return;
+    }
+    const entry = manifest[globalIdx];
+    slot.el.style.height = entry.scaledH + 'px';
+    cbWorker?.postMessage({ type: 'assign', segmentIndex: slot.workerIndex, heightPx: entry.scaledH });
+  }
+
+  // Recomputes which manifest index each pool slot should show, centered on
+  // centerY. Slots already showing a still-wanted index are left completely
+  // untouched (existing paint preserved) -- only slots showing a no-longer-
+  // wanted index (or nothing) are reassigned to cover whatever wanted index
+  // isn't already covered. Mirrors _shiftConveyorWindow's own "only touch
+  // what changed" principle, but by full reconciliation each call rather
+  // than an incremental delta -- cheap enough at this pool's scale (a few
+  // dozen slots, not thousands of manifest entries).
   function cbRecenter(centerY, force = false) {
-    if (cbSegments.length === 0) return;
-    const n = cbSegmentCount();
-    const wanted = cbBuildChainCentered(centerY, n);
-    if (wanted.length === 0) return;
+    if (cbPages.length === 0 || manifest.length === 0) return;
+    const n = Math.min(cbPageCount(), manifest.length);
+    const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(centerY));
+    const wantedLo = Math.max(0, Math.min(centerIdx - Math.floor(n / 2), manifest.length - n));
+    const wantedHi = wantedLo + n - 1;
 
-    if (!force) {
-      const cur = cbSegments[0];
-      const first = wanted[0];
-      // The chain is a deterministic, pure function of its own starting
-      // point (a forward walk through manifest content that hasn't
-      // changed) -- if the first range comes out identical, the whole
-      // walk from it reproduces the same chain again, so this is a valid
-      // stand-in for comparing all n ranges.
-      if (cur.startGlobalY === first[0] && cur.endGlobalY === first[1]) return;
+    if (!force && wantedLo === cbWindowLo && wantedHi === cbWindowHi) return;
+
+    const wantedSet = new Set();
+    for (let i = wantedLo; i <= wantedHi; i++) wantedSet.add(i);
+
+    const stillGood = new Set();
+    const free = [];
+    for (const slot of cbPages) {
+      if (slot.globalIdx !== -1 && wantedSet.has(slot.globalIdx)) stillGood.add(slot.globalIdx);
+      else free.push(slot);
     }
 
-    const wantedKeys = new Set(wanted.map(([s, e]) => s + ':' + e));
-    const have  = new Map(cbSegments.filter(s => wantedKeys.has(s.startGlobalY + ':' + s.endGlobalY))
-                                     .map(s => [s.startGlobalY + ':' + s.endGlobalY, s]));
-    const stale = cbSegments.filter(s => !wantedKeys.has(s.startGlobalY + ':' + s.endGlobalY));
-    let staleIdx = 0;
-    const next = [];
-    for (const [s, e] of wanted) {
-      let seg = have.get(s + ':' + e);
-      if (!seg) {
-        seg = stale[staleIdx++];
-        seg.startGlobalY     = s;
-        seg.endGlobalY       = e;
-        seg.filledFromTop    = 0;
-        seg.filledFromBottom = 0;
-        const heightPx = e - s;
-        seg.el.style.height = heightPx + 'px';
-        // dpr not sent here -- the worker already tracks its own from
-        // init/setWidth and re-applies it on every resize (see its own
-        // 'assign' handler comment).
-        cbWorker?.postMessage({ type: 'assign', segmentIndex: seg.workerIndex, startGlobalY: s, heightPx });
-      }
-      next.push(seg);
+    let freeI = 0;
+    for (let i = wantedLo; i <= wantedHi; i++) {
+      if (stillGood.has(i)) continue;
+      cbAssignSlot(free[freeI++], i);
     }
-    cbSegments = next;
+    // Only reachable when manifest.length < cbPageCount() -- more pool
+    // slots than there are pages to fill; the rest just stay blank.
+    while (freeI < free.length) cbAssignSlot(free[freeI++], -1);
 
-    // Re-parent every segment into a single fragment in ascending-Y order,
-    // then reinsert as one block -- correct (idempotent) whether or not a
-    // given segment's DOM position actually needs to change, and keeps DOM
-    // order === array order === ascending Y, which native scroll layout
-    // depends on.
+    cbWindowLo = wantedLo;
+    cbWindowHi = wantedHi;
+
+    // Re-parent every slot into a single fragment in ascending-index order
+    // (blank slots last, order among themselves irrelevant), then reinsert
+    // as one block -- correct whether or not a given slot's DOM position
+    // actually needs to change, and keeps DOM order === array order ===
+    // ascending index, which native scroll layout depends on.
+    cbPages.sort((a, b) => {
+      if (a.globalIdx === -1) return b.globalIdx === -1 ? 0 : 1;
+      if (b.globalIdx === -1) return -1;
+      return a.globalIdx - b.globalIdx;
+    });
     const frag = document.createDocumentFragment();
-    for (const seg of cbSegments) frag.appendChild(seg.el);
+    for (const slot of cbPages) frag.appendChild(slot.el);
     readerInner.insertBefore(frag, bottomSpacer);
 
     const newCoordOffset = _computeCoordOffset(centerY);
@@ -3179,47 +3094,40 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       reader.scrollTop += delta;
     }
     cbSyncSpacers();
-    cbEnsureUrlsFor(cbPagesOverlapping(wanted[0][0], wanted[wanted.length - 1][1]));
+    cbEnsureUrlsFor(cbPages.filter(s => s.globalIdx !== -1).map(s => manifest[s.globalIdx]));
   }
 
-  // Pixel-space analog of _syncSpacers -- segments have fixed, known
-  // start/end so this needs no manifest[windowLo/windowHi] lookup.
+  // Pixel-space analog of _syncSpacers, in terms of cbWindowLo/cbWindowHi
+  // instead of windowLo/windowHi -- otherwise identical, including not
+  // separately accounting for the last slot's own trailing --page-gap
+  // margin, matching _syncSpacers' own accepted (negligible) approximation.
   function cbSyncSpacers() {
-    if (cbSegments.length === 0) {
+    if (cbWindowHi === -1) {
       topSpacer.style.height = '0px';
       bottomSpacer.style.height = '0px';
       return;
     }
-    topSpacer.style.height = (cbSegments[0].startGlobalY - coordOffset) + 'px';
-    const windowEndY = cbSegments[cbSegments.length - 1].endGlobalY;
+    topSpacer.style.height = (manifest[cbWindowLo].globalY - coordOffset) + 'px';
+    const windowEndY = manifest[cbWindowHi].globalY + manifest[cbWindowHi].scaledH;
     const safeWindowEndY = Math.min(cursorY, coordOffset + SAFE_PHYSICAL_HEIGHT);
     bottomSpacer.style.height = Math.max(0, safeWindowEndY - windowEndY) + 'px';
   }
 
-  // Advances whichever not-fully-painted segments are nearest the viewport
-  // in the current scroll direction by a bounded chunk each call -- see the
-  // section header above for why this is incremental rather than a whole-
-  // segment blit. Safe to call every tick; a fully-painted segment is
-  // filtered out up front and costs nothing.
-  function cbDispatchFill(scrollingDown) {
-    if (cbSegments.length === 0) return;
-    const candidates = cbSegments.filter(s => s.filledFromTop + s.filledFromBottom < (s.endGlobalY - s.startGlobalY));
-    candidates.sort((a, b) => scrollingDown ? a.startGlobalY - b.startGlobalY : b.startGlobalY - a.startGlobalY);
-    for (const seg of candidates.slice(0, CB_MAX_SEGS_PER_TICK)) {
-      const remaining = (seg.endGlobalY - seg.startGlobalY) - seg.filledFromTop - seg.filledFromBottom;
-      const chunk = Math.min(CB_FILL_CHUNK_PX, remaining);
-      let y0, y1;
-      if (scrollingDown) {
-        y0 = seg.startGlobalY + seg.filledFromTop;
-        y1 = y0 + chunk;
-        seg.filledFromTop += chunk;
-      } else {
-        y1 = seg.endGlobalY - seg.filledFromBottom;
-        y0 = y1 - chunk;
-        seg.filledFromBottom += chunk;
-      }
-      const jobs = cbBuildJobs(seg.startGlobalY, y0, y1);
-      if (jobs.length) cbWorker?.postMessage({ type: 'paint', segmentIndex: seg.workerIndex, jobs });
+  // Paints whichever assigned-but-not-yet-painted pages are numerically
+  // closest to the current reading position first, a bounded number per
+  // call -- safe to call every tick; nothing to do costs nothing.
+  function cbDispatchFill() {
+    if (cbPages.length === 0) return;
+    const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+    const candidates = cbPages.filter(s => s.globalIdx !== -1 && !s.painted);
+    if (!candidates.length) return;
+    candidates.sort((a, b) => Math.abs(a.globalIdx - centerIdx) - Math.abs(b.globalIdx - centerIdx));
+    for (const slot of candidates.slice(0, CB_MAX_PAGES_PER_TICK)) {
+      const entry = manifest[slot.globalIdx];
+      const job = cbBuildJob(entry);
+      if (!job) continue;  // url/dims not resolved yet -- picked up again next tick
+      slot.painted = true;  // optimistic, matches this app's existing no-ack worker convention
+      cbWorker?.postMessage({ type: 'paint', segmentIndex: slot.workerIndex, jobs: [job] });
     }
   }
 
@@ -3233,71 +3141,58 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _clearSlotPool();
     windowLo = 0; windowHi = -1;
 
-    const n = cbSegmentCount();
+    const poolSize = Math.min(cbPageCount(), Math.max(1, manifest.length));
     const widthCss = widthCssOverride ?? currentLongStripEffectiveW();
     const dpr = window.devicePixelRatio || 1;
-    cbSegments = [];
+    cbPages = [];
+    cbWindowLo = 0; cbWindowHi = -1;
     const frag = document.createDocumentFragment();
-    const initSegments = [];
-    for (let i = 0; i < n; i++) {
+    const initPages = [];
+    for (let i = 0; i < poolSize; i++) {
       const el = document.createElement('canvas');
       el.className = 'canvas-segment';
-      // Placeholder size only -- the cbRecenter(virtualY, true) call right
-      // below immediately reassigns every segment to its real, page-
-      // aligned range and resizes it to match, since none of them yet
-      // have a startGlobalY/endGlobalY that could match a wanted range.
-      el.style.height = CB_SEGMENT_TARGET_HEIGHT_PX + 'px';
+      el.style.height = '0px';  // cbRecenter below assigns every slot's real size immediately
       el.width  = Math.round(widthCss * dpr);
-      el.height = Math.round(CB_SEGMENT_TARGET_HEIGHT_PX * dpr);
+      el.height = dpr;
       frag.appendChild(el);
-      cbSegments.push({ el, workerIndex: i, startGlobalY: -1, endGlobalY: -1, filledFromTop: 0, filledFromBottom: 0 });
-      initSegments.push({ index: i, canvas: el.transferControlToOffscreen() });
+      cbPages.push({ el, workerIndex: i, globalIdx: -1, painted: false });
+      initPages.push({ index: i, canvas: el.transferControlToOffscreen() });
     }
     readerInner.insertBefore(frag, bottomSpacer);
 
     cbEnsureWorker().postMessage(
-      { type: 'init', segments: initSegments, widthCss, dpr },
-      initSegments.map(s => s.canvas)
+      { type: 'init', segments: initPages, widthCss, dpr },
+      initPages.map(s => s.canvas)
     );
 
-    cbLastVirtualY = virtualY;
     cbRecenter(virtualY, true);
-    // Prime the immediately-visible area faster than the normal per-tick
-    // chunk rate would -- activation isn't itself a scroll tick, so
-    // without this the buffer would sit blank until the user first moves.
-    // Repeated calls are cheap: each just advances filledFromTop/Bottom
-    // counters and posts more (small) paint jobs; the worker processes its
-    // own queue at whatever rate real decodes actually finish.
-    for (let i = 0; i < 12; i++) cbDispatchFill(true);
+    // Prime the whole freshly-assigned pool immediately rather than waiting
+    // for scroll ticks to slowly dispatch it -- exactly enough calls to
+    // cover every slot once, regardless of pool size.
+    for (let i = 0; i < Math.ceil(cbPages.length / CB_MAX_PAGES_PER_TICK); i++) cbDispatchFill();
   }
 
   function cbDeactivate() {
     if (!cbActive) return;
     cbActive = false;
-    for (const seg of cbSegments) seg.el.remove();
-    cbSegments = [];
+    for (const slot of cbPages) slot.el.remove();
+    cbPages = [];
+    cbWindowLo = 0; cbWindowHi = -1;
     if (cbWorker) { cbWorker.terminate(); cbWorker = null; }
   }
 
   // ── TICK: called from the same native-scroll pipeline as the <img>
   // path's syncScrollPosition/scrollend/_settledTick (see the call sites
-  // below) -- direction is derived from virtualY's own delta since the
-  // last tick, which already accounts for both native touch/fling scroll
-  // and the BLE scroller's own scrollTop-driven loop, since both funnel
-  // through the same reader.scrollTop -> virtualY path. ──
+  // below). ──
   function canvasBufferTick(isSettled = false) {
-    if (manifest.length === 0 || cbSegments.length === 0) return;
-    const deltaY = cbLastVirtualY === null ? 0 : (virtualY - cbLastVirtualY);
-    const scrollingDown = deltaY >= 0;
-    cbLastVirtualY = virtualY;
-
-    const bufStart = cbSegments[0].startGlobalY;
-    const bufEnd   = cbSegments[cbSegments.length - 1].endGlobalY;
-    const margin = 2 * CB_SEGMENT_TARGET_HEIGHT_PX;
-    if (isSettled || virtualY - bufStart < margin || bufEnd - virtualY < margin) {
+    if (manifest.length === 0 || cbPages.length === 0) return;
+    const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+    const n = Math.min(cbPageCount(), manifest.length);
+    const margin = Math.max(2, Math.floor(n / 4));
+    if (isSettled || centerIdx - cbWindowLo < margin || cbWindowHi - centerIdx < margin) {
       cbRecenter(virtualY, isSettled);
     }
-    cbDispatchFill(scrollingDown);
+    cbDispatchFill();
   }
 
   // updateProgressBar()/scheduleProgressSave() each do several full-manifest
@@ -3488,7 +3383,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (manifest.length === 0) return;
     if (readerSettings.canvasBufferEnabled && cbActive) {
       cbRecenter(virtualY, true);
-      for (let i = 0; i < 12; i++) cbDispatchFill(true);
+      for (let i = 0; i < Math.ceil(cbPages.length / CB_MAX_PAGES_PER_TICK); i++) cbDispatchFill();
     } else {
       const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
       const count  = Math.min(SLOT_COUNT, manifest.length);

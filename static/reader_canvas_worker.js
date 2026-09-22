@@ -1,31 +1,36 @@
-// ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21) ──────────────────
-// Owns a small, fixed set of OffscreenCanvas segments transferred from the
-// main-thread long-strip reader (see the "canvasBuffer*" section of
-// chapter_reader.html). Every fetch/decode/paint for this feature happens
-// in here, never on the main thread -- see that section's own comment for
-// why (the 2026-09-03 canvas rewrite that was reverted 2026-09-20 did all
-// of its ctx.drawImage() calls on the main thread; this worker exists
-// specifically to not repeat that).
+// ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21; one canvas per
+// page 2026-09-23) ──────────────────────────────────────────────────────
+// Owns a small, fixed set of OffscreenCanvas elements transferred from the
+// main-thread long-strip reader (see the "CANVAS BUFFER" section of
+// chapter_reader.html) -- one per PAGE now, not an arbitrary multi-page
+// segment. Every fetch/decode/paint for this feature happens in here,
+// never on the main thread -- see that section's own comment for why (the
+// 2026-09-03 canvas rewrite that was reverted 2026-09-20 did all of its
+// ctx.drawImage() calls on the main thread; this worker exists
+// specifically to not repeat that -- the per-page-vs-per-segment
+// granularity was never the actual freeze cause).
 //
 // Message protocol (main -> worker), all fire-and-forget:
 //   {type:'init',    segments:[{index, canvas /* transferred OffscreenCanvas */}], widthCss, dpr}
-//   {type:'assign',  segmentIndex, startGlobalY, heightPx} -- segment reassigned to a new
-//                    logical range; heightPx is that range's own height (segments are
-//                    page-aligned, not a fixed grid, so this varies -- see chapter_reader.html's
-//                    cbBuildChainCentered). dpr isn't sent -- the worker already tracks its own
-//                    from init/setWidth. Resizing a canvas clears it AND resets the 2D context's
-//                    transform, so this re-applies ctx.scale(dpr, dpr) too -- a separate
-//                    clearRect is never needed here.
-//   {type:'paint',   segmentIndex, jobs:[{url, iw, ih, sy0, sy1, destY, destH}]}
-//   {type:'releaseUrl', url}                              -- a page fell out of every segment's range
+//   {type:'assign',  segmentIndex, heightPx} -- slot reassigned to a new page; heightPx
+//                    is that page's own scaledH (pages vary in height, unlike the old
+//                    fixed-grid segment version). dpr isn't sent -- the worker already
+//                    tracks its own from init/setWidth. Resizing a canvas clears it AND
+//                    resets the 2D context's transform, so this re-applies
+//                    ctx.scale(dpr, dpr) too -- a separate clearRect is never needed here.
+//   {type:'paint',   segmentIndex, jobs:[{url, iw, ih, sy0, sy1, destY, destH}]} -- always
+//                    exactly one job now (a whole page fills its whole canvas), but jobs
+//                    stays an array for shape continuity with the paint-progress-tracking
+//                    days; nothing currently sends more than one.
+//   {type:'releaseUrl', url}                              -- a page fell out of every slot's range
 //   {type:'setWidth', widthCss}                           -- reader width changed (zoom/rotate)
 //
 // No message is sent back to the main thread -- the main thread tracks its
-// own optimistic "what have I already dispatched" bookkeeping (see
-// cbSegments[].filledCount in chapter_reader.html) rather than waiting on
-// acks, since over-dispatching a redundant paint job is harmless (the
-// worker just processes its queue in order) and an ack round-trip buys
-// nothing correctness-wise here.
+// own optimistic "have I already dispatched this page's paint job"
+// bookkeeping (see cbPages[].painted in chapter_reader.html) rather than
+// waiting on acks, since over-dispatching a redundant paint job is
+// harmless (the worker just processes its queue in order) and an ack
+// round-trip buys nothing correctness-wise here.
 
 const ctxBySegment = new Map();   // segmentIndex -> CanvasRenderingContext2D
 let widthCss = 0;
