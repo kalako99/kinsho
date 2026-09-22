@@ -3025,6 +3025,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function cbAssignSlot(slot, globalIdx) {
     slot.globalIdx = globalIdx;
     slot.painted   = false;
+    slot.pending   = false;  // stale wait for whatever page this slot showed before, if any
     if (globalIdx === -1) {
       slot.el.style.height = '0px';
       return;
@@ -3119,16 +3120,57 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function cbDispatchFill() {
     if (cbPages.length === 0) return;
     const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
-    const candidates = cbPages.filter(s => s.globalIdx !== -1 && !s.painted);
+    const candidates = cbPages.filter(s => s.globalIdx !== -1 && !s.painted && !s.pending);
     if (!candidates.length) return;
     candidates.sort((a, b) => Math.abs(a.globalIdx - centerIdx) - Math.abs(b.globalIdx - centerIdx));
     for (const slot of candidates.slice(0, CB_MAX_PAGES_PER_TICK)) {
-      const entry = manifest[slot.globalIdx];
+      cbDispatchOne(slot, manifest[slot.globalIdx]);
+    }
+  }
+
+  // Dispatches (or schedules) exactly one slot's paint job. entry.url is
+  // very often already resolved by cbEnsureUrlsFor's earlier proactive
+  // batch call (from cbRecenter) by the time this runs -- but NEVER on the
+  // very first call right after activation: a Promise's .then() callback
+  // is *always* deferred to a microtask, even for an already-resolved
+  // promise, so cbRecenter's own synchronous call into this function
+  // (the priming loop in cbActivate) is guaranteed to see entry.url still
+  // null every single time, regardless of source type or caching. Silently
+  // giving up there (as an earlier version of this function did) meant the
+  // very first paint attempt for every page always failed and nothing ever
+  // re-triggered it until the next scroll tick -- on a chapter opened and
+  // never scrolled, that's never. This is very likely the actual root
+  // cause of BOTH real-device "everything stays black" reports so far
+  // (this rewrite's and the multi-page-segment version's before it, which
+  // had the identical assume-url-is-already-there gap). Fixed the way the
+  // rest of this reader already handles this exact class of race
+  // (loadEntryTier1/_applyUrlToSlot): resolve the url inline via its own
+  // ensureChapterUrls(...).then(...) chain when it isn't already there,
+  // and actually dispatch the paint once it resolves, instead of just
+  // hoping some other future call catches it.
+  function cbDispatchOne(slot, entry) {
+    if (entry.url) {
       const job = cbBuildJob(entry);
-      if (!job) continue;  // url/dims not resolved yet -- picked up again next tick
+      if (!job) return;  // natural dims not resolved yet either -- rare, retried next tick
       slot.painted = true;  // optimistic, matches this app's existing no-ack worker convention
       cbWorker?.postMessage({ type: 'paint', segmentIndex: slot.workerIndex, jobs: [job] });
+      return;
     }
+    if (slot.pending) return;  // already waiting on this exact slot's own resolution below
+    slot.pending = true;
+    const targetGlobalIdx = slot.globalIdx;
+    ensureChapterUrls(entry.chapterId).then(urls => {
+      slot.pending = false;
+      if (!entry.url) entry.url = urls[entry.localIdx] || '';
+      // The slot may have been reassigned to a different page while this
+      // was resolving (window moved on since) -- only paint if it's still
+      // showing the same page this lookup was actually for.
+      if (slot.globalIdx !== targetGlobalIdx || slot.painted) return;
+      const job = cbBuildJob(entry);
+      if (!job) return;
+      slot.painted = true;
+      cbWorker?.postMessage({ type: 'paint', segmentIndex: slot.workerIndex, jobs: [job] });
+    });
   }
 
   // ── ACTIVATE / DEACTIVATE ──
@@ -3155,7 +3197,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       el.width  = Math.round(widthCss * dpr);
       el.height = dpr;
       frag.appendChild(el);
-      cbPages.push({ el, workerIndex: i, globalIdx: -1, painted: false });
+      cbPages.push({ el, workerIndex: i, globalIdx: -1, painted: false, pending: false });
       initPages.push({ index: i, canvas: el.transferControlToOffscreen() });
     }
     readerInner.insertBefore(frag, bottomSpacer);
