@@ -66,7 +66,7 @@ function paintJob(job) {
       0, job.sy0, job.iw, job.sy1 - job.sy0,   // source rect (bitmap's own natural px)
       0, job.destY, widthCss, job.destH        // dest rect (CSS-px space; ctx already scaled by dpr)
     );
-  }).catch(() => {
+  }).catch((err) => {
     // A failed fetch/decode here just leaves this row range unpainted --
     // the main thread's own retry logic for the page itself (its ordinary
     // tier1/tier2 flow) isn't threaded through this worker, so a genuinely
@@ -74,17 +74,37 @@ function paintJob(job) {
     // cut of an opt-in, experimental feature; matches this worker's
     // no-ack design (see file header) -- revisit if real-device testing
     // shows this needs a retry.
+    //
+    // Logged (2026-09-23) -- a real-device test found EVERY segment black
+    // with no other symptom, which this silent catch could fully explain on
+    // its own (every single paint job failing the same way, e.g. an auth/
+    // cookie issue specific to a fetch() made from inside a worker) --
+    // console.error from a worker surfaces in DevTools (including over CDP/
+    // adb) same as any other console call, so this alone may be enough to
+    // pin down the actual failure next time this is tested.
+    console.error('[canvas buffer worker] paint job failed', job.url, err);
   });
 }
 
 self.onmessage = (e) => {
   const msg = e.data;
-  switch (msg.type) {
+  // Wrapped in try/catch (added 2026-09-23) -- a real-device test found
+  // EVERY segment black with no other symptom and refresh not recovering
+  // it, which a synchronous throw right here (e.g. canvas.getContext('2d')
+  // returning null on a device without OffscreenCanvas 2D context support,
+  // making the next line's ctx.scale() throw) would fully explain: nothing
+  // in chapter_reader.html currently listens for cbWorker.onerror, so an
+  // uncaught exception here previously had no visible symptom at all beyond
+  // "nothing ever paints." console.error surfaces in DevTools (including
+  // over CDP/adb) the same as any other console call.
+  try {
+    switch (msg.type) {
     case 'init': {
       widthCss = msg.widthCss;
       dpr = msg.dpr;
       for (const { index, canvas } of msg.segments) {
         const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('canvas.getContext(2d) returned null for segment ' + index);
         ctx.scale(dpr, dpr);
         ctxBySegment.set(index, ctx);
       }
@@ -124,5 +144,8 @@ self.onmessage = (e) => {
       }
       break;
     }
+    }
+  } catch (err) {
+    console.error('[canvas buffer worker] onmessage threw for', msg.type, err);
   }
 };

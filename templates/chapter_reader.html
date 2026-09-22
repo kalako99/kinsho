@@ -2085,6 +2085,18 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   let TIER1_RADIUS = readerSettings.preloadRadius ?? 7;
   let TIER2_RADIUS = TIER1_RADIUS * 2;
 
+  // A stalled-but-not-failed fetch (degraded/busy NAS disk, not a real network
+  // error) fires neither onload nor onerror -- img.decode()'s promise just
+  // never settles, which without a timeout leaves entry._realDispatched (or
+  // the tier3 thumbnail's own dataset flag) permanently true, blocking every
+  // future retry AND the tier3 fallback forever, with no reload short of a
+  // full window rebuild able to help (and not even that, if the same slow
+  // condition is still ongoing when the rebuild's own fresh fetch is
+  // dispatched). Matches this app's existing 15s abort precedent (the
+  // reading-progress multi-chapter credit fetch). Applied to _applyUrlToSlot,
+  // loadEntryTier1, and loadEntryTier3 -- see each one's own comment.
+  const PAGE_LOAD_TIMEOUT_MS = 15000;
+
   // Registry of detached prefetch Image() objects still in flight, keyed by
   // the manifest global index they were requested for. loadEntryTier1/
   // prefetchEntryTier2 each create a plain `new Image()` with no reference
@@ -2248,7 +2260,30 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const img = new Image();
     inFlightPrefetchImages.set(globalIdx, img);
     img.src = entry.url;
+
+    // settled guards against both the timeout and the real decode() outcome
+    // firing (a timeout doesn't actually cancel the underlying request --
+    // img.src = '' below does that, but the already-in-flight decode() call
+    // itself still settles on its own later, and must be a no-op by then).
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      inFlightPrefetchImages.delete(globalIdx);
+      img._cancelled = true;
+      img.src = '';  // abandons the stalled request, same as cancelInFlightPredecode
+      entry._realDispatched = false;
+      if (retriesLeft > 0) {
+        setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
+      } else {
+        loadEntryTier3(entry);
+      }
+    }, PAGE_LOAD_TIMEOUT_MS);
+
     img.decode().then(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       inFlightPrefetchImages.delete(globalIdx);
       // Re-resolve the slot at paint time, not the assignedSlot value read
       // above -- the conveyor can shift while this decode is in flight,
@@ -2258,6 +2293,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       slotPool[curSi].img.src = entry.url;
       entry.loaded = true;
     }).catch(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
       inFlightPrefetchImages.delete(globalIdx);
       // A deliberate cancelInFlightPredecode() (this slot was vacated while
       // still decoding) also rejects this same decode() promise -- retrying
@@ -2377,7 +2415,29 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const img = new Image();
       inFlightPrefetchImages.set(globalIdx, img);
       img.src = url;
+
+      // Same settled-guard timeout as _applyUrlToSlot's own -- a stalled
+      // (not failed) fetch fires neither onload nor onerror, so without this
+      // a slow disk leaves this entry's tier1 slot permanently un-upgraded
+      // AND keeps occupying one of the browser's handful of per-origin
+      // connections indefinitely (the exact "stuck pending 10+ seconds"
+      // scenario cancelStalePrefetches already exists to catch for a page
+      // that's scrolled OUT of range -- this is the same fix for one that's
+      // still very much in range and just isn't finishing).
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        inFlightPrefetchImages.delete(globalIdx);
+        img._cancelled = true;
+        img.src = '';
+        onFail();
+      }, PAGE_LOAD_TIMEOUT_MS);
+
       img.decode().then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         inFlightPrefetchImages.delete(globalIdx);
         // Re-resolve the slot fresh here, not a value captured before this
         // decode started -- the conveyor can shift (or fully rebuild
@@ -2394,6 +2454,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         if (curSi !== -1) slotPool[curSi].img.src = url;
         onSuccess();
       }).catch(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         inFlightPrefetchImages.delete(globalIdx);
         // A deliberate cancelStalePrefetches() (src cleared because this
         // page fell outside even the tier2 range) also rejects this same
@@ -2477,10 +2540,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // are exhausted, so a permanently-failed fetch still falls through to
     // the thumbnail below instead of being left broken forever.
     if (entry._realDispatched) return;
-    if (!img.dataset.thumbSet) {
-      img.dataset.thumbSet = '1';
-      img.src = thumbUrl(entry);
-    }
+    if (img.dataset.thumbSet) return;
+    img.dataset.thumbSet = '1';
+
+    // Same stalled-fetch concern as _applyUrlToSlot/loadEntryTier1, applied
+    // to this last-resort fallback itself: previously a hung (not failed)
+    // thumbnail request left thumbSet permanently set with nothing ever
+    // clearing it, so a page that reached tier3 under a slow/busy disk could
+    // end up with no path back to ever showing anything at all.
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      img.src = '';
+      delete img.dataset.thumbSet;  // a future tier3 sweep over this entry can retry
+    }, PAGE_LOAD_TIMEOUT_MS);
+    img.onload = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+    };
+    img.onerror = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      delete img.dataset.thumbSet;
+    };
+    img.src = thumbUrl(entry);
   }
 
   function prefetchAroundIndex(centerGlobalIdx, signal, direction = 0) {
@@ -2885,7 +2971,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function cbEnsureWorker() {
-    if (!cbWorker) cbWorker = new Worker(apiUrl('/static/reader_canvas_worker.js'));
+    if (!cbWorker) {
+      cbWorker = new Worker(apiUrl('/static/reader_canvas_worker.js'));
+      // Nothing previously listened for this -- a worker SCRIPT load failure
+      // (404, syntax error, an unsupported-Worker-feature exception before
+      // the script's own try/catch in onmessage could ever run) fires this
+      // event on the main thread with zero other symptom beyond "nothing
+      // ever paints," matching the 2026-09-23 real-device report exactly.
+      cbWorker.onerror = (e) => {
+        console.error('[canvas buffer] worker error', e.message, e.filename, e.lineno);
+      };
+    }
     return cbWorker;
   }
 
