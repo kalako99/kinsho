@@ -1319,10 +1319,10 @@
       </label>
     </div>
     <div class="settings-preload" id="settingsCanvasBufferSegmentsWrap" style="display:none">
-      <span class="settings-preload-label">Buffer size</span>
+      <span class="settings-preload-label">Max memory</span>
       <div class="settings-preload-right">
-        <input class="settings-preload-range" type="range" min="5" max="40" step="1" value="15" id="settingsCanvasBufferRange">
-        <span class="settings-preload-value" id="settingsCanvasBufferValue">15</span>
+        <input class="settings-preload-range" type="range" min="200" max="3000" step="100" value="500" id="settingsCanvasBufferRange">
+        <span class="settings-preload-value" id="settingsCanvasBufferValue">500 MB</span>
       </div>
     </div>
   </div>
@@ -1865,7 +1865,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
     { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
-      canvasBufferEnabled: false, canvasBufferSegments: 15 },
+      canvasBufferEnabled: false, canvasBufferMB: 500 },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -1900,10 +1900,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  function applyCanvasBufferSegments(n) {
-    readerSettings.canvasBufferSegments = n;
-    const valEl = document.getElementById('settingsCanvasBufferValue');
-    if (valEl) valEl.textContent = String(n);
+  // Applied on slider release ('change'), not every 'input' tick -- a
+  // budget change fully reactivates the buffer, far too heavy to repeat
+  // for every pixel of a drag (the label alone updates live, see below).
+  function applyCanvasBufferMB(mb) {
+    readerSettings.canvasBufferMB = mb;
+    cbUpdateBufferLabel();
     if (cbActive) { cbDeactivate(); cbActivate(); }
   }
 
@@ -2909,74 +2911,104 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21; simplified to
-  // one-canvas-per-page 2026-09-22) ──────────────────────────────────────
+  // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21; one canvas per page
+  // 2026-09-22; memory-budgeted 2026-09-23) ─────────────────────────────────
   // An alternative long-strip renderer, active only when
   // readerSettings.canvasBufferEnabled is on -- a fully parallel path next
-  // to the <img> slot pool above, never touching it (mirrors this file's
-  // existing single-page-vs-long-strip separation). See CLAUDE.md's errors
-  // log for why this exists: canvas content bypasses the browser's own
-  // predictive tile-raster scheduling entirely (fixes the black-flick/
-  // laggy-decel bugs), but the 2026-09-03 canvas attempt did every
-  // ctx.drawImage() call synchronously on the main thread across up to 80
-  // full-page-height canvases recreated on every scroll shift, which is
-  // the likely cause of the Android freeze that got it reverted.
+  // to the <img> slot pool above (mirrors this file's existing
+  // single-page-vs-long-strip separation). Canvas content keeps its painted
+  // pixels for as long as the canvas exists, so it isn't subject to the
+  // browser dropping pre-rastered tiles of off-screen <img> pages while idle
+  // (the confirmed black-flick mechanism, see CLAUDE.md).
   //
-  // This is a deliberate return to that original design's simplicity --
-  // one canvas per PAGE, not an arbitrary multi-page segment -- now that
-  // the actual freeze mechanism is understood and fixed differently:
-  //   1. A small number of canvases (user-adjustable, see
-  //      readerSettings.canvasBufferSegments -- not renamed, still just a
-  //      count of pool slots), each sized to exactly one page and created
-  //      once per activation, then recycled by reassignment (cbRecenter)
-  //      -- never torn down/recreated during ordinary scrolling. This
-  //      alone was never the actual freeze cause (confirmed 2026-09-21 by
-  //      reading the reverted commit) but keeping it anyway costs nothing
-  //      and matches this file's established "recycle, don't recreate"
-  //      principle for every other slot pool in the reader.
-  //   2. Every decode (fetch+createImageBitmap) and every drawImage() call
-  //      still happens inside static/reader_canvas_worker.js via
-  //      transferControlToOffscreen() -- zero canvas API calls on the main
-  //      thread. THIS is the actual fix for the 2026-09-03 freeze; the
-  //      per-segment-vs-per-page granularity was never the culprit.
+  // One <canvas> per page. Every decode and drawImage() happens inside
+  // static/reader_canvas_worker.js via transferControlToOffscreen() -- zero
+  // canvas API calls on the main thread.
   //
-  // One canvas per page also sidesteps the whole page-aligned-segment-
-  // boundary problem the 2026-09-21/22 segment version needed real work to
-  // solve: a <canvas> is promoted to its own independent GPU compositor
-  // layer even with no CSS hint requesting it, so two adjacent canvases'
-  // shared edge can round to different device pixels depending on exact
-  // scroll position (the identical mechanism as the pre-2026-08-12 <img>
-  // seam bug). With one canvas per page, that shared edge is ALWAYS a real
-  // page boundary by construction -- there is no "segment interior" for it
-  // to ever land in the middle of -- matching how the original 2026-09-03
-  // per-page canvas mode apparently never had this reported at all.
-  //
-  // Painting is atomic per page (a single drawImage per canvas, not an
-  // incremental row-by-row fill -- there's no "partially painted page" to
-  // speak of), and priority-ordered: cbDispatchFill always paints whichever
-  // assigned-but-not-yet-painted pages are numerically closest to the
-  // current reading position first, a bounded number per tick.
+  // How many pages are kept is decided by a MEMORY budget
+  // (readerSettings.canvasBufferMB), not a page count: a painted canvas
+  // holds raw RGBA pixels at device resolution, so a tall webtoon page at
+  // dpr 1.75 costs ~66MB while a normal manga page costs a few MB. A fixed
+  // count of 15 took the renderer to ~1.7GB on a real tablet (2026-09-23).
+  // The current page and its two neighbours are always kept, even over
+  // budget; beyond that, pages are added nearest-first, alternating forward
+  // and backward, until the next one wouldn't fit. Canvases are created
+  // lazily as the window needs them and recycled by reassignment
+  // (cbRecenter), never torn down during ordinary scrolling; a canvas that
+  // leaves the window is shrunk to 1x1 in the worker to free its memory.
   const CB_MAX_PAGES_PER_TICK = 4;  // how many not-yet-painted canvases get dispatched per tick
+  const CB_MAX_PAINT_RETRIES  = 2;  // per assignment, after a worker-reported fetch/decode failure
+  const CB_MIN_MB = 200, CB_MAX_MB = 3000, CB_DEFAULT_MB = 500;
 
   let cbWorker    = null;
   let cbActive    = false;
-  let cbPages     = [];  // ordered array of {el, workerIndex, globalIdx, painted}; DOM order === array order === ascending globalIdx
-  let cbWindowLo  = 0, cbWindowHi = -1;  // in manifest GLOBAL INDEX space (unlike the old segment version's pixel-Y space)
+  let cbPages     = [];  // {el, workerIndex, globalIdx, painted, pending, retries}; DOM order === array order === ascending globalIdx
+  let cbWindowLo  = 0, cbWindowHi = -1;  // manifest global-index range currently covered
+  let cbWidthCss  = 0;
+  let cbDpr       = 1;
 
-  function cbPageCount() {
-    return Math.max(1, Math.round(readerSettings.canvasBufferSegments ?? 15));
+  function cbBudgetMB() {
+    const mb = Number(readerSettings.canvasBufferMB) || CB_DEFAULT_MB;
+    return Math.min(CB_MAX_MB, Math.max(CB_MIN_MB, mb));
+  }
+
+  // Backing-store size of one painted page canvas, in bytes (RGBA).
+  function cbPageBytes(entry, widthCss, dpr) {
+    return Math.max(1, Math.round(widthCss * dpr)) * Math.max(1, Math.round(entry.scaledH * dpr)) * 4;
+  }
+
+  // The contiguous manifest range [lo, hi] the buffer should cover around
+  // centerIdx for the current budget -- see the section comment above.
+  function cbWantedRange(centerIdx, widthCss = cbWidthCss, dpr = cbDpr) {
+    const budget = cbBudgetMB() * 1024 * 1024;
+    const bytes = (i) => cbPageBytes(manifest[i], widthCss, dpr);
+    let lo = centerIdx, hi = centerIdx;
+    let used = bytes(centerIdx);
+    if (hi + 1 < manifest.length) used += bytes(++hi);
+    if (lo - 1 >= 0) used += bytes(--lo);
+    let fwd = true, bwd = true;
+    while (fwd || bwd) {
+      if (fwd) {
+        if (hi + 1 < manifest.length && used + bytes(hi + 1) <= budget) used += bytes(++hi);
+        else fwd = false;
+      }
+      if (bwd) {
+        if (lo - 1 >= 0 && used + bytes(lo - 1) <= budget) used += bytes(--lo);
+        else bwd = false;
+      }
+    }
+    return [lo, hi];
+  }
+
+  // Settings-panel label: "500 MB · ≈7 pages" -- the page count is what the
+  // current budget covers around the current position, in this manga.
+  function cbUpdateBufferLabel() {
+    const valEl = document.getElementById('settingsCanvasBufferValue');
+    if (!valEl) return;
+    let pages = '';
+    if (manifest.length > 0) {
+      const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+      const [lo, hi] = cbWantedRange(centerIdx, currentLongStripEffectiveW(), window.devicePixelRatio || 1);
+      pages = ` · ≈${hi - lo + 1} pages`;
+    }
+    valEl.textContent = `${cbBudgetMB()} MB${pages}`;
   }
 
   function cbEnsureWorker() {
     if (!cbWorker) {
       cbWorker = new Worker(apiUrl('/static/reader_canvas_worker.js'));
-      // Nothing previously listened for this -- a worker SCRIPT load failure
-      // (404, syntax error, an unsupported-Worker-feature exception before
-      // the script's own try/catch in onmessage could ever run) fires this
-      // event on the main thread with zero other symptom beyond "nothing
-      // ever paints," matching the 2026-09-22 real-device report exactly.
       cbWorker.onerror = (e) => {
         console.error('[canvas buffer] worker error', e.message, e.filename, e.lineno);
+      };
+      cbWorker.onmessage = (e) => {
+        const msg = e.data;
+        if (msg.type !== 'paintFailed') return;
+        const slot = cbPages.find(s => s.workerIndex === msg.segmentIndex);
+        if (!slot || slot.globalIdx !== msg.globalIdx) return;  // reassigned since -- nothing to retry
+        if (slot.retries >= CB_MAX_PAINT_RETRIES) return;
+        slot.retries++;
+        slot.painted = false;  // picked up again by the next cbDispatchFill
+        setTimeout(cbDispatchFill, 500);
       };
     }
     return cbWorker;
@@ -2989,9 +3021,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // Proactively resolves entry.url for any given entries missing it (same
-  // ensureChapterUrls used by the <img> path's own loadEntry) -- called
-  // whenever the window is (re)built so cbBuildJob, which only ever reads
-  // an already-resolved entry.url, rarely finds one missing.
+  // ensureChapterUrls used by the <img> path's own loadEntry).
   function cbEnsureUrlsFor(entries) {
     const byChapter = new Map();
     for (const e of entries) {
@@ -3006,59 +3036,62 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // One page = one whole-image drawImage job filling its entire canvas --
-  // no row-range slicing needed now that a canvas never spans more than one
-  // page. null if the url/natural dims aren't resolved yet (cbEnsureUrlsFor
-  // makes that rare; a missed page gets picked up again next recenter).
-  function cbBuildJob(entry) {
-    if (!entry.url) return null;
-    const nat = cbNaturalDims(entry);
-    if (!nat) return null;
-    return { url: entry.url, iw: nat.iw, sy0: 0, sy1: nat.ih, destY: 0, destH: entry.scaledH };
+  // Grows the canvas pool to at least n. Canvases are only ever added
+  // during an activation, never removed until cbDeactivate --
+  // transferControlToOffscreen can only happen once per element.
+  function cbEnsurePoolSize(n) {
+    if (cbPages.length >= n) return;
+    const frag = document.createDocumentFragment();
+    const segments = [];
+    while (cbPages.length < n) {
+      const el = document.createElement('canvas');
+      el.className = 'canvas-segment';
+      el.style.height = '0px';
+      el.width = 1;
+      el.height = 1;
+      frag.appendChild(el);
+      const workerIndex = cbPages.length;
+      cbPages.push({ el, workerIndex, globalIdx: -1, painted: false, pending: false, retries: 0 });
+      segments.push({ index: workerIndex, canvas: el.transferControlToOffscreen() });
+    }
+    readerInner.insertBefore(frag, bottomSpacer);
+    cbEnsureWorker().postMessage({ type: 'addSegments', segments }, segments.map(s => s.canvas));
   }
 
-  // Assigns pool slot `slot` to manifest[globalIdx] (or blanks it if -1,
-  // only possible when the manifest is shorter than the pool itself),
-  // resizing its canvas to that page's own height and telling the worker to
-  // paint it fresh. Never creates/destroys a canvas -- transferControlTo
-  // OffscreenCanvas can only ever happen once per element, at cbActivate.
+  // Assigns pool slot `slot` to manifest[globalIdx], or blanks it (-1) and
+  // frees its canvas memory in the worker.
   function cbAssignSlot(slot, globalIdx) {
     slot.globalIdx = globalIdx;
     slot.painted   = false;
     slot.pending   = false;  // stale wait for whatever page this slot showed before, if any
+    slot.retries   = 0;
     if (globalIdx === -1) {
       slot.el.style.height = '0px';
+      cbWorker?.postMessage({ type: 'release', segmentIndex: slot.workerIndex });
       return;
     }
     const entry = manifest[globalIdx];
     slot.el.style.height = entry.scaledH + 'px';
-    cbWorker?.postMessage({ type: 'assign', segmentIndex: slot.workerIndex, heightPx: entry.scaledH });
+    cbWorker?.postMessage({ type: 'assign', segmentIndex: slot.workerIndex, heightPx: entry.scaledH, globalIdx });
   }
 
-  // Recomputes which manifest index each pool slot should show, centered on
-  // centerY. Slots already showing a still-wanted index are left completely
-  // untouched (existing paint preserved) -- only slots showing a no-longer-
-  // wanted index (or nothing) are reassigned to cover whatever wanted index
-  // isn't already covered. Mirrors _shiftConveyorWindow's own "only touch
-  // what changed" principle, but by full reconciliation each call rather
-  // than an incremental delta -- cheap enough at this pool's scale (a few
-  // dozen slots, not thousands of manifest entries).
+  // Recomputes which manifest range the buffer covers, centered on
+  // centerY. Slots already showing a still-wanted index are left untouched
+  // (existing paint preserved) -- only slots showing a no-longer-wanted
+  // index (or nothing) are reassigned.
   function cbRecenter(centerY, force = false) {
-    if (cbPages.length === 0 || manifest.length === 0) return;
-    const n = Math.min(cbPageCount(), manifest.length);
+    if (manifest.length === 0) return;
     const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(centerY));
-    const wantedLo = Math.max(0, Math.min(centerIdx - Math.floor(n / 2), manifest.length - n));
-    const wantedHi = wantedLo + n - 1;
+    const [wantedLo, wantedHi] = cbWantedRange(centerIdx);
 
     if (!force && wantedLo === cbWindowLo && wantedHi === cbWindowHi) return;
 
-    const wantedSet = new Set();
-    for (let i = wantedLo; i <= wantedHi; i++) wantedSet.add(i);
+    cbEnsurePoolSize(wantedHi - wantedLo + 1);
 
     const stillGood = new Set();
     const free = [];
     for (const slot of cbPages) {
-      if (slot.globalIdx !== -1 && wantedSet.has(slot.globalIdx)) stillGood.add(slot.globalIdx);
+      if (slot.globalIdx >= wantedLo && slot.globalIdx <= wantedHi) stillGood.add(slot.globalIdx);
       else free.push(slot);
     }
 
@@ -3067,18 +3100,18 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (stillGood.has(i)) continue;
       cbAssignSlot(free[freeI++], i);
     }
-    // Only reachable when manifest.length < cbPageCount() -- more pool
-    // slots than there are pages to fill; the rest just stay blank.
-    while (freeI < free.length) cbAssignSlot(free[freeI++], -1);
+    // Pool slots left over (the window shrank, e.g. taller pages here than
+    // where the pool was grown) are blanked and their memory freed.
+    for (; freeI < free.length; freeI++) {
+      if (free[freeI].globalIdx !== -1) cbAssignSlot(free[freeI], -1);
+    }
 
     cbWindowLo = wantedLo;
     cbWindowHi = wantedHi;
 
-    // Re-parent every slot into a single fragment in ascending-index order
-    // (blank slots last, order among themselves irrelevant), then reinsert
-    // as one block -- correct whether or not a given slot's DOM position
-    // actually needs to change, and keeps DOM order === array order ===
-    // ascending index, which native scroll layout depends on.
+    // Re-parent every slot in ascending-index order (blank slots last), then
+    // reinsert as one block -- keeps DOM order === array order === ascending
+    // index, which native scroll layout depends on.
     cbPages.sort((a, b) => {
       if (a.globalIdx === -1) return b.globalIdx === -1 ? 0 : 1;
       if (b.globalIdx === -1) return -1;
@@ -3098,10 +3131,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     cbEnsureUrlsFor(cbPages.filter(s => s.globalIdx !== -1).map(s => manifest[s.globalIdx]));
   }
 
-  // Pixel-space analog of _syncSpacers, in terms of cbWindowLo/cbWindowHi
-  // instead of windowLo/windowHi -- otherwise identical, including not
-  // separately accounting for the last slot's own trailing --page-gap
-  // margin, matching _syncSpacers' own accepted (negligible) approximation.
+  // Pixel-space analog of _syncSpacers, in terms of cbWindowLo/cbWindowHi.
   function cbSyncSpacers() {
     if (cbWindowHi === -1) {
       topSpacer.style.height = '0px';
@@ -3118,7 +3148,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // closest to the current reading position first, a bounded number per
   // call -- safe to call every tick; nothing to do costs nothing.
   function cbDispatchFill() {
-    if (cbPages.length === 0) return;
+    if (!cbActive || cbPages.length === 0) return;
     const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
     const candidates = cbPages.filter(s => s.globalIdx !== -1 && !s.painted && !s.pending);
     if (!candidates.length) return;
@@ -3128,48 +3158,32 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
+  function cbPostPaint(slot, entry) {
+    const nat = cbNaturalDims(entry);
+    if (!entry.url || !nat) return;  // not resolvable yet -- retried next tick
+    slot.painted = true;  // optimistic; a worker-reported failure resets it (see cbEnsureWorker)
+    cbWorker?.postMessage({
+      type: 'paint', segmentIndex: slot.workerIndex, globalIdx: slot.globalIdx,
+      url: entry.url, iw: nat.iw, ih: nat.ih, destH: entry.scaledH,
+    });
+  }
+
   // Dispatches (or schedules) exactly one slot's paint job. entry.url is
-  // very often already resolved by cbEnsureUrlsFor's earlier proactive
-  // batch call (from cbRecenter) by the time this runs -- but NEVER on the
-  // very first call right after activation: a Promise's .then() callback
-  // is *always* deferred to a microtask, even for an already-resolved
-  // promise, so cbRecenter's own synchronous call into this function
-  // (the priming loop in cbActivate) is guaranteed to see entry.url still
-  // null every single time, regardless of source type or caching. Silently
-  // giving up there (as an earlier version of this function did) meant the
-  // very first paint attempt for every page always failed and nothing ever
-  // re-triggered it until the next scroll tick -- on a chapter opened and
-  // never scrolled, that's never. This is very likely the actual root
-  // cause of BOTH real-device "everything stays black" reports so far
-  // (this rewrite's and the multi-page-segment version's before it, which
-  // had the identical assume-url-is-already-there gap). Fixed the way the
-  // rest of this reader already handles this exact class of race
-  // (loadEntryTier1/_applyUrlToSlot): resolve the url inline via its own
-  // ensureChapterUrls(...).then(...) chain when it isn't already there,
-  // and actually dispatch the paint once it resolves, instead of just
-  // hoping some other future call catches it.
+  // resolved inline via its own ensureChapterUrls(...).then(...) chain when
+  // it isn't already there -- a Promise's .then() is always deferred to a
+  // microtask, so a synchronous caller right after cbRecenter would
+  // otherwise always see it still null (the 2026-09-22 all-black race).
   function cbDispatchOne(slot, entry) {
-    if (entry.url) {
-      const job = cbBuildJob(entry);
-      if (!job) return;  // natural dims not resolved yet either -- rare, retried next tick
-      slot.painted = true;  // optimistic, matches this app's existing no-ack worker convention
-      cbWorker?.postMessage({ type: 'paint', segmentIndex: slot.workerIndex, jobs: [job] });
-      return;
-    }
-    if (slot.pending) return;  // already waiting on this exact slot's own resolution below
+    if (entry.url) { cbPostPaint(slot, entry); return; }
+    if (slot.pending) return;
     slot.pending = true;
     const targetGlobalIdx = slot.globalIdx;
     ensureChapterUrls(entry.chapterId).then(urls => {
       slot.pending = false;
       if (!entry.url) entry.url = urls[entry.localIdx] || '';
-      // The slot may have been reassigned to a different page while this
-      // was resolving (window moved on since) -- only paint if it's still
-      // showing the same page this lookup was actually for.
+      // The slot may have been reassigned while this was resolving.
       if (slot.globalIdx !== targetGlobalIdx || slot.painted) return;
-      const job = cbBuildJob(entry);
-      if (!job) return;
-      slot.painted = true;
-      cbWorker?.postMessage({ type: 'paint', segmentIndex: slot.workerIndex, jobs: [job] });
+      cbPostPaint(slot, entry);
     });
   }
 
@@ -3183,34 +3197,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _clearSlotPool();
     windowLo = 0; windowHi = -1;
 
-    const poolSize = Math.min(cbPageCount(), Math.max(1, manifest.length));
-    const widthCss = widthCssOverride ?? currentLongStripEffectiveW();
-    const dpr = window.devicePixelRatio || 1;
+    cbWidthCss = widthCssOverride ?? currentLongStripEffectiveW();
+    cbDpr = window.devicePixelRatio || 1;
     cbPages = [];
     cbWindowLo = 0; cbWindowHi = -1;
-    const frag = document.createDocumentFragment();
-    const initPages = [];
-    for (let i = 0; i < poolSize; i++) {
-      const el = document.createElement('canvas');
-      el.className = 'canvas-segment';
-      el.style.height = '0px';  // cbRecenter below assigns every slot's real size immediately
-      el.width  = Math.round(widthCss * dpr);
-      el.height = dpr;
-      frag.appendChild(el);
-      cbPages.push({ el, workerIndex: i, globalIdx: -1, painted: false, pending: false });
-      initPages.push({ index: i, canvas: el.transferControlToOffscreen() });
-    }
-    readerInner.insertBefore(frag, bottomSpacer);
-
-    cbEnsureWorker().postMessage(
-      { type: 'init', segments: initPages, widthCss, dpr },
-      initPages.map(s => s.canvas)
-    );
+    cbEnsureWorker().postMessage({ type: 'init', widthCss: cbWidthCss, dpr: cbDpr });
 
     cbRecenter(virtualY, true);
-    // Prime the whole freshly-assigned pool immediately rather than waiting
-    // for scroll ticks to slowly dispatch it -- exactly enough calls to
-    // cover every slot once, regardless of pool size.
+    // Position the scroll container on virtualY explicitly. cbRecenter only
+    // applies a relative scrollTop delta when coordOffset changes, which
+    // left a freshly-opened reader at scrollTop 0 -- the first scroll sync
+    // then read that as page 1 and moved the whole buffer there ("continue
+    // reading" in canvas mode always opened at page 1 of chapter 1).
+    reader.scrollTop = virtualY - coordOffset;
     for (let i = 0; i < Math.ceil(cbPages.length / CB_MAX_PAGES_PER_TICK); i++) cbDispatchFill();
   }
 
@@ -3221,6 +3220,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     cbPages = [];
     cbWindowLo = 0; cbWindowHi = -1;
     if (cbWorker) { cbWorker.terminate(); cbWorker = null; }
+    // The <img> path's own bookkeeping still says "already loaded" for every
+    // page it had loaded before canvas mode took over (cbActivate cleared
+    // its slots without resetting these), so without this its rebuild
+    // skipped them all and turning canvas mode off left the reader black
+    // until a manual refresh (confirmed live 2026-09-23: 3 of 80 slots had
+    // an image).
+    for (const entry of manifest) {
+      entry.loaded = false;
+      entry._realDispatched = false;
+    }
   }
 
   // ── TICK: called from the same native-scroll pipeline as the <img>
@@ -3229,8 +3238,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function canvasBufferTick(isSettled = false) {
     if (manifest.length === 0 || cbPages.length === 0) return;
     const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
-    const n = Math.min(cbPageCount(), manifest.length);
-    const margin = Math.max(2, Math.floor(n / 4));
+    const margin = Math.max(1, Math.floor((cbWindowHi - cbWindowLo + 1) / 4));
     if (isSettled || centerIdx - cbWindowLo < margin || cbWindowHi - centerIdx < margin) {
       cbRecenter(virtualY, isSettled);
     }
@@ -3425,6 +3433,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (manifest.length === 0) return;
     if (readerSettings.canvasBufferEnabled && cbActive) {
       cbRecenter(virtualY, true);
+      // Same explicit positioning as cbActivate -- without it a bookmark/
+      // chapter jump in canvas mode rebuilt the buffer at the target but
+      // left the view wherever it was.
+      reader.scrollTop = virtualY - coordOffset;
       for (let i = 0; i < Math.ceil(cbPages.length / CB_MAX_PAGES_PER_TICK); i++) cbDispatchFill();
     } else {
       const currentIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
@@ -4141,9 +4153,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     settingsCanvasBufferToggle.checked = !!readerSettings.canvasBufferEnabled;
     document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
       readerSettings.canvasBufferEnabled ? '' : 'none';
-    const cbN = readerSettings.canvasBufferSegments ?? 15;
-    document.getElementById('settingsCanvasBufferValue').textContent = String(cbN);
-    document.getElementById('settingsCanvasBufferRange').value = cbN;
+    document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
+    cbUpdateBufferLabel();
     // PDF quality: only show for PDF sources
     const pdfQualityWrap = document.getElementById('settingsPdfQualityWrap');
     if (pdfQualityWrap) pdfQualityWrap.style.display = isPdf ? '' : 'none';
@@ -4211,7 +4222,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     saveReaderSettings();
   });
   document.getElementById('settingsCanvasBufferRange').addEventListener('input', (e) => {
-    applyCanvasBufferSegments(Number(e.target.value));
+    readerSettings.canvasBufferMB = Number(e.target.value);
+    cbUpdateBufferLabel();
+  });
+  document.getElementById('settingsCanvasBufferRange').addEventListener('change', (e) => {
+    applyCanvasBufferMB(Number(e.target.value));
     saveReaderSettings();
   });
 

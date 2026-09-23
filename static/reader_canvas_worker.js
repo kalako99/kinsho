@@ -1,154 +1,122 @@
 // ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21; one canvas per
-// page 2026-09-22) ──────────────────────────────────────────────────────
-// Owns a small, fixed set of OffscreenCanvas elements transferred from the
-// main-thread long-strip reader (see the "CANVAS BUFFER" section of
-// chapter_reader.html) -- one per PAGE now, not an arbitrary multi-page
-// segment. Every fetch/decode/paint for this feature happens in here,
-// never on the main thread -- see that section's own comment for why (the
-// 2026-09-03 canvas rewrite that was reverted 2026-09-20 did all of its
-// ctx.drawImage() calls on the main thread; this worker exists
-// specifically to not repeat that -- the per-page-vs-per-segment
-// granularity was never the actual freeze cause).
+// page 2026-09-22; memory-budgeted 2026-09-23) ──────────────────────────
+// Owns the OffscreenCanvas elements transferred from the main-thread
+// long-strip reader (see the "CANVAS BUFFER" section of chapter_reader.html)
+// -- one per page. Every fetch/decode/paint for this feature happens in
+// here, never on the main thread (the 2026-09-03 canvas rewrite that was
+// reverted 2026-09-20 did its ctx.drawImage() calls on the main thread).
 //
-// Message protocol (main -> worker), all fire-and-forget:
-//   {type:'init',    segments:[{index, canvas /* transferred OffscreenCanvas */}], widthCss, dpr}
-//   {type:'assign',  segmentIndex, heightPx} -- slot reassigned to a new page; heightPx
-//                    is that page's own scaledH (pages vary in height, unlike the old
-//                    fixed-grid segment version). dpr isn't sent -- the worker already
-//                    tracks its own from init/setWidth. Resizing a canvas clears it AND
-//                    resets the 2D context's transform, so this re-applies
-//                    ctx.scale(dpr, dpr) too -- a separate clearRect is never needed here.
-//   {type:'paint',   segmentIndex, jobs:[{url, iw, ih, sy0, sy1, destY, destH}]} -- always
-//                    exactly one job now (a whole page fills its whole canvas), but jobs
-//                    stays an array for shape continuity with the paint-progress-tracking
-//                    days; nothing currently sends more than one.
-//   {type:'releaseUrl', url}                              -- a page fell out of every slot's range
-//   {type:'setWidth', widthCss}                           -- reader width changed (zoom/rotate)
+// Memory (2026-09-23, measured live on a Galaxy Tab S10 Ultra): a painted
+// canvas holds raw RGBA pixels at device resolution -- a 1056x5133 CSS-px
+// webtoon page at dpr 1.75 is ~66MB, regardless of how small the source
+// WebP file is. The previous version of this file also kept every decoded
+// ImageBitmap cached forever (its releaseUrl message was never sent), which
+// took the renderer from ~265MB to ~1.7GB within seconds and froze this
+// worker. So now: a decoded bitmap is closed the moment the last paint job
+// waiting on it has drawn it (same as the 2026-09-03 version did), a canvas
+// that leaves the buffer is shrunk to 1x1 to free its backing store, and
+// the main thread decides how many pages to keep by a memory budget.
 //
-// No message is sent back to the main thread -- the main thread tracks its
-// own optimistic "have I already dispatched this page's paint job"
-// bookkeeping (see cbPages[].painted in chapter_reader.html) rather than
-// waiting on acks, since over-dispatching a redundant paint job is
-// harmless (the worker just processes its queue in order) and an ack
-// round-trip buys nothing correctness-wise here.
+// Message protocol (main -> worker):
+//   {type:'init',        widthCss, dpr}
+//   {type:'addSegments', segments:[{index, canvas /* transferred OffscreenCanvas */}]}
+//   {type:'assign',      segmentIndex, heightPx, globalIdx} -- canvas now shows manifest[globalIdx]
+//   {type:'release',     segmentIndex}                      -- canvas left the buffer; free its memory
+//   {type:'paint',       segmentIndex, globalIdx, url, iw, ih, destH}
+// Worker -> main:
+//   {type:'paintFailed', segmentIndex, globalIdx} -- fetch/decode failed; main may retry
 
 const ctxBySegment = new Map();   // segmentIndex -> CanvasRenderingContext2D
+const assignedIdx  = new Map();   // segmentIndex -> globalIdx it currently shows (-1 = none)
 let widthCss = 0;
 let dpr = 1;
 
-// url -> { bitmap: ImageBitmap|null, promise: Promise|null }
-// A page can be mid-paint into more than one segment at once (it spans a
-// segment boundary), so decodes are deduped by URL exactly like the
-// existing main-thread tier1/tier2 systems dedupe by manifest index.
-const bitmaps = new Map();
+// url -> { promise, users } -- deduplicates concurrent decodes of the same
+// page (e.g. a slot re-dispatched while its first decode is still in
+// flight). Entries only live while at least one paint job is waiting.
+const decoding = new Map();
 
-function ensureBitmap(url) {
-  let entry = bitmaps.get(url);
-  if (entry && (entry.bitmap || entry.promise)) return entry.promise || Promise.resolve(entry.bitmap);
-  entry = { bitmap: null, promise: null };
-  entry.promise = fetch(url)
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
-    .then(blob => createImageBitmap(blob))
-    .then(bitmap => {
-      entry.bitmap = bitmap;
-      entry.promise = null;
-      return bitmap;
-    })
-    .catch(err => {
-      bitmaps.delete(url);
-      throw err;
-    });
-  bitmaps.set(url, entry);
-  return entry.promise;
+function acquireBitmap(url) {
+  let d = decoding.get(url);
+  if (!d) {
+    d = {
+      users: 0,
+      promise: fetch(url)
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+        .then(blob => createImageBitmap(blob)),
+    };
+    decoding.set(url, d);
+  }
+  d.users++;
+  return d;
 }
 
-function paintJob(job) {
-  return ensureBitmap(job.url).then(bitmap => {
-    const ctx = ctxBySegment.get(job.segmentIndex);
-    if (!ctx) return; // segment was reassigned/torn down while this decode was in flight
-    ctx.drawImage(
-      bitmap,
-      0, job.sy0, job.iw, job.sy1 - job.sy0,   // source rect (bitmap's own natural px)
-      0, job.destY, widthCss, job.destH        // dest rect (CSS-px space; ctx already scaled by dpr)
-    );
-  }).catch((err) => {
-    // A failed fetch/decode here just leaves this row range unpainted --
-    // the main thread's own retry logic for the page itself (its ordinary
-    // tier1/tier2 flow) isn't threaded through this worker, so a genuinely
-    // broken page just stays black in the buffer. Acceptable for a first
-    // cut of an opt-in, experimental feature; matches this worker's
-    // no-ack design (see file header) -- revisit if real-device testing
-    // shows this needs a retry.
-    //
-    // Logged (2026-09-22) -- a real-device test found EVERY segment black
-    // with no other symptom, which this silent catch could fully explain on
-    // its own (every single paint job failing the same way, e.g. an auth/
-    // cookie issue specific to a fetch() made from inside a worker) --
-    // console.error from a worker surfaces in DevTools (including over CDP/
-    // adb) same as any other console call, so this alone may be enough to
-    // pin down the actual failure next time this is tested.
-    console.error('[canvas buffer worker] paint job failed', job.url, err);
+function releaseBitmap(url, d, bitmap) {
+  if (--d.users > 0) return;
+  decoding.delete(url);
+  if (bitmap) { try { bitmap.close(); } catch (err) {} }
+}
+
+function paint(msg) {
+  const d = acquireBitmap(msg.url);
+  d.promise.then(bitmap => {
+    const ctx = ctxBySegment.get(msg.segmentIndex);
+    // Only draw if this canvas still shows the page the job was for -- it
+    // can be reassigned to a different page while the decode is in flight.
+    if (ctx && assignedIdx.get(msg.segmentIndex) === msg.globalIdx) {
+      ctx.drawImage(bitmap, 0, 0, msg.iw, msg.ih, 0, 0, widthCss, msg.destH);
+    }
+    releaseBitmap(msg.url, d, bitmap);
+  }, err => {
+    releaseBitmap(msg.url, d, null);
+    console.error('[canvas buffer worker] paint failed', msg.url, err);
+    self.postMessage({ type: 'paintFailed', segmentIndex: msg.segmentIndex, globalIdx: msg.globalIdx });
   });
+}
+
+function resize(ctx, heightPx) {
+  // Changing width/height clears the canvas AND resets the 2D context's
+  // transform (per spec, even to the same value), so the scale has to be
+  // re-applied after every resize.
+  ctx.canvas.width  = Math.max(1, Math.round(widthCss * dpr));
+  ctx.canvas.height = Math.max(1, Math.round(heightPx * dpr));
+  ctx.scale(dpr, dpr);
 }
 
 self.onmessage = (e) => {
   const msg = e.data;
-  // Wrapped in try/catch (added 2026-09-22) -- a real-device test found
-  // EVERY segment black with no other symptom and refresh not recovering
-  // it, which a synchronous throw right here (e.g. canvas.getContext('2d')
-  // returning null on a device without OffscreenCanvas 2D context support,
-  // making the next line's ctx.scale() throw) would fully explain: nothing
-  // in chapter_reader.html currently listens for cbWorker.onerror, so an
-  // uncaught exception here previously had no visible symptom at all beyond
-  // "nothing ever paints." console.error surfaces in DevTools (including
-  // over CDP/adb) the same as any other console call.
   try {
     switch (msg.type) {
-    case 'init': {
+    case 'init':
       widthCss = msg.widthCss;
       dpr = msg.dpr;
+      break;
+    case 'addSegments':
       for (const { index, canvas } of msg.segments) {
         const ctx = canvas.getContext('2d');
         if (!ctx) throw new Error('canvas.getContext(2d) returned null for segment ' + index);
-        ctx.scale(dpr, dpr);
         ctxBySegment.set(index, ctx);
+        assignedIdx.set(index, -1);
       }
       break;
-    }
-    case 'setWidth': {
-      widthCss = msg.widthCss;
-      break;
-    }
     case 'assign': {
       const ctx = ctxBySegment.get(msg.segmentIndex);
-      if (ctx) {
-        // Each slot is exactly one page now, and pages vary in height, so
-        // a reassigned slot's own height can differ from what it had
-        // before -- resize the backing store to match. This already
-        // clears the canvas and resets the 2D context's transform (per
-        // spec, changing width/height does both, even to the same value),
-        // so the scale has to be re-applied right after.
-        ctx.canvas.width  = Math.round(widthCss * dpr);
-        ctx.canvas.height = Math.round(msg.heightPx * dpr);
-        ctx.scale(dpr, dpr);
-      }
+      if (!ctx) break;
+      resize(ctx, msg.heightPx);
+      assignedIdx.set(msg.segmentIndex, msg.globalIdx);
       break;
     }
-    case 'paint': {
-      for (const job of msg.jobs) {
-        job.segmentIndex = msg.segmentIndex;
-        paintJob(job);
-      }
+    case 'release': {
+      const ctx = ctxBySegment.get(msg.segmentIndex);
+      if (!ctx) break;
+      ctx.canvas.width = 1;
+      ctx.canvas.height = 1;
+      assignedIdx.set(msg.segmentIndex, -1);
       break;
     }
-    case 'releaseUrl': {
-      const entry = bitmaps.get(msg.url);
-      if (entry) {
-        try { entry.bitmap?.close(); } catch (err) {}
-        bitmaps.delete(msg.url);
-      }
+    case 'paint':
+      paint(msg);
       break;
-    }
     }
   } catch (err) {
     console.error('[canvas buffer worker] onmessage threw for', msg.type, err);
