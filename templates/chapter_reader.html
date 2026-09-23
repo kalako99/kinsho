@@ -718,6 +718,9 @@
       overflow-y: hidden;
       scroll-snap-type: x mandatory;
       overscroll-behavior-x: contain;
+      /* Horizontal finger drags are driven by the script (see "SINGLE-PAGE
+         SWIPE" in the JS), never by the browser's own compositor scroll. */
+      touch-action: pan-y pinch-zoom;
       -webkit-overflow-scrolling: touch;
       overflow-anchor: none;
       scrollbar-width: none;
@@ -4812,6 +4815,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _spPointerDownX = e.clientX;
   }, { passive: true });
   spStrip.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;  // touch/pen drags: see SINGLE-PAGE SWIPE below
     if (Math.abs(e.clientX - _spPointerDownX) > SP_DRAG_MOVE_THRESHOLD) _spUserDragging = true;
   }, { passive: true });
 
@@ -5077,15 +5081,93 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (_spFlipAnimId !== null) cancelAnimationFrame(_spFlipAnimId);
     const startLeft = spStrip.scrollLeft;
     const delta     = targetLeft - startLeft;
-    if (delta === 0) { _spFlipAnimId = null; return; }
+    if (delta === 0) { _spFlipAnimId = null; spStrip.style.scrollSnapType = ''; return; }
+    // Snapping off while the script moves the strip (mandatory snap can
+    // pull a programmatic scroll to the nearest page mid-way), restored at
+    // the end.
+    spStrip.style.scrollSnapType = 'none';
     const startTime = performance.now();
     function step(now) {
       const t = Math.min(1, (now - startTime) / SP_FLIP_DURATION_MS);
       spStrip.scrollLeft = startLeft + delta * _spEaseOutCubic(t);
       _spFlipAnimId = t < 1 ? requestAnimationFrame(step) : null;
+      if (t >= 1) spStrip.style.scrollSnapType = '';
     }
     _spFlipAnimId = requestAnimationFrame(step);
   }
+
+  // ── SINGLE-PAGE SWIPE, DRIVEN BY THIS SCRIPT (2026-09-23) ──
+  // A native finger swipe is scrolled by the browser's compositor, which
+  // never waits for a page's tiles to be painted -- whatever isn't ready is
+  // shown black (the black flick, confirmed with frame traces on the
+  // tablet). Taps, arrow keys and the BLE scroller move the strip from the
+  // script instead, and the browser then waits for painting before
+  // showing the frame: they never flicked. So touch/pen drags are handled
+  // here (touch-action on #spStrip keeps the browser from scrolling): the
+  // strip follows the finger 1:1, and on release it goes to the
+  // next/previous page when the drag passed SP_SWIPE_MIN_FRACTION of the
+  // page width or ended in a fast flick, otherwise springs back -- both via
+  // spGotoIdx's own flip animation. A mouse keeps the old behaviour.
+  const SP_SWIPE_MIN_FRACTION = 0.15;  // of the page width
+  const SP_SWIPE_MIN_VELOCITY = 0.35;  // px/ms at release
+  let _spSwipe = null;
+  let _spSuppressClick = false;
+
+  spStrip.addEventListener('pointerdown', (e) => {
+    // A new touch: whatever click the previous drag might have produced is
+    // long gone (the browser doesn't always send one after a drag, and a
+    // leftover flag swallowed the next real tap).
+    _spSuppressClick = false;
+    if (readerSettings.mode !== 'single-page' || e.pointerType === 'mouse' || !e.isPrimary) return;
+    _spSwipe = { id: e.pointerId, x0: e.clientX, left0: spStrip.scrollLeft,
+                 lastX: e.clientX, lastT: e.timeStamp, v: 0, moved: false };
+  });
+
+  spStrip.addEventListener('pointermove', (e) => {
+    const s = _spSwipe;
+    if (!s || e.pointerId !== s.id) return;
+    const dx = e.clientX - s.x0;
+    if (!s.moved) {
+      if (Math.abs(dx) <= SP_DRAG_MOVE_THRESHOLD) return;
+      s.moved = true;
+      // Grab the strip wherever it is, even mid-flip-animation.
+      if (_spFlipAnimId !== null) { cancelAnimationFrame(_spFlipAnimId); _spFlipAnimId = null; }
+      s.left0 = spStrip.scrollLeft;
+      s.x0 = e.clientX;
+      spStrip.style.scrollSnapType = 'none';
+      try { spStrip.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+    const drag = Math.max(-viewW, Math.min(viewW, e.clientX - s.x0));
+    spStrip.scrollLeft = s.left0 - drag;
+    const dt = e.timeStamp - s.lastT;
+    if (dt > 0) s.v = 0.6 * ((e.clientX - s.lastX) / dt) + 0.4 * s.v;
+    s.lastX = e.clientX;
+    s.lastT = e.timeStamp;
+  });
+
+  function _spEndSwipe(e) {
+    const s = _spSwipe;
+    if (!s || e.pointerId !== s.id) return;
+    _spSwipe = null;
+    if (!s.moved) return;  // a plain tap -- the click handler routes it
+    _spSuppressClick = true;
+    const drag = s.lastX - s.x0;
+    const recentMove = e.timeStamp - s.lastT < 100;  // a finger that stopped before lifting isn't a flick
+    const flick = recentMove && Math.abs(s.v) >= SP_SWIPE_MIN_VELOCITY;
+    let dir = 0;  // +1 = one page further right in reading-order (r) space
+    if (drag <= -viewW * SP_SWIPE_MIN_FRACTION || (flick && s.v < 0)) dir = 1;
+    else if (drag >= viewW * SP_SWIPE_MIN_FRACTION || (flick && s.v > 0)) dir = -1;
+    const startR = Math.round(s.left0 / viewW);
+    const idx = rOf(startR + dir);
+    if (idx >= 0 && idx < spManifest.length) {
+      spGotoIdx(idx);
+    } else {
+      _spAnimateScrollTo(startR * viewW);  // past the true start/end: spring back
+      if (idx >= spManifest.length) showLastPagePopup();
+    }
+  }
+  spStrip.addEventListener('pointerup', _spEndSwipe);
+  spStrip.addEventListener('pointercancel', _spEndSwipe);
 
   function spGotoIdx(idx) {
     // spManifest is the whole manga now (see its own declaration comment),
@@ -5175,6 +5257,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // swipe-to-flip physics now, so there's no gesture left for JS to track.
   spStrip.addEventListener('click', (e) => {
     if (readerSettings.mode !== 'single-page') return;
+    if (_spSuppressClick) {  // the end of a script-driven swipe, not a tap
+      _spSuppressClick = false;
+      e.stopPropagation();
+      return;
+    }
     // There's a generic document-level click handler (search barVisible)
     // that toggles chrome on any click anywhere -- that's what "tap
     // anywhere" in long-strip mode (no zones there) relies on. Without
