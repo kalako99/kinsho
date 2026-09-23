@@ -1,39 +1,37 @@
 // ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21; one canvas per
-// page 2026-09-22; memory-budgeted 2026-09-23) ──────────────────────────
+// page 2026-09-22; memory-budgeted 2026-09-23; 1:1 source pixels 2026-09-23) ──
 // Owns the OffscreenCanvas elements transferred from the main-thread
-// long-strip reader (see the "CANVAS BUFFER" section of chapter_reader.html)
-// -- one per page. Every fetch/decode/paint for this feature happens in
-// here, never on the main thread (the 2026-09-03 canvas rewrite that was
-// reverted 2026-09-20 did its ctx.drawImage() calls on the main thread).
+// long-strip reader (see the "CANVAS BUFFER" section of chapter_reader.html).
+// Every fetch/decode/paint for this feature happens in here, never on the
+// main thread (the 2026-09-03 canvas rewrite that was reverted 2026-09-20
+// did its ctx.drawImage() calls on the main thread).
 //
-// Memory (2026-09-23, measured live on a Galaxy Tab S10 Ultra): a painted
-// canvas holds raw RGBA pixels at device resolution -- a 1056x5133 CSS-px
-// webtoon page at dpr 1.75 is ~66MB, regardless of how small the source
-// WebP file is. The previous version of this file also kept every decoded
-// ImageBitmap cached forever (its releaseUrl message was never sent), which
-// took the renderer from ~265MB to ~1.7GB within seconds and froze this
-// worker. So now: a decoded bitmap is closed the moment the last paint job
-// waiting on it has drawn it (same as the 2026-09-03 version did), a canvas
-// that leaves the buffer is shrunk to 1x1 to free its backing store, and
-// the main thread decides how many pages to keep by a memory budget.
+// Each canvas holds its page (or one piece of a very tall page) at the
+// source image's own pixel size, 1:1 -- the compositor scales it to the
+// displayed size exactly like it does an <img>. Screen-resolution canvases
+// (the earlier design) were both bigger than the source (upscaled ~1.3x on
+// the tablet) and, at 1848x8983, over the tablet GPU's 8192px texture limit,
+// which the compositor silently shows as BLACK (proven on the Galaxy Tab S10
+// Ultra, 2026-09-23). The main thread splits a page into pieces only when
+// the source image itself is taller than the device's limit.
+//
+// Memory: a decoded bitmap is closed the moment the last paint job waiting
+// on it has drawn it, and a canvas that leaves the buffer is shrunk to 1x1.
 //
 // Message protocol (main -> worker):
-//   {type:'init',        widthCss, dpr}
 //   {type:'addSegments', segments:[{index, canvas /* transferred OffscreenCanvas */}]}
-//   {type:'assign',      segmentIndex, heightPx, globalIdx} -- canvas now shows manifest[globalIdx]
-//   {type:'release',     segmentIndex}                      -- canvas left the buffer; free its memory
-//   {type:'paint',       segmentIndex, globalIdx, url, iw, ih, destH}
+//   {type:'assign',      segmentIndex, width, height, globalIdx} -- backing size in source px
+//   {type:'release',     segmentIndex}                             -- canvas left the buffer
+//   {type:'paint',       segmentIndex, globalIdx, url, iw, sy0, rows} -- source rows [sy0, sy0+rows)
 // Worker -> main:
 //   {type:'paintFailed', segmentIndex, globalIdx} -- fetch/decode failed; main may retry
 
 const ctxBySegment = new Map();   // segmentIndex -> CanvasRenderingContext2D
 const assignedIdx  = new Map();   // segmentIndex -> globalIdx it currently shows (-1 = none)
-let widthCss = 0;
-let dpr = 1;
 
-// url -> { promise, users } -- deduplicates concurrent decodes of the same
-// page (e.g. a slot re-dispatched while its first decode is still in
-// flight). Entries only live while at least one paint job is waiting.
+// url -> { promise, users } -- one decode shared by every piece of a page
+// (and any re-dispatch while a decode is in flight). Entries only live
+// while at least one paint job is waiting.
 const decoding = new Map();
 
 function acquireBitmap(url) {
@@ -64,7 +62,7 @@ function paint(msg) {
     // Only draw if this canvas still shows the page the job was for -- it
     // can be reassigned to a different page while the decode is in flight.
     if (ctx && assignedIdx.get(msg.segmentIndex) === msg.globalIdx) {
-      ctx.drawImage(bitmap, 0, 0, msg.iw, msg.ih, 0, 0, widthCss, msg.destH);
+      ctx.drawImage(bitmap, 0, msg.sy0, msg.iw, msg.rows, 0, 0, msg.iw, msg.rows);
     }
     releaseBitmap(msg.url, d, bitmap);
   }, err => {
@@ -74,23 +72,10 @@ function paint(msg) {
   });
 }
 
-function resize(ctx, heightPx) {
-  // Changing width/height clears the canvas AND resets the 2D context's
-  // transform (per spec, even to the same value), so the scale has to be
-  // re-applied after every resize.
-  ctx.canvas.width  = Math.max(1, Math.round(widthCss * dpr));
-  ctx.canvas.height = Math.max(1, Math.round(heightPx * dpr));
-  ctx.scale(dpr, dpr);
-}
-
 self.onmessage = (e) => {
   const msg = e.data;
   try {
     switch (msg.type) {
-    case 'init':
-      widthCss = msg.widthCss;
-      dpr = msg.dpr;
-      break;
     case 'addSegments':
       for (const { index, canvas } of msg.segments) {
         const ctx = canvas.getContext('2d');
@@ -102,7 +87,9 @@ self.onmessage = (e) => {
     case 'assign': {
       const ctx = ctxBySegment.get(msg.segmentIndex);
       if (!ctx) break;
-      resize(ctx, msg.heightPx);
+      // Resizing also clears the canvas.
+      ctx.canvas.width  = Math.max(1, msg.width);
+      ctx.canvas.height = Math.max(1, msg.height);
       assignedIdx.set(msg.segmentIndex, msg.globalIdx);
       break;
     }

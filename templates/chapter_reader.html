@@ -235,11 +235,15 @@
        images gap needs the same real margin-bottom .page-slot already uses
        -- there's no "segment interior" left to leave an unpainted gap row
        inside of. */
-    .canvas-segment {
+    .canvas-page {
       display: block;
       width: 100%;
       background: #000;
       margin-bottom: var(--page-gap, 0px);
+    }
+    .canvas-part {
+      display: block;
+      width: 100%;
     }
 
     /* ── PROGRESS BAR ── */
@@ -3088,7 +3092,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // ── CANVAS BUFFER (opt-in, experimental, 2026-09-21; one canvas per page
-  // 2026-09-22; memory-budgeted 2026-09-23) ─────────────────────────────────
+  // 2026-09-22; memory-budgeted + 1:1 source pixels 2026-09-23) ─────────────
   // An alternative long-strip renderer, active only when
   // readerSettings.canvasBufferEnabled is on -- a fully parallel path next
   // to the <img> slot pool above (mirrors this file's existing
@@ -3097,47 +3101,93 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // browser dropping pre-rastered tiles of off-screen <img> pages while idle
   // (the confirmed black-flick mechanism, see CLAUDE.md).
   //
-  // One <canvas> per page. Every decode and drawImage() happens inside
+  // Every decode and drawImage() happens inside
   // static/reader_canvas_worker.js via transferControlToOffscreen() -- zero
   // canvas API calls on the main thread.
   //
+  // Each page is one slot: a <div class="canvas-page"> holding its
+  // canvas(es) at the SOURCE image's own pixel size, 1:1, scaled to the
+  // displayed size by the compositor exactly like an <img>. Normally that's
+  // a single canvas. A page is split into several stacked canvases (still
+  // 1:1) only when the source image is taller than the device GPU's
+  // MAX_TEXTURE_SIZE -- a displayed canvas is one texture, and one over the
+  // limit is shown BLACK (proven on the tablet 2026-09-23: 8192px limit, our
+  // old screen-resolution canvases were 1848x8983).
+  //
   // How many pages are kept is decided by a MEMORY budget
-  // (readerSettings.canvasBufferMB), not a page count: a painted canvas
-  // holds raw RGBA pixels at device resolution, so a tall webtoon page at
-  // dpr 1.75 costs ~66MB while a normal manga page costs a few MB. A fixed
-  // count of 15 took the renderer to ~1.7GB on a real tablet (2026-09-23).
-  // The current page and its two neighbours are always kept, even over
-  // budget; beyond that, pages are added nearest-first, alternating forward
-  // and backward, until the next one wouldn't fit. Canvases are created
-  // lazily as the window needs them and recycled by reassignment
+  // (readerSettings.canvasBufferMB): a painted canvas holds raw RGBA pixels
+  // (iw * ih * 4 bytes). The current page and its two neighbours are always
+  // kept, even over budget; beyond that, pages are added nearest-first,
+  // alternating forward and backward, until the next one wouldn't fit.
+  // Slots and canvases are created lazily and recycled by reassignment
   // (cbRecenter), never torn down during ordinary scrolling; a canvas that
   // leaves the window is shrunk to 1x1 in the worker to free its memory.
-  const CB_MAX_PAGES_PER_TICK = 4;  // how many not-yet-painted canvases get dispatched per tick
+  const CB_MAX_PAGES_PER_TICK = 4;  // how many not-yet-painted pages get dispatched per tick
   const CB_MAX_PAINT_RETRIES  = 2;  // per assignment, after a worker-reported fetch/decode failure
   const CB_MIN_MB = 200, CB_MAX_MB = 3000, CB_DEFAULT_MB = 500;
 
-  let cbWorker    = null;
-  let cbActive    = false;
-  let cbPages     = [];  // {el, workerIndex, globalIdx, painted, pending, retries}; DOM order === array order === ascending globalIdx
-  let cbWindowLo  = 0, cbWindowHi = -1;  // manifest global-index range currently covered
-  let cbWidthCss  = 0;
-  let cbDpr       = 1;
+  let cbWorker     = null;
+  let cbActive     = false;
+  let cbPages      = [];  // slots: {el, parts: [{el, workerIndex}], pieces, globalIdx, painted, pending, retries}; DOM order === array order === ascending globalIdx
+  let cbWindowLo   = 0, cbWindowHi = -1;  // manifest global-index range currently covered
+  let cbNextWorkerIndex = 0;
+  let cbMaxTex     = 0;   // device GPU texture limit, read once
 
   function cbBudgetMB() {
     const mb = Number(readerSettings.canvasBufferMB) || CB_DEFAULT_MB;
     return Math.min(CB_MAX_MB, Math.max(CB_MIN_MB, mb));
   }
 
-  // Backing-store size of one painted page canvas, in bytes (RGBA).
-  function cbPageBytes(entry, widthCss, dpr) {
-    return Math.max(1, Math.round(widthCss * dpr)) * Math.max(1, Math.round(entry.scaledH * dpr)) * 4;
+  // The GPU's MAX_TEXTURE_SIZE, read from the device itself (never assumed).
+  function cbMaxTextureSize() {
+    if (cbMaxTex) return cbMaxTex;
+    cbMaxTex = 4096;  // conservative fallback if WebGL is unavailable
+    try {
+      const gl = document.createElement('canvas').getContext('webgl');
+      if (gl) {
+        cbMaxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) || cbMaxTex;
+        gl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    } catch (e) {}
+    return cbMaxTex;
+  }
+
+  function cbNaturalDims(entry) {
+    const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
+    const p = chDims?.pages?.[entry.localIdx];
+    return p ? { iw: p.w, ih: p.h } : null;
+  }
+
+  // Backing-store size of one painted page, in bytes (RGBA, 1:1 source).
+  function cbPageBytes(entry) {
+    const nat = cbNaturalDims(entry);
+    return nat ? nat.iw * nat.ih * 4 : Math.max(1, currentLongStripEffectiveW() * entry.scaledH * 4);
+  }
+
+  // How a page is cut into canvases: [{sy0, rows, cssH}], source rows
+  // [sy0, sy0+rows) shown cssH CSS px tall. One piece unless the source is
+  // taller than the device limit. CSS heights come from rounded cumulative
+  // boundaries, so the pieces always add up to exactly entry.scaledH.
+  function cbPieces(entry) {
+    const nat = cbNaturalDims(entry);
+    if (!nat) return null;
+    const n = Math.max(1, Math.ceil(nat.ih / cbMaxTextureSize()));
+    const pieces = [];
+    for (let j = 0; j < n; j++) {
+      const sy0 = Math.round(j * nat.ih / n);
+      const sy1 = Math.round((j + 1) * nat.ih / n);
+      const top = Math.round(entry.scaledH * sy0 / nat.ih);
+      const bottom = Math.round(entry.scaledH * sy1 / nat.ih);
+      pieces.push({ sy0, rows: sy1 - sy0, cssH: bottom - top });
+    }
+    return pieces;
   }
 
   // The contiguous manifest range [lo, hi] the buffer should cover around
   // centerIdx for the current budget -- see the section comment above.
-  function cbWantedRange(centerIdx, widthCss = cbWidthCss, dpr = cbDpr) {
+  function cbWantedRange(centerIdx) {
     const budget = cbBudgetMB() * 1024 * 1024;
-    const bytes = (i) => cbPageBytes(manifest[i], widthCss, dpr);
+    const bytes = (i) => cbPageBytes(manifest[i]);
     let lo = centerIdx, hi = centerIdx;
     let used = bytes(centerIdx);
     if (hi + 1 < manifest.length) used += bytes(++hi);
@@ -3156,7 +3206,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return [lo, hi];
   }
 
-  // Settings-panel label: "500 MB · ≈7 pages" -- the page count is what the
+  // Settings-panel label: "500 MB · ≈12 pages" -- the page count is what the
   // current budget covers around the current position, in this manga.
   function cbUpdateBufferLabel() {
     const valEl = document.getElementById('settingsCanvasBufferValue');
@@ -3164,7 +3214,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     let pages = '';
     if (manifest.length > 0) {
       const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
-      const [lo, hi] = cbWantedRange(centerIdx, currentLongStripEffectiveW(), window.devicePixelRatio || 1);
+      const [lo, hi] = cbWantedRange(centerIdx);
       pages = ` · ≈${hi - lo + 1} pages`;
     }
     valEl.textContent = `${cbBudgetMB()} MB${pages}`;
@@ -3179,7 +3229,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       cbWorker.onmessage = (e) => {
         const msg = e.data;
         if (msg.type !== 'paintFailed') return;
-        const slot = cbPages.find(s => s.workerIndex === msg.segmentIndex);
+        const slot = cbPages.find(s => s.parts.some(p => p.workerIndex === msg.segmentIndex));
         if (!slot || slot.globalIdx !== msg.globalIdx) return;  // reassigned since -- nothing to retry
         if (slot.retries >= CB_MAX_PAINT_RETRIES) return;
         slot.retries++;
@@ -3188,12 +3238,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       };
     }
     return cbWorker;
-  }
-
-  function cbNaturalDims(entry) {
-    const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
-    const p = chDims?.pages?.[entry.localIdx];
-    return p ? { iw: p.w, ih: p.h } : null;
   }
 
   // Proactively resolves entry.url for any given entries missing it (same
@@ -3212,43 +3256,72 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // Grows the canvas pool to at least n. Canvases are only ever added
-  // during an activation, never removed until cbDeactivate --
-  // transferControlToOffscreen can only happen once per element.
+  // Grows the slot pool to at least n slots (each starts with no canvases).
   function cbEnsurePoolSize(n) {
     if (cbPages.length >= n) return;
     const frag = document.createDocumentFragment();
-    const segments = [];
     while (cbPages.length < n) {
+      const el = document.createElement('div');
+      el.className = 'canvas-page';
+      el.style.height = '0px';
+      frag.appendChild(el);
+      cbPages.push({ el, parts: [], pieces: null, globalIdx: -1, painted: false, pending: false, retries: 0 });
+    }
+    readerInner.insertBefore(frag, bottomSpacer);
+  }
+
+  // Gives a slot at least n canvases. A canvas is only ever added during an
+  // activation, never removed until cbDeactivate -- transferControlToOffscreen
+  // can only happen once per element.
+  function cbEnsureParts(slot, n) {
+    if (slot.parts.length >= n) return;
+    const segments = [];
+    while (slot.parts.length < n) {
       const el = document.createElement('canvas');
-      el.className = 'canvas-segment';
+      el.className = 'canvas-part';
       el.style.height = '0px';
       el.width = 1;
       el.height = 1;
-      frag.appendChild(el);
-      const workerIndex = cbPages.length;
-      cbPages.push({ el, workerIndex, globalIdx: -1, painted: false, pending: false, retries: 0 });
+      slot.el.appendChild(el);
+      const workerIndex = cbNextWorkerIndex++;
+      slot.parts.push({ el, workerIndex });
       segments.push({ index: workerIndex, canvas: el.transferControlToOffscreen() });
     }
-    readerInner.insertBefore(frag, bottomSpacer);
     cbEnsureWorker().postMessage({ type: 'addSegments', segments }, segments.map(s => s.canvas));
   }
 
   // Assigns pool slot `slot` to manifest[globalIdx], or blanks it (-1) and
-  // frees its canvas memory in the worker.
+  // frees its canvases' memory in the worker.
   function cbAssignSlot(slot, globalIdx) {
     slot.globalIdx = globalIdx;
     slot.painted   = false;
     slot.pending   = false;  // stale wait for whatever page this slot showed before, if any
     slot.retries   = 0;
+    slot.pieces    = null;
     if (globalIdx === -1) {
       slot.el.style.height = '0px';
-      cbWorker?.postMessage({ type: 'release', segmentIndex: slot.workerIndex });
+      for (const part of slot.parts) {
+        part.el.style.height = '0px';
+        cbWorker?.postMessage({ type: 'release', segmentIndex: part.workerIndex });
+      }
       return;
     }
     const entry = manifest[globalIdx];
     slot.el.style.height = entry.scaledH + 'px';
-    cbWorker?.postMessage({ type: 'assign', segmentIndex: slot.workerIndex, heightPx: entry.scaledH, globalIdx });
+    const nat = cbNaturalDims(entry);
+    const pieces = cbPieces(entry);
+    if (!pieces) return;  // no dims for this page -- nothing paintable
+    slot.pieces = pieces;
+    cbEnsureParts(slot, pieces.length);
+    slot.parts.forEach((part, j) => {
+      if (j < pieces.length) {
+        part.el.style.height = pieces[j].cssH + 'px';
+        cbWorker?.postMessage({ type: 'assign', segmentIndex: part.workerIndex, width: nat.iw, height: pieces[j].rows, globalIdx });
+      } else {
+        part.el.style.height = '0px';
+        cbWorker?.postMessage({ type: 'release', segmentIndex: part.workerIndex });
+      }
+    });
   }
 
   // Recomputes which manifest range the buffer covers, centered on
@@ -3326,7 +3399,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function cbDispatchFill() {
     if (!cbActive || cbPages.length === 0) return;
     const centerIdx = Math.min(manifest.length - 1, firstIndexAfter(virtualY));
-    const candidates = cbPages.filter(s => s.globalIdx !== -1 && !s.painted && !s.pending);
+    const candidates = cbPages.filter(s => s.globalIdx !== -1 && s.pieces && !s.painted && !s.pending);
     if (!candidates.length) return;
     candidates.sort((a, b) => Math.abs(a.globalIdx - centerIdx) - Math.abs(b.globalIdx - centerIdx));
     for (const slot of candidates.slice(0, CB_MAX_PAGES_PER_TICK)) {
@@ -3334,13 +3407,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
+  // One paint job per piece -- the worker decodes the page once and draws
+  // each piece's source rows into its own canvas.
   function cbPostPaint(slot, entry) {
     const nat = cbNaturalDims(entry);
-    if (!entry.url || !nat) return;  // not resolvable yet -- retried next tick
+    if (!entry.url || !nat || !slot.pieces) return;  // not resolvable yet -- retried next tick
     slot.painted = true;  // optimistic; a worker-reported failure resets it (see cbEnsureWorker)
-    cbWorker?.postMessage({
-      type: 'paint', segmentIndex: slot.workerIndex, globalIdx: slot.globalIdx,
-      url: entry.url, iw: nat.iw, ih: nat.ih, destH: entry.scaledH,
+    slot.pieces.forEach((piece, j) => {
+      cbWorker?.postMessage({
+        type: 'paint', segmentIndex: slot.parts[j].workerIndex, globalIdx: slot.globalIdx,
+        url: entry.url, iw: nat.iw, sy0: piece.sy0, rows: piece.rows,
+      });
     });
   }
 
@@ -3364,20 +3441,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // ── ACTIVATE / DEACTIVATE ──
-  // widthCssOverride lets geometry-change callers (zoom/padding/resize)
-  // pass the just-recomputed width directly rather than relying on
-  // currentLongStripEffectiveW() re-reading potentially-stale layout.
-  function cbActivate(widthCssOverride) {
+  function cbActivate() {
     if (cbActive) return;
     cbActive = true;
     _clearSlotPool();
     windowLo = 0; windowHi = -1;
 
-    cbWidthCss = widthCssOverride ?? currentLongStripEffectiveW();
-    cbDpr = window.devicePixelRatio || 1;
     cbPages = [];
     cbWindowLo = 0; cbWindowHi = -1;
-    cbEnsureWorker().postMessage({ type: 'init', widthCss: cbWidthCss, dpr: cbDpr });
+    cbEnsureWorker();
 
     cbRecenter(virtualY, true);
     // Position the scroll container on virtualY explicitly. cbRecenter only
@@ -4209,14 +4281,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     const targetY = manifest[anchorGlobalIdx].globalY + offsetIntoPage;
     if (readerSettings.canvasBufferEnabled && cbActive) {
-      // Segment canvases ARE sized to the reader's width, which is exactly
-      // what changed here (zoom/rotate/resize) -- a full reactivate at the
-      // new width is simplest and correct; see applyPaddingSetting's own
-      // comment for why this path always fully reactivates rather than
-      // resizing segments in place.
+      // Canvases hold source pixels 1:1, but every page's displayed height
+      // (scaledH) just changed -- a full reactivate is simplest and correct;
+      // see applyPaddingSetting's own comment for why this path always fully
+      // reactivates rather than resizing in place.
       cbDeactivate();
       virtualY = targetY;
-      cbActivate(effectiveW);
+      cbActivate();
       updateProgressBar();
       scheduleProgressSave();
     } else {
