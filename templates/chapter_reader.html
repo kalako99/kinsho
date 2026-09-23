@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <script src="/static/api.js"></script>
+  <script src="/static/tab_state.js"></script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   {{ theme_css | safe }}
@@ -5601,8 +5602,39 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         keepalive: true,
         signal: AbortSignal.timeout(15000),
       });
+      savedTabsAfterProgressSave(completedChapterId);
     } catch (_) {
       // Swallowed -- see the timeout comment above.
+    }
+  }
+
+  // ── KEEP THE LIBRARY'S SAVED TAB COPIES CURRENT (2026-09-23) ──
+  // See static/tab_state.js's header. The first successful progress save of
+  // this reader load means this manga is now first in Last Read server-side:
+  // re-save every tab, reshuffling the shuffled rows (the only place they're
+  // ever reshuffled), so the library appears already up to date next time,
+  // even if the app is closed straight from here. Delayed so those
+  // background fetches never compete with the pages being opened. Each
+  // completed chapter afterwards re-saves just this library (progress %).
+  // Chained so two refreshes can never interleave and lose each other's write.
+  try { promoteInSavedLastRead(libraryId, mangaId); } catch (e) {}
+  let _savedTabsFirstDone = false;
+  let _savedTabsTimer = null;
+  let _savedTabsChain = Promise.resolve();
+  function queueSavedTabsRefresh(libraryIds, reshuffle) {
+    _savedTabsChain = _savedTabsChain
+      .then(() => refreshSavedTabs(libraryIds, reshuffle))
+      .catch(e => console.error('[saved tabs] refresh failed', e));
+  }
+  function savedTabsAfterProgressSave(completedChapterId) {
+    if (!_savedTabsFirstDone) {
+      _savedTabsFirstDone = true;
+      setTimeout(() => queueSavedTabsRefresh(persistedTabLibraryIds(), true), 5000);
+      return;
+    }
+    if (completedChapterId) {
+      clearTimeout(_savedTabsTimer);
+      _savedTabsTimer = setTimeout(() => queueSavedTabsRefresh([String(libraryId)], false), 2000);
     }
   }
 

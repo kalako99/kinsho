@@ -163,63 +163,6 @@ function roundUpToMultiple(n, multiple) {
   return remainder === 0 ? n : n + (multiple - remainder);
 }
 
-// ── RANDOM / FAVOURITES ROWS: STABLE FOR UP TO AN HOUR ──
-// Both rows were reshuffled on every single mount() (every page
-// navigation, since this is a traditional multi-page app -- Vue instance
-// torn down and rebuilt each time) and on every visibilitychange back to
-// visible (switching back to the app without navigating anywhere at
-// all), which made them feel like noise rather than a stable pick.
-// Capped to reshuffling at most once per hour per library instead,
-// cached in localStorage (not a plain JS field, which wouldn't survive a
-// page reload) as {ids, ts} -- only the ids persist, not full manga
-// objects, so a cached pick's cover/progress/name always come from the
-// current load, never stale, even though which manga are picked stays
-// fixed. `rowName` keeps random and favourites in separate cache slots
-// (different candidate pools, independent hour timers).
-const STABLE_ROW_CACHE_MS = 60 * 60 * 1000;
-
-function pickStableRow(rowName, libraryId, mangas) {
-  const key = `kinsho_${rowName}_row_${libraryId}`;
-  let cached = null;
-  try {
-    cached = JSON.parse(localStorage.getItem(key) || 'null');
-  } catch (e) {
-    cached = null;
-  }
-
-  // Fingerprint the candidate pool (sorted id list) and invalidate the
-  // cache the instant it changes -- e.g. a scan adding/removing manga --
-  // rather than sitting on a stale pick for up to an hour just because the
-  // old picked ids still happen to resolve. Manga ids are a stable hash of
-  // the manga's name (see make_id() in main.py), not regenerated per scan,
-  // so an unchanged library re-fingerprints identically on every routine
-  // rescan -- this doesn't reshuffle 'random' constantly, only when the
-  // pool actually changed.
-  const poolFingerprint = mangas.map(m => m.id).sort().join(',');
-  const poolChanged = !!cached && cached.pool !== poolFingerprint;
-
-  const isFresh = cached && !poolChanged && (Date.now() - cached.ts) < STABLE_ROW_CACHE_MS;
-  const mangaById = new Map(mangas.map(m => [m.id, m]));
-  const rehydrated = isFresh ? cached.ids.map(id => mangaById.get(id)).filter(Boolean) : [];
-  // Re-picks immediately if none of the cached ids still resolve (a
-  // rescan removed/renamed manga, or a favourite was removed) rather
-  // than showing an empty row for up to an hour; a partial match is fine
-  // as-is -- the row just shows fewer than 20 until the next reshuffle.
-  if (isFresh && rehydrated.length > 0) {
-    return rehydrated;
-  }
-
-  const picked = [...mangas].sort(() => Math.random() - 0.5).slice(0, 20);
-  try {
-    const toStore = { ids: picked.map(m => m.id), ts: Date.now(), pool: poolFingerprint };
-    localStorage.setItem(key, JSON.stringify(toStore));
-  } catch (e) {
-    // localStorage unavailable/full -- fine to skip persisting, the row
-    // still renders from `picked` for this one load.
-  }
-  return picked;
-}
-
 // ── MANGA LIST SCROLL MEMORY ──
 // Remembered across a normal "click into a manga, hit back" round trip,
 // but only until the chapter reader is actually opened -- chapter_reader.html
@@ -229,46 +172,10 @@ function pickStableRow(rowName, libraryId, mangas) {
 // through browser history later.
 const MANGA_LIST_SCROLL_KEY = 'kinsho_manga_list_scroll';
 
-// ── FULL PAGE-STATE CACHE (localStorage) ──
-// tabCache (see the data() field of the same name) already held each
-// library's fully-built display state in plain JS memory -- but memory
-// doesn't survive a full page reload, and every "back" navigation to this
-// page IS one (traditional multi-page app, no SPA routing). Persisting
-// the same state lets data() below read it back synchronously, before the
-// component ever renders for the first time -- so the page shows real
-// content immediately instead of an empty page that fills in.
-// localStorage, not sessionStorage (changed 2026-09-23): the Android app
-// loses sessionStorage every time Android kills the app, so every cold
-// start began with no tab data at all and the first switch to each tab
-// waited on the network (measured on the tablet). It's always a
-// stale-while-revalidate seed -- mounted()/switchTab() still fetch fresh
-// data right after showing it. Each tab's state is only ~1-40KB.
-// chapter_reader.html no longer clears these on open (it still clears the
-// scroll position, MANGA_LIST_SCROLL_KEY): after reading, the library shows
-// the saved copy instantly and refreshes it a moment later.
-function tabCacheStorageKey(libraryId) {
-  return `kinsho_tab_cache_${libraryId}`;
-}
-
-function loadPersistedTabState(libraryId) {
-  try {
-    const raw = localStorage.getItem(tabCacheStorageKey(libraryId));
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function persistTabState(libraryId, state) {
-  try {
-    localStorage.setItem(tabCacheStorageKey(libraryId), JSON.stringify(state));
-  } catch (e) {
-    // localStorage unavailable/full -- fine to skip persisting, the
-    // in-memory tabCache (this session's own background prefetch) still
-    // makes tab switches instant; only the "instant on a fresh page load"
-    // half of this feature is lost.
-  }
-}
+// ── FULL PAGE-STATE CACHE ──
+// Building, saving and loading each tab's state lives in static/tab_state.js
+// (loaded before this file), shared with the chapter reader -- see its header
+// for the "nothing visible changes after the page appears" design.
 
 // ── MAIN APP ──
 const app = createApp({
@@ -300,6 +207,19 @@ const app = createApp({
       const persisted = loadPersistedTabState(tab.id);
       if (persisted) tabCache[tab.id] = persisted;
     }
+    // One saved copy per library, overwritten on every save -- only a
+    // deleted library's copy could linger, so drop those. Also drops the
+    // old 1-hour row-pick caches (superseded by picks saved in each tab).
+    try {
+      const tabIds = new Set(tabs.map(t => String(t.id)));
+      for (const id of persistedTabLibraryIds()) {
+        if (!tabIds.has(String(id))) localStorage.removeItem(tabCacheStorageKey(id));
+      }
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i) || '';
+        if (/^kinsho_(random|favourites)_row_/.test(k)) localStorage.removeItem(k);
+      }
+    } catch (e) {}
     const activeState = activeTab !== null ? tabCache[activeTab] : null;
 
     return {
@@ -349,7 +269,7 @@ const app = createApp({
       favourites:  activeState ? activeState.favourites : [],
       collectionsRow:       activeState ? activeState.collectionsRow : [],
       showCollectionsRow:   true,
-      collectionMembership: {},
+      collectionMembership: loadPersistedMembership(),
 
       // ── GRID DATA + PAGINATION ──
       lastUpdated:      activeState ? activeState.lastUpdated      : [],
@@ -409,10 +329,13 @@ const app = createApp({
 
   async mounted() {
     await this.loadTheme();
-    // Global on/off setting (not per-library) -- loaded before loadMangas()
-    // below since buildTabState() needs to know whether to even fetch a
-    // per-tab Collections row at all.
-    await this.loadCollectionsSetting();
+    // Global on/off setting for the Collections row (template v-if only --
+    // buildTabState reads the same setting itself), and which manga open
+    // their collection instead: both fetched in parallel, never gating the
+    // tab loads. Membership is seeded from its saved copy (data()), so a
+    // tap before this returns already goes to the right place.
+    this.loadCollectionsSetting();
+    this.loadCollectionMembership();
 
     // Restore the scroll position from before navigating away, if the
     // chapter reader hasn't been visited since (see MANGA_LIST_SCROLL_KEY).
@@ -487,7 +410,6 @@ const app = createApp({
         this.loadMangas(tab.id, (cached && cached.lastUpdatedPage) || 1, { afterCore, restGate, settingsPromise });
       }
     }
-    await this.loadCollectionMembership();
     await this.loadIntegrityBadge();
 
     document.addEventListener('visibilitychange', () => {
@@ -504,8 +426,20 @@ const app = createApp({
     // was created or had a member added on whatever page this tab is coming
     // back from. event.persisted is only true for a bfcache restore, never a
     // normal fresh load (which already gets a correct fetch from mounted()).
+    // Same restore also shows this page exactly as it was before the reader
+    // opened -- but the reader has since re-saved every tab (reshuffled
+    // rows, new Last Read). Adopt those saved copies right away, so the
+    // refresh fetch that follows finds nothing left to change on screen.
     window.addEventListener('pageshow', (e) => {
-      if (e.persisted) this.loadCollectionMembership();
+      if (!e.persisted) return;
+      for (const tab of this.tabs) {
+        const saved = loadPersistedTabState(tab.id);
+        if (saved) this.tabCache[tab.id] = saved;
+      }
+      const active = this.activeTab !== null ? this.tabCache[this.activeTab] : null;
+      if (active) this.applyTabState(active);
+      this.collectionMembership = loadPersistedMembership();
+      this.loadCollectionMembership();
     });
 
     // ── PICK UP A SCAN THAT FINISHES WHILE THIS PAGE IS SITTING OPEN ──
@@ -744,39 +678,11 @@ const app = createApp({
       }
     },
 
-    // Pure: fetches + shapes this SPECIFIC library's Collections row --
-    // lib= scopes /api/collections to collections with at least one
-    // member in this library, so one that only contains manga from other
-    // libraries doesn't show up here at all (see get_collections's own
-    // docstring for the exact rule this enforces server-side). Called
-    // from buildTabState() below, same as fetchLastUpdatedPage, so this
-    // row gets the same per-tab caching (instant tab switching, instant
-    // back-navigation) as the other rows instead of being fetched once,
-    // unscoped, and left stale across tab switches.
-    async fetchCollectionsRow(libraryId) {
-      if (!this.showCollectionsRow) return [];
-      try {
-        const res  = await fetch(apiUrl(`/api/collections?lib=${libraryId}`));
-        const data = await res.json();
-        return (data.collections || []).slice().sort(() => Math.random() - 0.5).slice(0, 20).map(c => ({
-          id:          c.id,
-          title:       c.name,
-          cover:       c.cover_url,
-          is_complete: false,
-        }));
-      } catch (e) {
-        console.error('Failed to load collections row:', e);
-        return [];
-      }
-    },
-
     async loadCollectionMembership() {
       try {
-        const res  = await fetch(apiUrl('/api/collections/membership'));
-        const data = await res.json();
-        this.collectionMembership = data.membership || {};
+        this.collectionMembership = await fetchCollectionMembership();
       } catch (e) {
-        this.collectionMembership = {};
+        // Keep whatever was seeded from the saved copy.
       }
     },
 
@@ -826,7 +732,15 @@ const app = createApp({
       const onCoreReady = (core) => {
         if (libraryId === this.activeTab) this.applyCoreTabState(core);
       };
-      const state = await this.buildTabState(libraryId, lastUpdatedPage, onCoreReady, opts);
+      const state = await buildTabState(libraryId, lastUpdatedPage, {
+        ...opts,
+        onCoreReady,
+        // Keeps the shuffled rows' picks -- only the reader reshuffles. The
+        // saved copy, not this page's memory: the reader may have re-saved
+        // it (new picks, Last Read) since this page instance was built.
+        prev: loadPersistedTabState(libraryId) || this.tabCache[libraryId],
+        columns: currentGridColumns(),
+      });
       if (!state) return;
       this.tabCache[libraryId] = state;
       // Also persisted to sessionStorage (not just kept in memory) so the
@@ -844,149 +758,6 @@ const app = createApp({
           // displayed, never for a background prefetch of a different one.
           this.persistLockedBackdrop(state.bgUrlToLock);
         }
-      }
-    },
-
-    // Pure: fetches + computes everything one tab's view needs, without
-    // touching `this.*` — safe to run for a library the user isn't
-    // currently looking at (background prefetch) as well as the active one.
-    // onCoreReady, if given, fires with the "core" state (rows + backdrop)
-    // as soon as it's computed, before the slower Last Updated/Collections
-    // fetches below even start -- lets loadMangas() paint the backdrop and
-    // rows immediately instead of waiting on unrelated data.
-    // opts.afterCore/opts.restGate: round-robin hooks from mounted()'s
-    // background prefetch (see there). opts.settingsPromise: one shared
-    // /api/settings fetch for the whole batch instead of one per tab.
-    async buildTabState(libraryId, lastUpdatedPage = 1, onCoreReady = null, opts = {}) {
-      let coreSignalled = false;
-      const signalCore = () => { if (!coreSignalled) { coreSignalled = true; opts.afterCore?.(); } };
-      try {
-        const [allRes, settings, historyRes] = await Promise.all([
-          fetch(`/api/mangas/${libraryId}?sort=alphabetical`),
-          opts.settingsPromise || fetch('/api/settings').then(r => r.json()),
-          fetch(`/api/reading/history/${libraryId}`),
-        ]);
-        const allData  = await allRes.json();
-        const historyData = await historyRes.json();
-
-        const favouriteIds = new Set(
-          (settings.favourites || [])
-            .filter(f => f.library_id === libraryId)
-            .map(f => f.manga_id)
-        );
-
-        // Build history lookup keyed by manga_id
-        const historyByMangaId = {};
-        for (const entry of (historyData.history || [])) {
-          historyByMangaId[entry.manga_id] = entry;
-        }
-
-        const mangas = allData.mangas.map((m) => {
-          const h = historyByMangaId[m.id];
-          // "X of Y chapters read" -- a plain count of chapters actually
-          // marked completed (h.completed_count, from get_reading_history),
-          // not h.furthest_chapter_idx's "highest position reached". A
-          // single chapter read at position 50 of 100 is 1% progress, not
-          // 50% -- matters once reading starts mid-series instead of from
-          // chapter 1, which furthest_chapter_idx alone handled wrong
-          // (stuck at 0% until this got fixed server-side too).
-          const progress = h && h.total_chapters > 0
-            ? Math.round(h.completed_count / h.total_chapters * 100)
-            : 0;
-          return {
-            id:          m.id,
-            title:       m.name,
-            path:        m.path,
-            cover:       m.cover_url,
-            // Prefer the server's own cover_url_large (carries that exact
-            // file's own cache-busting version, see _cover_urls_for in
-            // main.py) over deriving one from the small cover_url -- the
-            // small and large variants aren't guaranteed to share a version
-            // tag, so a derived URL could carry the wrong one and miss the
-            // immutable-cache fast path this exists for.
-            coverLarge:  m.cover_url_large || this.deriveCoverLarge(m.cover_url),
-            chapters:    m.chapters,
-            is_complete: m.is_complete || false,
-            is_case2:    m.manga_type === 'case2',
-            // Flat-scan oneshots (see the context menu's own comment below)
-            // skip manga_detail.html entirely, so this and last_chapter_id/
-            // last_page are what let the tile's context menu offer a real
-            // "Continue Reading" resume instead of always restarting at page 1.
-            is_oneshot:      m.manga_type === 'oneshot',
-            last_chapter_id: h ? h.last_chapter_id : null,
-            last_page:       h ? h.last_page : 0,
-            is_favourite: favouriteIds.has(m.id),
-            progress,
-          };
-        });
-
-        const mangaById = Object.fromEntries(mangas.map(m => [m.id, m]));
-
-        // Last Read: join history (already sorted by last_read desc) with mangas
-        const lastRead = (historyData.history || [])
-          .slice(0, 20)
-          .map(h => mangaById[h.manga_id])
-          .filter(Boolean);
-
-        const random     = pickStableRow('random', libraryId, mangas);
-        const favourites = pickStableRow('favourites', libraryId, mangas.filter(m => favouriteIds.has(m.id)));
-
-        // Ambient blurred background from the most recently read manga,
-        // falling back to the first manga (natural sort) in this library
-        let bgManga = null;
-        if (lastRead.length > 0 && lastRead[0].coverLarge) {
-          bgManga = lastRead[0];
-        } else if (mangas.length > 0) {
-          bgManga = [...mangas].sort((a, b) =>
-            a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' })
-          )[0];
-        }
-
-        const backdropEnabled = settings.backdrop_list !== false;
-        const lockBackdrop = settings.lock_backdrop === true;
-        let bgLayerStyle = null, bgIsRaster = false, bgUrlToLock = null;
-        if (lockBackdrop && settings.locked_backdrop_url) {
-          // A backdrop was already locked in (persisted server-side, so this
-          // survives full page reloads, not just this Vue instance's lifetime).
-          bgLayerStyle = { backgroundImage: `url('${settings.locked_backdrop_url}')` };
-          bgIsRaster = true;
-        } else if (backdropEnabled && bgManga && bgManga.coverLarge) {
-          bgLayerStyle = { backgroundImage: `url('${bgManga.coverLarge}')` };
-          bgIsRaster = true;
-          if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
-        }
-
-        if (onCoreReady) {
-          onCoreReady({ lastRead, random, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
-        }
-        signalCore();
-        if (opts.restGate) await opts.restGate;
-
-        // Last Updated, separately (sorted + paginated), reusing history --
-        // defaults to page 1 for a fresh tab visit, but callers restoring a
-        // remembered session (see mounted()) pass through whichever page the
-        // user was actually on, so a back-navigation's reconciliation fetch
-        // doesn't silently revert an already-restored later page back to 1.
-        // Run together, not sequentially -- neither depends on the other's
-        // result, and awaiting them one after another just adds their two
-        // round-trips instead of overlapping them.
-        const [lu, collectionsRow] = await Promise.all([
-          this.fetchLastUpdatedPage(libraryId, lastUpdatedPage, historyByMangaId),
-          this.fetchCollectionsRow(libraryId),
-        ]);
-
-        return {
-          lastRead, random, favourites, collectionsRow,
-          bgLayerStyle, bgIsRaster, bgUrlToLock,
-          lastUpdated:        lu ? lu.mangas  : [],
-          lastUpdatedPage:    lu ? lu.page    : 1,
-          lastUpdatedTotal:   lu ? lu.total   : 0,
-          lastUpdatedColumns: lu ? lu.columns : 1,
-        };
-      } catch (e) {
-        console.error('Failed to load mangas:', e);
-        signalCore();  // a failed tab must not hold up the others' round-robin
-        return null;
       }
     },
 
@@ -1036,7 +807,7 @@ const app = createApp({
 
     // ── LOAD LAST UPDATED PAGE (active-tab pagination buttons call this directly) ──
     async loadLastUpdated(libraryId, page, historyByMangaId) {
-      const result = await this.fetchLastUpdatedPage(libraryId, page, historyByMangaId);
+      const result = await fetchLastUpdatedPage(libraryId, page, historyByMangaId, currentGridColumns());
       if (!result) return;
       this.lastUpdated        = result.mangas;
       this.lastUpdatedPage    = result.page;
@@ -1065,61 +836,6 @@ const app = createApp({
           lastUpdatedColumns: result.columns,
         };
         persistTabState(libraryId, this.tabCache[libraryId]);
-      }
-    },
-
-    // Pure: fetches + computes one Last Updated page without touching
-    // `this.*` — used by both loadLastUpdated() above (which applies the
-    // result live, for the active tab's own pagination) and
-    // buildTabState() (which caches it, possibly for a tab that isn't
-    // currently on screen).
-    async fetchLastUpdatedPage(libraryId, page, historyByMangaId) {
-      try {
-        const columns = currentGridColumns();
-        const needsHistory = !historyByMangaId;
-        const [res, historyRes] = await Promise.all([
-          fetch(`/api/mangas/${libraryId}?sort=last_updated&page=${page}&columns=${columns}`),
-          needsHistory ? fetch(`/api/reading/history/${libraryId}`) : Promise.resolve(null),
-        ]);
-        const data = await res.json();
-
-        if (needsHistory) {
-          const historyData = await historyRes.json();
-          historyByMangaId = {};
-          for (const entry of (historyData.history || [])) {
-            historyByMangaId[entry.manga_id] = entry;
-          }
-        }
-
-        const mangas = data.mangas.map((m) => {
-          const h = historyByMangaId[m.id];
-          // "X of Y chapters read" -- a plain count of chapters actually
-          // marked completed (h.completed_count, from get_reading_history),
-          // not h.furthest_chapter_idx's "highest position reached". A
-          // single chapter read at position 50 of 100 is 1% progress, not
-          // 50% -- matters once reading starts mid-series instead of from
-          // chapter 1, which furthest_chapter_idx alone handled wrong
-          // (stuck at 0% until this got fixed server-side too).
-          const progress = h && h.total_chapters > 0
-            ? Math.round(h.completed_count / h.total_chapters * 100)
-            : 0;
-          return {
-            id:          m.id,
-            title:       m.name,
-            path:        m.path,
-            cover:       m.cover_url,
-            chapters:    m.chapters,
-            is_complete: m.is_complete || false,
-            is_oneshot:      m.manga_type === 'oneshot',
-            last_chapter_id: h ? h.last_chapter_id : null,
-            last_page:       h ? h.last_page : 0,
-            progress,
-          };
-        });
-        return { mangas, page: data.page, total: data.total, columns };
-      } catch (e) {
-        console.error('Failed to load last updated:', e);
-        return null;
       }
     },
 
@@ -1291,19 +1007,6 @@ const app = createApp({
       this.atEnd[key] = el.scrollLeft + el.clientWidth >= el.scrollWidth - 20;
     },
 
-    // Derives the large cover URL from the thumbnail cover URL,
-    // following the convention: "<name>.<ext>" -> "<name>+.<ext>"
-    deriveCoverLarge(coverUrl) {
-      if (!coverUrl) return null;
-      const lastSlash = coverUrl.lastIndexOf('/');
-      const dir = coverUrl.slice(0, lastSlash + 1);
-      const filename = coverUrl.slice(lastSlash + 1);
-      const dotIdx = filename.lastIndexOf('.');
-      if (dotIdx === -1) return null;
-      const name = filename.slice(0, dotIdx);
-      const ext = filename.slice(dotIdx);
-      return `${dir}${name}+${ext}`;
-    },
   }
 });
 app.config.errorHandler = (err, vm, info) => { console.error('Vue error:', err, info); };
