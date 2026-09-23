@@ -1401,23 +1401,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // doesn't stack: pressing back always returns to the manga detail page.
   history.replaceState(null, '', window.location.href);
 
-  // The manga list page remembers its scroll position AND its fully
-  // rendered content (see static/app.js's MANGA_LIST_SCROLL_KEY and
-  // kinsho_tab_cache_* / tabCacheStorageKey) across a normal "click into a
-  // manga, hit back" round trip -- but only until a chapter is actually
-  // opened. Once real reading has started, a snapshot from before isn't
-  // meaningful to instantly resume into anymore, even after navigating
-  // all the way back through browser history later. Same literal key
-  // strings as app.js -- this is a separate page load/script context,
-  // nothing to import from. Walks all of sessionStorage rather than one
-  // fixed key since the tab cache is one entry per library, and the
-  // manga being read could belong to any of them.
+  // The manga list page remembers its scroll position across a normal
+  // "click into a manga, hit back" round trip -- but only until a chapter
+  // is actually opened. Once real reading has started, that position isn't
+  // meaningful to resume into anymore. Same literal key string as app.js's
+  // MANGA_LIST_SCROLL_KEY -- this is a separate page load, nothing to
+  // import from. The per-tab content snapshots (kinsho_tab_cache_*) are
+  // deliberately kept (2026-09-23): they now live in localStorage so a cold
+  // app start can show the library instantly, and app.js refreshes them
+  // right after showing them.
   try {
     sessionStorage.removeItem('kinsho_manga_list_scroll');
-    for (let i = sessionStorage.length - 1; i >= 0; i--) {
-      const k = sessionStorage.key(i);
-      if (k && k.startsWith('kinsho_tab_cache_')) sessionStorage.removeItem(k);
-    }
   } catch (e) {}
 
   // ── URL PARAMS ──

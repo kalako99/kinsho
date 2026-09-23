@@ -229,27 +229,30 @@ function pickStableRow(rowName, libraryId, mangas) {
 // through browser history later.
 const MANGA_LIST_SCROLL_KEY = 'kinsho_manga_list_scroll';
 
-// ── FULL PAGE-STATE CACHE (sessionStorage) ──
+// ── FULL PAGE-STATE CACHE (localStorage) ──
 // tabCache (see the data() field of the same name) already held each
 // library's fully-built display state in plain JS memory -- but memory
 // doesn't survive a full page reload, and every "back" navigation to this
 // page IS one (traditional multi-page app, no SPA routing). Persisting
-// the same state to sessionStorage lets data() below read it back
-// synchronously, before the component ever renders for the first time --
-// so a back-navigation shows the real content and the restored scroll
-// position immediately, instead of an empty page that fills in (covers
-// popping in) and only THEN jumps to the remembered scroll position.
-// Same "until you start reading" invalidation as MANGA_LIST_SCROLL_KEY --
-// chapter_reader.html clears every kinsho_tab_cache_* key on load, same
-// reasoning: a snapshot from before you started reading isn't something
-// to keep instantly resuming into once you actually have.
+// the same state lets data() below read it back synchronously, before the
+// component ever renders for the first time -- so the page shows real
+// content immediately instead of an empty page that fills in.
+// localStorage, not sessionStorage (changed 2026-09-23): the Android app
+// loses sessionStorage every time Android kills the app, so every cold
+// start began with no tab data at all and the first switch to each tab
+// waited on the network (measured on the tablet). It's always a
+// stale-while-revalidate seed -- mounted()/switchTab() still fetch fresh
+// data right after showing it. Each tab's state is only ~1-40KB.
+// chapter_reader.html no longer clears these on open (it still clears the
+// scroll position, MANGA_LIST_SCROLL_KEY): after reading, the library shows
+// the saved copy instantly and refreshes it a moment later.
 function tabCacheStorageKey(libraryId) {
   return `kinsho_tab_cache_${libraryId}`;
 }
 
 function loadPersistedTabState(libraryId) {
   try {
-    const raw = sessionStorage.getItem(tabCacheStorageKey(libraryId));
+    const raw = localStorage.getItem(tabCacheStorageKey(libraryId));
     return raw ? JSON.parse(raw) : null;
   } catch (e) {
     return null;
@@ -258,9 +261,9 @@ function loadPersistedTabState(libraryId) {
 
 function persistTabState(libraryId, state) {
   try {
-    sessionStorage.setItem(tabCacheStorageKey(libraryId), JSON.stringify(state));
+    localStorage.setItem(tabCacheStorageKey(libraryId), JSON.stringify(state));
   } catch (e) {
-    // sessionStorage unavailable/full -- fine to skip persisting, the
+    // localStorage unavailable/full -- fine to skip persisting, the
     // in-memory tabCache (this session's own background prefetch) still
     // makes tab switches instant; only the "instant on a fresh page load"
     // half of this feature is lost.
@@ -398,6 +401,12 @@ const app = createApp({
     },
   },
 
+  created() {
+    // library_id -> in-flight loadMangas() promise (see loadMangas). Plain,
+    // non-reactive bookkeeping -- nothing renders from it.
+    this._tabLoads = {};
+  },
+
   async mounted() {
     await this.loadTheme();
     // Global on/off setting (not per-library) -- loaded before loadMangas()
@@ -463,11 +472,19 @@ const app = createApp({
       // competes with it for the browser's connection pool. Same
       // preferred-page reasoning as above -- otherwise switching to a tab
       // that was left on a later page would show it reset to page 1.
-      for (const tab of this.tabs) {
-        if (tab.id !== this.activeTab) {
-          const cached = this.tabCache[tab.id];
-          this.loadMangas(tab.id, (cached && cached.lastUpdatedPage) || 1);
-        }
+      // Round-robin (2026-09-23): every other tab's core data (rows,
+      // backdrop) loads first, in parallel; only once ALL of them have it
+      // does any tab move on to its Last Updated grid/collections -- so a
+      // big library can't hold up a small one's first view.
+      const others = this.tabs.filter(t => t.id !== this.activeTab);
+      let coresLeft = others.length;
+      let releaseRest;
+      const restGate = new Promise(r => { releaseRest = r; });
+      const afterCore = () => { if (--coresLeft === 0) releaseRest(); };
+      const settingsPromise = fetch('/api/settings').then(r => r.json());
+      for (const tab of others) {
+        const cached = this.tabCache[tab.id];
+        this.loadMangas(tab.id, (cached && cached.lastUpdatedPage) || 1, { afterCore, restGate, settingsPromise });
       }
     }
     await this.loadCollectionMembership();
@@ -777,7 +794,21 @@ const app = createApp({
     // background (mounted()'s prefetch loop) -- buildTabState() never
     // touches live display state itself, so a background call for a tab
     // the user isn't looking at can't clobber what's currently on screen.
-    async loadMangas(libraryId, lastUpdatedPage) {
+    async loadMangas(libraryId, lastUpdatedPage, opts = {}) {
+      // One load per tab at a time: a tap on a tab whose background load is
+      // still running reuses it instead of starting a duplicate (measured on
+      // the tablet: the duplicate doubled the wait).
+      if (this._tabLoads[libraryId]) return this._tabLoads[libraryId];
+      const run = this._loadMangas(libraryId, lastUpdatedPage, opts);
+      this._tabLoads[libraryId] = run;
+      try {
+        return await run;
+      } finally {
+        delete this._tabLoads[libraryId];
+      }
+    },
+
+    async _loadMangas(libraryId, lastUpdatedPage, opts) {
       // The backdrop and the Last Read/Random/Favourites rows only need the
       // FIRST of buildTabState()'s two fetch phases (mangas+settings+history)
       // -- the second phase (paginated Last Updated grid, Collections row) is
@@ -789,10 +820,13 @@ const app = createApp({
       // backdrop's late pop-in; see buildTabState's own comment for the
       // other half (running that second phase's two fetches in parallel
       // instead of sequentially).
-      const onCoreReady = libraryId === this.activeTab
-        ? (core) => this.applyCoreTabState(core)
-        : null;
-      const state = await this.buildTabState(libraryId, lastUpdatedPage, onCoreReady);
+      // Checked when the core data ARRIVES, not when the load started -- a
+      // background load for a tab the user switched to meanwhile paints its
+      // rows/backdrop as soon as they're ready too.
+      const onCoreReady = (core) => {
+        if (libraryId === this.activeTab) this.applyCoreTabState(core);
+      };
+      const state = await this.buildTabState(libraryId, lastUpdatedPage, onCoreReady, opts);
       if (!state) return;
       this.tabCache[libraryId] = state;
       // Also persisted to sessionStorage (not just kept in memory) so the
@@ -820,15 +854,19 @@ const app = createApp({
     // as soon as it's computed, before the slower Last Updated/Collections
     // fetches below even start -- lets loadMangas() paint the backdrop and
     // rows immediately instead of waiting on unrelated data.
-    async buildTabState(libraryId, lastUpdatedPage = 1, onCoreReady = null) {
+    // opts.afterCore/opts.restGate: round-robin hooks from mounted()'s
+    // background prefetch (see there). opts.settingsPromise: one shared
+    // /api/settings fetch for the whole batch instead of one per tab.
+    async buildTabState(libraryId, lastUpdatedPage = 1, onCoreReady = null, opts = {}) {
+      let coreSignalled = false;
+      const signalCore = () => { if (!coreSignalled) { coreSignalled = true; opts.afterCore?.(); } };
       try {
-        const [allRes, settingsRes, historyRes] = await Promise.all([
+        const [allRes, settings, historyRes] = await Promise.all([
           fetch(`/api/mangas/${libraryId}?sort=alphabetical`),
-          fetch('/api/settings'),
+          opts.settingsPromise || fetch('/api/settings').then(r => r.json()),
           fetch(`/api/reading/history/${libraryId}`),
         ]);
         const allData  = await allRes.json();
-        const settings = await settingsRes.json();
         const historyData = await historyRes.json();
 
         const favouriteIds = new Set(
@@ -921,6 +959,8 @@ const app = createApp({
         if (onCoreReady) {
           onCoreReady({ lastRead, random, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
         }
+        signalCore();
+        if (opts.restGate) await opts.restGate;
 
         // Last Updated, separately (sorted + paginated), reusing history --
         // defaults to page 1 for a fresh tab visit, but callers restoring a
@@ -945,6 +985,7 @@ const app = createApp({
         };
       } catch (e) {
         console.error('Failed to load mangas:', e);
+        signalCore();  // a failed tab must not hold up the others' round-robin
         return null;
       }
     },
