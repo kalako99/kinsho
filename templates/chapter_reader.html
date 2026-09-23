@@ -4882,6 +4882,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     imgEl.onload = () => {
       clearTimeout(timeoutId);
       done();
+      // Decode now, off the main thread, while this page is still off
+      // screen -- otherwise the browser only decodes it when a swipe first
+      // reveals it, which on the tablet showed as a black flick on EVERY
+      // swipe (2026-09-23). The tier1 preloader used to cover this by
+      // accident; under the request gate it's dropped as redundant once
+      // this slot's own download has marked the page loaded.
+      imgEl.decode().catch(() => {});
       // Verify imgEl is STILL the element currently assigned to this entry
       // before marking it loaded -- under rapid flipping, a slot can be
       // shifted out (its element detached, entry reassigned to a fresh,
