@@ -2535,7 +2535,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         idx: globalIdx, url, kind: 'page',
         // In long-strip mode a page with its own slot load already queued/
         // done needs no separate predecode -- skip the duplicate request.
-        alive: () => !signal?.aborted && !entry.loaded
+        // Single-page mode: runs even if the page's slot has already loaded
+        // it -- this detached predecode is what makes a page arrive in its
+        // slot already decoded. Dropping it as "already loaded" gave a black
+        // flick on every swipe (A/B-tested on the tablet 2026-09-23: 5-8
+        // unpainted frames per swipe with the drop, 0-2 without).
+        alive: () => !signal?.aborted
+          && (readerSettings.mode === 'single-page' || !entry.loaded)
           && Math.abs(manifest.indexOf(entry) - netFocusIdx()) <= TIER2_RADIUS + 16
           && !(readerSettings.mode === 'long-strip' && entry._realDispatched),
         start: (done) => {
