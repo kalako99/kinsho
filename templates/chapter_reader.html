@@ -2159,6 +2159,97 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
+  // ── PAGE REQUEST GATE (2026-09-23) ──
+  // Every page-image request in this reader (visible <img> slots, tier1/2
+  // preloads, tier3 placeholder thumbnails, single-page slots) is queued
+  // here instead of being fired immediately. Measured live on the tablet:
+  // opening a chapter fired ~100 requests at once, including ~24
+  // placeholder thumbnails the server generates on the spot (0.6-3.7s
+  // each), so the browser's 6 HTTP/1.1 connections were busy with those
+  // while page 1 of the chapter waited 2.3-2.8s in line.
+  // Now: after a (re)open only ONE request may start -- the page being
+  // read. Each finished request allows up to NET_NEW_PER_COMPLETION more
+  // to start, never more than NET_MAX_IN_FLIGHT at once, always picking
+  // whichever queued page is nearest the reading position (forward first
+  // on a tie), re-evaluated at every pick so it follows scrolling.
+  // Placeholder thumbnails only start once no real page is waiting.
+  // Queued tasks that stop being wanted before they start (slot vacated,
+  // scrolled out of range) are dropped via their own alive() check, and a
+  // task whose exact URL is already in flight waits for it instead of
+  // opening a second connection for the same bytes.
+  const NET_MAX_IN_FLIGHT      = 6;
+  const NET_NEW_PER_COMPLETION = 2;
+  const NET_THUMB_PENALTY      = 1e6;  // thumbnails sort after every real page
+  const netQueue = [];                 // {idx, url, kind: 'page'|'thumb', alive(), start(done), onDrop?()}
+  const netUrlsInFlight = new Map();   // url -> count
+  let netInFlight = 0;
+  let netCredits  = 1;
+  let netPumpScheduled = false;
+  // Single-page mode's reading position (spCurrentIdx is declared much
+  // further down -- reading it from here during the initial long-strip
+  // build would hit its temporal dead zone, same trap as _spAnimFrame below).
+  let netSpFocus = -1;
+
+  function netFocusIdx() {
+    if (manifest.length === 0) return 0;
+    if (readerSettings.mode === 'single-page' && netSpFocus >= 0) return netSpFocus;
+    return Math.min(manifest.length - 1, firstIndexAfter(virtualY));
+  }
+
+  function netPriority(t, focus) {
+    const d = Math.abs(t.idx - focus);
+    return (t.kind === 'thumb' ? NET_THUMB_PENALTY : 0) + d * 2 + (t.idx < focus ? 1 : 0);
+  }
+
+  // A fresh open/big jump: only the page being read may start next.
+  function netRestart() {
+    netCredits = 1;
+  }
+
+  function netEnqueue(task) {
+    netQueue.push(task);
+    // Deferred to a microtask so a caller enqueueing a whole window in one
+    // synchronous pass (e.g. _rebuildConveyorWindow) has every candidate in
+    // the queue before the first pick is made.
+    if (!netPumpScheduled) {
+      netPumpScheduled = true;
+      queueMicrotask(() => { netPumpScheduled = false; netPump(); });
+    }
+  }
+
+  function netPump() {
+    let live = 0;
+    for (const t of netQueue) {
+      if (t.alive()) netQueue[live++] = t;
+      else t.onDrop?.();
+    }
+    netQueue.length = live;
+    while (netQueue.length && netInFlight < NET_MAX_IN_FLIGHT && netCredits > 0) {
+      const focus = netFocusIdx();
+      let best = -1, bestP = Infinity;
+      for (let k = 0; k < netQueue.length; k++) {
+        if (netUrlsInFlight.has(netQueue[k].url)) continue;
+        const p = netPriority(netQueue[k], focus);
+        if (p < bestP) { bestP = p; best = k; }
+      }
+      if (best === -1) return;  // everything left duplicates an in-flight URL -- resumes on its completion
+      const t = netQueue.splice(best, 1)[0];
+      netCredits--;
+      netInFlight++;
+      netUrlsInFlight.set(t.url, (netUrlsInFlight.get(t.url) || 0) + 1);
+      let finished = false;
+      t.start(() => {
+        if (finished) return;
+        finished = true;
+        netInFlight--;
+        const n = netUrlsInFlight.get(t.url) - 1;
+        if (n > 0) netUrlsInFlight.set(t.url, n); else netUrlsInFlight.delete(t.url);
+        netCredits = Math.min(NET_MAX_IN_FLIGHT, netCredits + NET_NEW_PER_COMPLETION);
+        netPump();
+      });
+    }
+  }
+
   // Declared here (not down with the rest of the single-page-mode _sp* state)
   // because loadEntryTier1 below reads it synchronously the moment it's first
   // called -- which happens during the initial tier-1 preload, long before
@@ -2258,8 +2349,22 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // predecoding the same URL independently at the boundary between them
     // -- a little redundant work, not a correctness issue.)
     entry._realDispatched = true;
+    netEnqueue({
+      idx: globalIdx, url: entry.url, kind: 'page',
+      alive: () => assignedSlot[manifest.indexOf(entry)] !== -1 && !entry.loaded,
+      onDrop: () => { entry._realDispatched = false; },
+      start: (done) => _startSlotLoad(entry, globalIdx, retriesLeft, done),
+    });
+  }
+
+  // The actual request for _applyUrlToSlot, run when the gate lets it start.
+  function _startSlotLoad(entry, globalIdx, retriesLeft, done) {
     const img = new Image();
     inFlightPrefetchImages.set(globalIdx, img);
+    // Release the gate as soon as the bytes are in (onload), not after
+    // decode() -- decoding runs in parallel and must not hold up the next
+    // requests (measured: ~0.5s idle gap per step otherwise).
+    img.onload = done;
     img.src = entry.url;
 
     // settled guards against both the timeout and the real decode() outcome
@@ -2273,6 +2378,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       inFlightPrefetchImages.delete(globalIdx);
       img._cancelled = true;
       img.src = '';  // abandons the stalled request, same as cancelInFlightPredecode
+      done();
       entry._realDispatched = false;
       if (retriesLeft > 0) {
         setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
@@ -2286,6 +2392,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       settled = true;
       clearTimeout(timeoutId);
       inFlightPrefetchImages.delete(globalIdx);
+      done();
       // Re-resolve the slot at paint time, not the assignedSlot value read
       // above -- the conveyor can shift while this decode is in flight,
       // moving (or removing) this entry's slot in the meantime.
@@ -2298,6 +2405,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       settled = true;
       clearTimeout(timeoutId);
       inFlightPrefetchImages.delete(globalIdx);
+      done();
       // A deliberate cancelInFlightPredecode() (this slot was vacated while
       // still decoding) also rejects this same decode() promise -- retrying
       // here would immediately re-dispatch a fresh request for a page we
@@ -2413,8 +2521,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // observed stuck pending for 10+ seconds, never completing or failing,
       // while only a handful of these old abandoned requests were still
       // "in flight" from the browser's perspective.
+      netEnqueue({
+        idx: globalIdx, url, kind: 'page',
+        // In long-strip mode a page with its own slot load already queued/
+        // done needs no separate predecode -- skip the duplicate request.
+        alive: () => !signal?.aborted && !entry.loaded
+          && Math.abs(manifest.indexOf(entry) - netFocusIdx()) <= TIER2_RADIUS + 16
+          && !(readerSettings.mode === 'long-strip' && entry._realDispatched),
+        start: (done) => {
       const img = new Image();
       inFlightPrefetchImages.set(globalIdx, img);
+      img.onload = done;  // see _startSlotLoad
       img.src = url;
 
       // Same settled-guard timeout as _applyUrlToSlot's own -- a stalled
@@ -2432,6 +2549,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         inFlightPrefetchImages.delete(globalIdx);
         img._cancelled = true;
         img.src = '';
+        done();
         onFail();
       }, PAGE_LOAD_TIMEOUT_MS);
 
@@ -2451,6 +2569,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // itself stays valid across shifts
         // (manifest order is static); only which slot it currently occupies
         // can change.
+        done();
         const curSi = assignedSlot[globalIdx];
         if (curSi !== -1) slotPool[curSi].img.src = url;
         onSuccess();
@@ -2459,6 +2578,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         settled = true;
         clearTimeout(timeoutId);
         inFlightPrefetchImages.delete(globalIdx);
+        done();
         // A deliberate cancelStalePrefetches() (src cleared because this
         // page fell outside even the tier2 range) also rejects this same
         // decode() promise -- retrying here would immediately re-dispatch a
@@ -2469,6 +2589,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // still retries.
         if (img._cancelled) return;
         onFail();
+      });
+        },
       });
     };
     if (entry.url) { apply(entry.url); return; }
@@ -2497,19 +2619,30 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // needed fetching over the network. decode() here warms the same
       // shared decoded-pixel cache (keyed by URL, see _applyUrlToSlot's
       // comment) well ahead of when the page is actually needed.
-      const img = new Image();
       const idx = manifest.indexOf(entry);
+      netEnqueue({
+        idx, url, kind: 'page',
+        alive: () => !signal?.aborted && !entry.loaded
+          && Math.abs(idx - netFocusIdx()) <= TIER2_RADIUS + 16
+          && !(readerSettings.mode === 'long-strip' && assignedSlot[idx] !== -1),
+        start: (done) => {
+      const img = new Image();
       inFlightPrefetchImages.set(idx, img);
+      img.onload = done;  // see _startSlotLoad
       img.src = url;
       img.decode().then(() => {
         inFlightPrefetchImages.delete(idx);
+        done();
       }).catch(() => {
         inFlightPrefetchImages.delete(idx);
+        done();
         // A cancelled prefetch (page fell back out of even tier2 range)
         // also rejects here via cancelInFlightPredecode's img.src = '' --
         // nothing further to do either way; tier2 never retries a failure,
         // a later pass will naturally re-attempt if the page is still
         // needed once it's back in range.
+      });
+        },
       });
     });
   }
@@ -2543,6 +2676,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (entry._realDispatched) return;
     if (img.dataset.thumbSet) return;
     img.dataset.thumbSet = '1';
+    netEnqueue({
+      idx: globalIdx, url: thumbUrl(entry), kind: 'thumb',
+      alive: () => {
+        const s = assignedSlot[globalIdx];
+        return s !== -1 && slotPool[s].img === img && !entry.loaded && !entry._realDispatched;
+      },
+      onDrop: () => { delete img.dataset.thumbSet; },
+      start: (done) => _startThumbLoad(entry, img, done),
+    });
+  }
+
+  // The actual request for loadEntryTier3, run when the gate lets it start.
+  function _startThumbLoad(entry, img, done) {
 
     // Same stalled-fetch concern as _applyUrlToSlot/loadEntryTier1, applied
     // to this last-resort fallback itself: previously a hung (not failed)
@@ -2555,17 +2701,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       settled = true;
       img.src = '';
       delete img.dataset.thumbSet;  // a future tier3 sweep over this entry can retry
+      done();
     }, PAGE_LOAD_TIMEOUT_MS);
     img.onload = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
+      done();
     };
     img.onerror = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
       delete img.dataset.thumbSet;
+      done();
     };
     img.src = thumbUrl(entry);
   }
@@ -2715,6 +2864,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function _rebuildConveyorWindow(newWindowLo, targetGlobalY) {
+    netRestart();
     for (let i = windowLo; i <= windowHi; i++) {
       manifest[i].loaded = false;
       assignedSlot[i] = -1;
@@ -4427,6 +4577,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // activation). Instant, no smooth scroll: animating across dozens of
   // unmaterialized pages would just show blanks.
   function _spRebuildWindow(newWindowLo, targetR) {
+    netRestart();
     for (let r = spWindowLo; r <= spWindowHi; r++) {
       const entry = spManifest[rOf(r)];
       if (entry) entry.loaded = false;
@@ -4690,7 +4841,25 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const imgEl = spSlotPool[si].img;
     if (imgEl.dataset.spUrl === entry.url) return; // already painted with this exact image
     imgEl.dataset.spUrl = entry.url;
+    netEnqueue({
+      idx, url: entry.url, kind: 'page',
+      alive: () => {
+        const s = spAssignedSlot[rOf(spManifest.indexOf(entry))];
+        return s !== -1 && spSlotPool[s].img === imgEl && imgEl.dataset.spUrl === entry.url;
+      },
+      onDrop: () => { if (imgEl.dataset.spUrl === entry.url) imgEl.dataset.spUrl = ''; },
+      start: (done) => _spStartSlotLoad(entry, imgEl, retriesLeft, done),
+    });
+  }
+
+  // The actual request for _spApplyUrlToSlot, run when the gate lets it start.
+  function _spStartSlotLoad(entry, imgEl, retriesLeft, done) {
+    // Same stalled-request guard as the long-strip loaders -- a request that
+    // never settles must not hold one of the gate's slots forever.
+    const timeoutId = setTimeout(done, PAGE_LOAD_TIMEOUT_MS);
     imgEl.onload = () => {
+      clearTimeout(timeoutId);
+      done();
       // Verify imgEl is STILL the element currently assigned to this entry
       // before marking it loaded -- under rapid flipping, a slot can be
       // shifted out (its element detached, entry reassigned to a fresh,
@@ -4702,6 +4871,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (curSi !== -1 && spSlotPool[curSi].img === imgEl) entry.loaded = true;
     };
     imgEl.onerror = () => {
+      clearTimeout(timeoutId);
+      done();
       if (retriesLeft > 0) {
         imgEl.dataset.spUrl = ''; // allow a retry to re-paint, not skip as "already done"
         setTimeout(() => _spApplyUrlToSlot(entry, retriesLeft - 1), 500);
@@ -4822,6 +4993,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _spLastFlipDir = idx > spCurrentIdx ? 1 : -1;
 
     spCurrentIdx = idx;
+    netSpFocus = idx;
     const entry  = spManifest[idx];
     ++_spAnimFrame; // invalidates any in-flight loadEntryTier1 slot-upgrade scheduled for a previous flip
 
