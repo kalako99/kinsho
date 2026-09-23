@@ -2123,6 +2123,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     img._cancelled = true;
     img.src = '';
     inFlightPrefetchImages.delete(idx);
+    // Free its request-gate place (and its URL) right now. A request
+    // cancelled this way doesn't reliably reject its decode() on Android
+    // WebView, so waiting for it held both until the 15s stall timeout --
+    // measured on the tablet 2026-09-23: opening a chapter in single-page
+    // mode cancels the long-strip request for the same page, and the
+    // single-page request then waited ~15s behind it.
+    img._netDone?.();
   }
 
   function cancelStalePrefetches(keepLo, keepHi) {
@@ -2328,7 +2335,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function _applyUrlToSlot(entry, retriesLeft = 2) {
     if (!entry.url) return;
     const globalIdx = manifest.indexOf(entry);
-    if (assignedSlot[globalIdx] === -1) return;
+    // globalIdx === -1: a stale entry from before a manifest rebuild (the
+    // refresh button) -- assignedSlot[-1] is undefined, not -1, so it has
+    // to be rejected explicitly.
+    if (globalIdx === -1 || assignedSlot[globalIdx] === -1) return;
     // Marks this entry as having a real (non-thumbnail) fetch in flight or
     // complete for its currently-assigned slot -- loadEntryTier3 checks
     // this before overwriting the slot with a thumbnail, so it doesn't
@@ -2346,7 +2356,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     entry._realDispatched = true;
     netEnqueue({
       idx: globalIdx, url: entry.url, kind: 'page',
-      alive: () => assignedSlot[manifest.indexOf(entry)] !== -1 && !entry.loaded,
+      alive: () => {
+        // -1 = stale entry from before a manifest rebuild (see above)
+        const i = manifest.indexOf(entry);
+        return i !== -1 && assignedSlot[i] !== -1 && !entry.loaded;
+      },
       onDrop: () => { entry._realDispatched = false; },
       start: (done) => _startSlotLoad(entry, globalIdx, retriesLeft, done),
     });
@@ -2360,6 +2374,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // decode() -- decoding runs in parallel and must not hold up the next
     // requests (measured: ~0.5s idle gap per step otherwise).
     img.onload = done;
+    img._netDone = done;  // see cancelInFlightPredecode
     img.src = entry.url;
 
     // settled guards against both the timeout and the real decode() outcome
@@ -2527,6 +2542,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const img = new Image();
       inFlightPrefetchImages.set(globalIdx, img);
       img.onload = done;  // see _startSlotLoad
+      img._netDone = done;
       img.src = url;
 
       // Same settled-guard timeout as _applyUrlToSlot's own -- a stalled
@@ -2624,11 +2640,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const img = new Image();
       inFlightPrefetchImages.set(idx, img);
       img.onload = done;  // see _startSlotLoad
+      img._netDone = done;
       img.src = url;
+      // Same stalled-request guard as every other loader: a request that
+      // never settles must not hold its gate place and URL forever.
+      const stallTimer = setTimeout(() => {
+        if (inFlightPrefetchImages.get(idx) === img) cancelInFlightPredecode(idx);
+        done();
+      }, PAGE_LOAD_TIMEOUT_MS);
       img.decode().then(() => {
+        clearTimeout(stallTimer);
         inFlightPrefetchImages.delete(idx);
         done();
       }).catch(() => {
+        clearTimeout(stallTimer);
         inFlightPrefetchImages.delete(idx);
         done();
         // A cancelled prefetch (page fell back out of even tier2 range)
@@ -4839,7 +4864,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     netEnqueue({
       idx, url: entry.url, kind: 'page',
       alive: () => {
-        const s = spAssignedSlot[rOf(spManifest.indexOf(entry))];
+        const i = spManifest.indexOf(entry);
+        if (i === -1) return false;  // stale entry from before a manifest rebuild
+        const s = spAssignedSlot[rOf(i)];
         return s !== -1 && spSlotPool[s].img === imgEl && imgEl.dataset.spUrl === entry.url;
       },
       onDrop: () => { if (imgEl.dataset.spUrl === entry.url) imgEl.dataset.spUrl = ''; },
@@ -5195,6 +5222,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         let newIdx = spManifest.findIndex(e => e.chapterId === anchorChapId && e.localIdx === anchorLocal);
         if (newIdx === -1) newIdx = Math.min(Math.max(0, anchorLocal), spManifest.length - 1);
         spCurrentIdx = Math.max(0, newIdx);
+        netSpFocus = spCurrentIdx;
 
         // Deliberately NOT spGotoIdx() -- its big-jump-vs-shift decision
         // can choose the cheap incremental _spShiftWindow path when the
@@ -5588,6 +5616,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // silently blocking every future completion-credit. Wrapped in try/catch
     // so a timeout (or any other fetch failure) just drops this one save
     // instead of throwing -- most callers don't await/catch this function.
+    const saveTimeout = new AbortController();
+    const saveTimer = setTimeout(() => saveTimeout.abort(), 15000);
     try {
       await fetch(apiUrl('/api/reading/progress'), {
         method: 'POST',
@@ -5600,8 +5630,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
           completed_chapter_id: completedChapterId,
         }),
         keepalive: true,
-        signal: AbortSignal.timeout(15000),
+        signal: saveTimeout.signal,
       });
+      // Cleared on success -- AbortSignal.timeout() kept running after the
+      // save had already succeeded and "aborted" its finished response at
+      // 15s, making every successful save look failed in DevTools.
+      clearTimeout(saveTimer);
       savedTabsAfterProgressSave(completedChapterId);
     } catch (_) {
       // Swallowed -- see the timeout comment above.
