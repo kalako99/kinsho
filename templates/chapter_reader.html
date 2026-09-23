@@ -5389,6 +5389,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       window.__kinshoBleOnRate = (rate) => {
         kinshoRate = rate;
         kinshoLastRateTime = performance.now();
+        if (rate !== 0 && readerSettings.mode === 'long-strip') kinshoEnsureLoop();
       };
 
       scrollerBtn.addEventListener('click', (e) => {
@@ -5456,7 +5457,21 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // read as "unresponsive, keeps drifting long after returning to center."
       const KINSHO_MAX_ACCEL = 125;
 
+      // The loop only runs while the scroller is actually driving the page
+      // (2026-09-23): it used to start on reader open and run every frame
+      // forever, connected or not, in any mode (~1900 calls per 30s while
+      // idle on the tablet). The first non-zero rate starts it (next
+      // frame, no perceptible delay); it stops itself once the displayed
+      // speed has ramped back down to zero, or outside long-strip mode.
+      // Connecting/auto-reconnecting is native-side and never needed it.
       let kinshoLastFrameTime = performance.now();
+      let kinshoLoopRunning = false;
+      function kinshoEnsureLoop() {
+        if (kinshoLoopRunning) return;
+        kinshoLoopRunning = true;
+        kinshoLastFrameTime = performance.now();
+        requestAnimationFrame(kinshoScrollLoop);
+      }
       function kinshoScrollLoop(now) {
         const dt = Math.min((now - kinshoLastFrameTime) / 1000, 0.1); // clamp for tab-switch/stalls
         kinshoLastFrameTime = now;
@@ -5505,9 +5520,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
           kinshoScrollPos = null;
         }
 
+        if ((kinshoRate === 0 && kinshoDisplayRate === 0) || readerSettings.mode !== 'long-strip') {
+          kinshoLoopRunning = false;
+          kinshoScrollPos = null;
+          return;
+        }
         requestAnimationFrame(kinshoScrollLoop);
       }
-      requestAnimationFrame(kinshoScrollLoop);
     }
   }
 
