@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <script src="/static/api.js"></script>
+  <script src="/static/debug_log.js"></script>
   <script src="/static/tab_state.js"></script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1201,6 +1202,16 @@
       <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
     </svg>
   </button>
+  <!-- Admin only, shown from JS: saves the last 5 minutes of device + server
+       logs to the NAS (static/debug_log.js, POST /api/admin/debug-log) -->
+  <button type="button" class="topbar-iconbtn" id="debugLogBtn" style="display:none" aria-label="Save debug log" title="Save debug log">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+      <line x1="8" y1="13" x2="16" y2="13"/>
+      <line x1="8" y1="17" x2="13" y2="17"/>
+    </svg>
+  </button>
   <!-- Android app only; hidden by default, shown via JS feature-detection
        on window.KinshoBLE (see kinsho-android/CLAUDE.md) -->
   <button type="button" class="topbar-iconbtn" id="scrollerBtn" style="display:none" aria-label="Scroller device" title="Scroller device">
@@ -1404,6 +1415,9 @@
 <script>
 window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 (async () => {
+
+  // Debug log line (see static/debug_log.js); a no-op if that didn't load.
+  const dbg = window.kinshoDebugLog ? window.kinshoDebugLog.log : () => {};
 
   // Replace the current history entry so chapter-to-chapter navigation
   // doesn't stack: pressing back always returns to the manga detail page.
@@ -2136,7 +2150,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // measured on the tablet 2026-09-23: opening a chapter in single-page
     // mode cancels the long-strip request for the same page, and the
     // single-page request then waited ~15s behind it.
-    img._netDone?.();
+    img._netDone?.('cancelled');
   }
 
   function cancelStalePrefetches(keepLo, keepHi) {
@@ -2217,6 +2231,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   function netEnqueue(task) {
     netQueue.push(task);
+    dbg(`[gate] queued ${task.kind} ${dbgPage(task.idx)}`);
     // Deferred to a microtask so a caller enqueueing a whole window in one
     // synchronous pass (e.g. _rebuildConveyorWindow) has every candidate in
     // the queue before the first pick is made.
@@ -2228,11 +2243,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   function netPump() {
     let live = 0;
+    const dropped = [];
     for (const t of netQueue) {
       if (t.alive()) netQueue[live++] = t;
-      else t.onDrop?.();
+      else { t.onDrop?.(); dropped.push(t.kind + '#' + t.idx); }
     }
     netQueue.length = live;
+    if (dropped.length) dbg(`[gate] dropped (no longer wanted): ${dropped.join(' ')}`);
     while (netQueue.length && netInFlight < NET_MAX_IN_FLIGHT && netCredits > 0) {
       const focus = netFocusIdx();
       let best = -1, bestP = Infinity;
@@ -2246,10 +2263,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       netCredits--;
       netInFlight++;
       netUrlsInFlight.set(t.url, (netUrlsInFlight.get(t.url) || 0) + 1);
+      dbg(`[gate] start ${t.kind} ${dbgPage(t.idx)} ${t.url} (in flight ${netInFlight}, queued ${netQueue.length})`);
+      const t0 = performance.now();
       let finished = false;
-      t.start(() => {
+      // reason: an onload Event, or 'timeout' / 'error' / 'cancelled'
+      t.start((reason) => {
         if (finished) return;
         finished = true;
+        dbg(`[gate] end ${t.kind} ${dbgPage(t.idx)} ${typeof reason === 'string' ? reason : (reason?.type || 'ok')} after ${Math.round(performance.now() - t0)}ms`);
         netInFlight--;
         const n = netUrlsInFlight.get(t.url) - 1;
         if (n > 0) netUrlsInFlight.set(t.url, n); else netUrlsInFlight.delete(t.url);
@@ -2395,7 +2416,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       inFlightPrefetchImages.delete(globalIdx);
       img._cancelled = true;
       img.src = '';  // abandons the stalled request, same as cancelInFlightPredecode
-      done();
+      done('timeout');
       entry._realDispatched = false;
       if (retriesLeft > 0) {
         setTimeout(() => _applyUrlToSlot(entry, retriesLeft - 1), 500);
@@ -2414,15 +2435,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // above -- the conveyor can shift while this decode is in flight,
       // moving (or removing) this entry's slot in the meantime.
       const curSi = assignedSlot[manifest.indexOf(entry)];
-      if (curSi === -1) return;
+      if (curSi === -1) { dbg(`[slot] ${dbgPage(globalIdx)} decoded but no longer in the window`); return; }
       slotPool[curSi].img.src = entry.url;
       entry.loaded = true;
+      dbg(`[slot] ${dbgPage(globalIdx)} shown in slot ${curSi}`);
     }).catch(() => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
       inFlightPrefetchImages.delete(globalIdx);
-      done();
+      done('error');
+      dbg(`[slot] ${dbgPage(globalIdx)} decode failed${img._cancelled ? ' (cancelled)' : `, retries left ${retriesLeft}`}`);
       // A deliberate cancelInFlightPredecode() (this slot was vacated while
       // still decoding) also rejects this same decode() promise -- retrying
       // here would immediately re-dispatch a fresh request for a page we
@@ -2573,7 +2596,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         inFlightPrefetchImages.delete(globalIdx);
         img._cancelled = true;
         img.src = '';
-        done();
+        done('timeout');
         onFail();
       }, PAGE_LOAD_TIMEOUT_MS);
 
@@ -2596,13 +2619,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         done();
         const curSi = assignedSlot[globalIdx];
         if (curSi !== -1) slotPool[curSi].img.src = url;
+        dbg(`[tier1] ${dbgPage(globalIdx)} decoded${curSi !== -1 ? `, shown in slot ${curSi}` : ''}`);
         onSuccess();
       }).catch(() => {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutId);
         inFlightPrefetchImages.delete(globalIdx);
-        done();
+        done('error');
         // A deliberate cancelStalePrefetches() (src cleared because this
         // page fell outside even the tier2 range) also rejects this same
         // decode() promise -- retrying here would immediately re-dispatch a
@@ -2659,7 +2683,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // never settles must not hold its gate place and URL forever.
       const stallTimer = setTimeout(() => {
         if (inFlightPrefetchImages.get(idx) === img) cancelInFlightPredecode(idx);
-        done();
+        done('timeout');
       }, PAGE_LOAD_TIMEOUT_MS);
       img.decode().then(() => {
         clearTimeout(stallTimer);
@@ -2668,7 +2692,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       }).catch(() => {
         clearTimeout(stallTimer);
         inFlightPrefetchImages.delete(idx);
-        done();
+        done('error');
         // A cancelled prefetch (page fell back out of even tier2 range)
         // also rejects here via cancelInFlightPredecode's img.src = '' --
         // nothing further to do either way; tier2 never retries a failure,
@@ -2734,7 +2758,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       settled = true;
       img.src = '';
       delete img.dataset.thumbSet;  // a future tier3 sweep over this entry can retry
-      done();
+      done('timeout');
     }, PAGE_LOAD_TIMEOUT_MS);
     img.onload = () => {
       if (settled) return;
@@ -2747,7 +2771,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       settled = true;
       clearTimeout(timeoutId);
       delete img.dataset.thumbSet;
-      done();
+      done('error');
     };
     img.src = thumbUrl(entry);
   }
@@ -2897,6 +2921,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function _rebuildConveyorWindow(newWindowLo, targetGlobalY) {
+    dbg(`[conveyor] rebuild from ${newWindowLo}, target y ${Math.round(targetGlobalY)}`);
     netRestart();
     for (let i = windowLo; i <= windowHi; i++) {
       manifest[i].loaded = false;
@@ -2991,6 +3016,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // spacers' heights consistent with the new window, which is what keeps
   // the visible content from moving (see FULL-HEIGHT SPACERS above). ──
   function _shiftConveyorWindow(delta) {
+    dbg(`[conveyor] shift ${delta > 0 ? '+' : ''}${delta} (window was ${windowLo}-${windowHi})`);
     if (delta > 0) {
       const frag = document.createDocumentFragment();
       for (let k = 0; k < delta; k++) {
@@ -3232,6 +3258,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       cbWorker.onmessage = (e) => {
         const msg = e.data;
         if (msg.type !== 'paintFailed') return;
+        dbg(`[canvas] paint failed ${dbgPage(msg.globalIdx)}`);
         const slot = cbPages.find(s => s.parts.some(p => p.workerIndex === msg.segmentIndex));
         if (!slot || slot.globalIdx !== msg.globalIdx) return;  // reassigned since -- nothing to retry
         if (slot.retries >= CB_MAX_PAINT_RETRIES) return;
@@ -3447,6 +3474,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function cbActivate() {
     if (cbActive) return;
     cbActive = true;
+    dbg('[canvas] on');
     _clearSlotPool();
     windowLo = 0; windowHi = -1;
 
@@ -3467,6 +3495,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function cbDeactivate() {
     if (!cbActive) return;
     cbActive = false;
+    dbg('[canvas] off');
     for (const slot of cbPages) slot.el.remove();
     cbPages = [];
     cbWindowLo = 0; cbWindowHi = -1;
@@ -4959,7 +4988,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function _spStartSlotLoad(entry, imgEl, retriesLeft, done) {
     // Same stalled-request guard as the long-strip loaders -- a request that
     // never settles must not hold one of the gate's slots forever.
-    const timeoutId = setTimeout(done, PAGE_LOAD_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => done('timeout'), PAGE_LOAD_TIMEOUT_MS);
     imgEl.onload = () => {
       clearTimeout(timeoutId);
       done();
@@ -4979,10 +5008,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const curIdx = spManifest.indexOf(entry);
       const curSi  = curIdx === -1 ? -1 : spAssignedSlot[rOf(curIdx)];
       if (curSi !== -1 && spSlotPool[curSi].img === imgEl) entry.loaded = true;
+      dbg(`[sp] ${dbgPage(curIdx)} loaded into slot ${curSi}${curSi !== -1 && spSlotPool[curSi].img === imgEl ? '' : ' (stale element)'}`);
     };
     imgEl.onerror = () => {
       clearTimeout(timeoutId);
-      done();
+      done('error');
+      dbg(`[sp] ${dbgPage(spManifest.indexOf(entry))} load error, retries left ${retriesLeft}`);
       if (retriesLeft > 0) {
         imgEl.dataset.spUrl = ''; // allow a retry to re-paint, not skip as "already done"
         setTimeout(() => _spApplyUrlToSlot(entry, retriesLeft - 1), 500);
@@ -5177,6 +5208,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (idx < 0) return;
     if (idx >= spManifest.length) { showLastPagePopup(); return; }
 
+    dbg(`[sp] go to ${dbgPage(idx)} from ${dbgPage(spCurrentIdx)}, strip at ${Math.round(spStrip.scrollLeft)}px`);
     _spMeasureVelocity(idx);
     _spLastFlipDir = idx > spCurrentIdx ? 1 : -1;
 
@@ -6028,6 +6060,90 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     bmToastEl.classList.add('show');
     clearTimeout(bmToastTimer);
     bmToastTimer = setTimeout(() => bmToastEl.classList.remove('show'), 2500);
+  }
+
+  // ── DEBUG LOG ──
+  // static/debug_log.js keeps the last 5 minutes; this adds the reader's own
+  // numbers to each sample, and a snapshot taken at export: what every page
+  // near the reading position holds right now (what explains a black page).
+  function dbgPage(idx) {
+    const e = manifest[idx];
+    return e ? `#${idx}(${e.chapterId} p${e.localIdx + 1})` : `#${idx}`;
+  }
+
+  // url: the page's own URL -- src/spUrl are only spelled out when they differ.
+  function dbgImg(img, url) {
+    if (!img) return 'no img';
+    const r = img.getBoundingClientRect();
+    const same = (v) => (url && v === url ? '(page url)' : v || '(none)');
+    return `src=${same(img.getAttribute('src'))} complete=${img.complete} ` +
+      `natural=${img.naturalWidth}x${img.naturalHeight} ` +
+      `rect=${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}` +
+      (img.dataset.thumbSet ? ' thumbSet' : '') +
+      (img.dataset.spUrl !== undefined ? ` spUrl=${same(img.dataset.spUrl)}` : '');
+  }
+
+  function dbgEntry(idx) {
+    const e = manifest[idx];
+    const queued = netQueue.filter(t => t.idx === idx).map(t => t.kind).join(',');
+    return `url=${e.url || '(unresolved)'} loaded=${e.loaded} realDispatched=${!!e._realDispatched} ` +
+      `requestInFlight=${inFlightPrefetchImages.has(idx)} queued=${queued || 'no'}`;
+  }
+
+  function dbgSnapshot() {
+    const out = [];
+    const focus = netFocusIdx();
+    out.push(`mode=${readerSettings.mode} canvas=${cbActive} pages=${manifest.length} reading=${dbgPage(focus)}`);
+    out.push(`virtualY=${Math.round(virtualY)} coordOffset=${coordOffset} scrollTop=${Math.round(reader.scrollTop)} window=${windowLo}-${windowHi}`);
+    out.push(`gate: in flight ${netInFlight}, credits ${netCredits}, queued ${netQueue.length} [${netQueue.map(t => t.kind + '#' + t.idx).join(' ')}]`);
+    out.push(`gate URLs in flight: ${[...netUrlsInFlight.keys()].join(' ') || 'none'}`);
+    const hit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    out.push(`element at screen centre: ${hit ? `<${hit.tagName.toLowerCase()} id="${hit.id}" class="${hit.className}">` : 'none'}` +
+      (hit?.tagName === 'IMG' ? ' ' + dbgImg(hit) : ''));
+    out.push('pages near the reading position (> = current):');
+    if (readerSettings.mode === 'single-page') {
+      out.push(`single-page: window=${spWindowLo}-${spWindowHi} strip scrollLeft=${Math.round(spStrip.scrollLeft)} width=${spStrip.clientWidth}`);
+      for (let i = Math.max(0, spCurrentIdx - 3); i <= Math.min(manifest.length - 1, spCurrentIdx + 3); i++) {
+        const si = spAssignedSlot[rOf(i)];
+        out.push(`${i === spCurrentIdx ? '>' : ' '} ${dbgPage(i)} slot=${si} ${dbgEntry(i)}${si === -1 ? '' : ' ' + dbgImg(spSlotPool[si].img, manifest[i].url)}`);
+      }
+    } else if (cbActive) {
+      for (const slot of cbPages) {
+        if (slot.globalIdx === -1 || Math.abs(slot.globalIdx - focus) > 4) continue;
+        const r = slot.el.getBoundingClientRect();
+        out.push(`${slot.globalIdx === focus ? '>' : ' '} ${dbgPage(slot.globalIdx)} painted=${slot.painted} pending=${slot.pending} ` +
+          `retries=${slot.retries} pieces=${slot.pieces ? slot.pieces.length : 'none'} top=${Math.round(r.top)} height=${Math.round(r.height)}`);
+      }
+    } else {
+      for (let i = Math.max(0, focus - 4); i <= Math.min(manifest.length - 1, focus + 6); i++) {
+        const si = assignedSlot[i];
+        out.push(`${i === focus ? '>' : ' '} ${dbgPage(i)} slot=${si} ${dbgEntry(i)}${si === -1 ? '' : ' ' + dbgImg(slotPool[si].img, manifest[i].url)}`);
+      }
+    }
+    return out.join('\n');
+  }
+
+  window.kinshoDebugLog?.setSampleExtra(() =>
+    `reader ${readerSettings.mode}${cbActive ? ' canvas' : ''} at ${dbgPage(netFocusIdx())}, ` +
+    `gate ${netInFlight} in flight / ${netQueue.length} queued` +
+    (cbActive ? `, canvas ${cbPages.filter(s => s.painted).length}/${cbPages.length} painted` : ''));
+
+  const debugLogBtn = document.getElementById('debugLogBtn');
+  if (adminData?.is_admin && window.kinshoDebugLog) {
+    window.kinshoDebugLog.setSnapshot(dbgSnapshot);
+    debugLogBtn.style.display = '';
+    debugLogBtn.addEventListener('click', async () => {
+      debugLogBtn.disabled = true;
+      showToast('Saving debug log…');
+      try {
+        const res = await window.kinshoDebugLog.exportLog();
+        showToast(`Log saved: ${res.files[0].replace('_device.txt', '')}`);
+      } catch (err) {
+        showToast(`Saving the log failed: ${err.message}`);
+      } finally {
+        debugLogBtn.disabled = false;
+      }
+    });
   }
 
   // ── MODAL HELPERS ──

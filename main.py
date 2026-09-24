@@ -32,7 +32,11 @@ import integrity
 import epub_reader
 import auto_extract
 import volume_rename
+import debug_log
 from fastapi.middleware.cors import CORSMiddleware
+
+# Before anything else prints -- see debug_log.py.
+debug_log.install()
 
 try:
     import rarfile
@@ -92,6 +96,7 @@ async def lifespan(app):
     ip = get_local_ip()
     print(f"\n  Kinsho running at: http://{ip}:8000\n")
     threading.Thread(target=_scan_worker, daemon=True).start()
+    debug_log.start_sampler()
     task = asyncio.create_task(periodic_library_rescan())
     integrity_task = asyncio.create_task(run_integrity_check_loop())
     yield
@@ -190,6 +195,9 @@ async def default_no_store(request: Request, call_next):
         return response
     response.headers["Cache-Control"] = "no-store"
     return response
+
+# Added last so it's the outermost layer: its timings cover everything above.
+app.add_middleware(debug_log.RequestLogMiddleware)
 
 def is_idle(threshold_seconds: int = 1200) -> bool:
     """No session/token-authenticated request in the last `threshold_seconds` (default 20 min)."""
@@ -5348,7 +5356,39 @@ def save_admin(data: dict, username: str = "admin"):
 @app.get("/api/admin/status")
 def get_admin_status(request: Request):
     username = auth.get_current_user(request)
-    return JSONResponse(auth.load_user_data(username)) 
+    return JSONResponse(auth.load_user_data(username))
+
+@app.post("/api/admin/debug-log")
+async def save_debug_log(request: Request):
+    """The reader's debug-log button: saves the device's last 5 minutes (sent
+    in the body, see static/debug_log.js) and the server's (debug_log.py) as
+    two txt files under {data_path}/debug_logs/."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    received = time.time()
+    body = await request.json()
+    sent = body.get("sent_at", 0) / 1000
+    header = "\n".join([
+        f"Exported by: {auth.get_current_user(request)}",
+        f"Page: {body.get('page', '')}",
+        f"Device user agent: {request.headers.get('user-agent', '')}",
+        f"Server received: {debug_log.ts(received)}",
+        f"Device sent:     {debug_log.ts(sent)}" if sent else "Device sent: unknown",
+        # Includes the upload time, so it's an upper bound on the clock difference.
+        f"Server clock minus device clock: {(received - sent) * 1000:+.0f}ms" if sent else "",
+        "All times are UTC.",
+        "",
+    ])
+    folder = os.path.join(get_data_path() or ".", "debug_logs")
+    os.makedirs(folder, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    device_name, server_name = f"{stamp}_device.txt", f"{stamp}_server.txt"
+    with open(os.path.join(folder, device_name), "w", encoding="utf-8") as f:
+        f.write(header + "\n" + body.get("log", ""))
+    with open(os.path.join(folder, server_name), "w", encoding="utf-8") as f:
+        f.write(header + "\n" + debug_log.dump() + "\n")
+    return JSONResponse({"files": [device_name, server_name], "folder": folder})
 
 @app.get("/api/manga/{library_id}/{manga_id}/covers")
 def get_manga_covers(request: Request, library_id: int, manga_id: str):
