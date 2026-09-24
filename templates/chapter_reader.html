@@ -755,6 +755,17 @@
       -webkit-user-drag: none;
       user-select: none;
     }
+    /* Canvas pages (opt-in): a canvas keeps its 1x1 intrinsic size (see
+       cbResetPart), so its box is sized from the page's own aspect ratio,
+       --sp-r, fitted into the slot like the img's object-fit: contain. */
+    .sp-slot { container-type: size; }
+    .sp-canvas {
+      display: none;
+      width: min(100cqw, calc(100cqh * var(--sp-r)));
+      aspect-ratio: var(--sp-r);
+    }
+    .sp-slot.sp-cb-ready .sp-canvas { display: block; }
+    .sp-slot.sp-cb-ready img { display: none; }
 
     /* ── BOOKMARK PANEL ── */
     .bookmark-panel {
@@ -1359,6 +1370,13 @@
         Right to left
       </button>
     </div>
+    <div class="settings-row">
+      <span class="settings-row-label">Canvas pages (experimental)</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsSpCanvasToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
   </div>
   <!-- PDF quality (only shown for PDF sources) -->
   <div id="settingsPdfQualityWrap" style="display:none">
@@ -1881,7 +1899,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
     { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
-      canvasBufferEnabled: false, canvasBufferMB: 500 },
+      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -4464,6 +4482,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const canvasBufferWrap = document.getElementById('settingsCanvasBufferWrap');
     if (canvasBufferWrap) canvasBufferWrap.style.display = isLong ? '' : 'none';
     settingsCanvasBufferToggle.checked = !!readerSettings.canvasBufferEnabled;
+    document.getElementById('settingsSpCanvasToggle').checked = !!readerSettings.spCanvasEnabled;
     document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
       readerSettings.canvasBufferEnabled ? '' : 'none';
     document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
@@ -4526,6 +4545,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   document.getElementById('settingsPreloadRange').addEventListener('input', (e) => {
     applyPreloadRadius(Number(e.target.value));
+    saveReaderSettings();
+  });
+
+  document.getElementById('settingsSpCanvasToggle').addEventListener('change', (e) => {
+    readerSettings.spCanvasEnabled = e.target.checked;
+    spCbUpdate();  // paints the pages around the current one, or frees them all
     saveReaderSettings();
   });
 
@@ -4857,6 +4882,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (delta === 0) return;
     if (Math.abs(delta) >= count) _spRebuildWindow(target, currentR);
     else _spShiftWindow(delta);
+    spCbUpdate();
   }
 
   // Set only once a pointer actually MOVES past a small threshold after
@@ -5323,6 +5349,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     const globalIdx = manifest.indexOf(entry);
     if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
+    spCbUpdate();
 
     updateProgressBar();
 
@@ -5418,6 +5445,105 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   });
 
+  // ── SINGLE-PAGE CANVAS PAGES (opt-in, readerSettings.spCanvasEnabled, 2026-09-24) ──
+  // The black flick on a single-page turn was the GPU decoding the incoming
+  // page right then: traced on the tablet, the turns that flicked (and the
+  // laggy first one) were exactly the ones with GpuImageDecodeCache decodes
+  // of 35-87ms mid-turn -- the GPU keeps its own decoded copy of an <img>,
+  // has room for only a few 1440x7000 pages and drops them when idle, and
+  // img.decode() only warms Blink's copy, not that one. With this on, the
+  // current page and SP_CB_RADIUS on each side get a 'bitmaprenderer'
+  // canvas holding the page already decoded (the long-strip canvas
+  // buffer's worker decodes it and sends the bitmap back), so a turn only
+  // uploads it (~8ms) instead of decoding it. The slot's <img> keeps
+  // loading exactly as before underneath and is what shows until the
+  // canvas is ready, if a decode fails, or for a page taller than the GPU
+  // texture limit (a canvas over it shows black).
+  const SP_CB_RADIUS = 2;
+  let spCbWorker = null;
+  let spCbNextId = 0;
+  const spCbCanvases = new Map();  // id -> {el (slot), canvas, ctx, idx}
+
+  function spCbEnsureWorker() {
+    if (spCbWorker) return spCbWorker;
+    spCbWorker = new Worker(apiUrl('/static/reader_canvas_worker.js'));
+    spCbWorker.onerror = (e) => {
+      console.error('[single-page canvas] worker error', e.message, e.filename, e.lineno);
+    };
+    spCbWorker.onmessage = (e) => {
+      const msg = e.data;
+      const c = spCbCanvases.get(msg.segmentIndex);
+      if (msg.type === 'bitmap') {
+        if (!c || c.idx !== msg.globalIdx) { msg.bitmap.close(); return; }
+        c.ctx.transferFromImageBitmap(msg.bitmap);
+        c.el.classList.add('sp-cb-ready');
+        dbg(`[sp canvas] ${dbgPage(msg.globalIdx)} ready`);
+      } else if (msg.type === 'paintFailed') {
+        dbg(`[sp canvas] ${dbgPage(msg.globalIdx)} decode failed, the <img> stays`);
+      }
+    };
+    return spCbWorker;
+  }
+
+  function spCbRelease(id) {
+    const c = spCbCanvases.get(id);
+    if (!c) return;
+    c.ctx.transferFromImageBitmap(null);  // free the bitmap now, not at GC
+    c.canvas.remove();
+    c.el.classList.remove('sp-cb-ready');
+    spCbWorker?.postMessage({ type: 'release', segmentIndex: id });
+    spCbCanvases.delete(id);
+  }
+
+  function spCbPaint(el, idx) {
+    const entry = spManifest[idx];
+    const nat = cbNaturalDims(entry);
+    const canvas = document.createElement('canvas');
+    canvas.className = 'sp-canvas';
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.style.setProperty('--sp-r', String(nat.iw / nat.ih));
+    el.appendChild(canvas);
+    const id = spCbNextId++;
+    spCbCanvases.set(id, { el, canvas, ctx: canvas.getContext('bitmaprenderer'), idx });
+    const worker = spCbEnsureWorker();
+    worker.postMessage({ type: 'assign', segmentIndex: id, globalIdx: idx });
+    const send = () => {
+      if (!spCbCanvases.has(id) || !entry.url) return;  // released while the URL resolved
+      worker.postMessage({ type: 'paint', segmentIndex: id, globalIdx: idx, url: entry.url, iw: nat.iw, sy0: 0, rows: nat.ih });
+    };
+    if (entry.url) send();
+    else ensureChapterUrls(entry.chapterId).then(urls => {
+      if (!entry.url) entry.url = urls[entry.localIdx] || '';
+      send();
+    });
+  }
+
+  // Gives the pages within SP_CB_RADIUS of the current one a canvas and
+  // frees every other (including those of slots no longer in the window).
+  // Safe to call any time; with the setting off (or in long-strip mode) it
+  // frees everything.
+  function spCbUpdate() {
+    const on = readerSettings.spCanvasEnabled && readerSettings.mode === 'single-page';
+    const wanted = new Map();  // slot element -> page index
+    if (on) {
+      const maxTex = cbMaxTextureSize();
+      for (let k = 0; k < spSlotPool.length; k++) {
+        const idx = rOf(spWindowLo + k);
+        if (Math.abs(idx - spCurrentIdx) > SP_CB_RADIUS) continue;
+        const nat = spManifest[idx] && cbNaturalDims(spManifest[idx]);
+        if (!nat || nat.iw > maxTex || nat.ih > maxTex) continue;  // <img> only
+        wanted.set(spSlotPool[k].el, idx);
+      }
+    }
+    for (const [id, c] of spCbCanvases) {
+      if (wanted.get(c.el) === c.idx) wanted.delete(c.el);  // already has its page
+      else spCbRelease(id);
+    }
+    for (const [el, idx] of wanted) spCbPaint(el, idx);
+    if (!on && spCbWorker) { spCbWorker.terminate(); spCbWorker = null; }
+  }
+
   function activateSinglePageMode() {
     reader.style.display = 'none';
     singlePageView.classList.add('active');
@@ -5431,6 +5557,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function activateLongStripMode() {
+    spCbUpdate();  // not in single-page mode anymore: frees every canvas page
     reader.style.display = '';
     singlePageView.classList.remove('active');
     // Restore virtualY to the current single page position

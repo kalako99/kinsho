@@ -6371,7 +6371,7 @@ async def save_reader_settings(request: Request):
         return JSONResponse({"ok": False, "error": "Missing library_id"}, status_code=400)
     user_data    = auth.load_user_data(username)
     allowed_keys = {"mode", "padding", "direction", "stripWidth", "preloadRadius", "pdfScale",
-                     "canvasBufferEnabled", "canvasBufferMB"}
+                     "canvasBufferEnabled", "canvasBufferMB", "spCanvasEnabled"}
     by_tab       = user_data.get("reader_settings_by_tab", {})
     current      = by_tab.get(library_id, {})
     for key in allowed_keys:
