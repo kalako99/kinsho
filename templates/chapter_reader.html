@@ -3681,18 +3681,28 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // frame is easiest to perceive (2026-08-09). Coalesces any scroll events
   // that fire faster than once per frame into a single check per frame, and
   // lets the browser schedule that check relative to its own paint work
-  // instead of forcing it inline. _syncRafPending guards against queuing more
-  // than one pending frame; the callback reads reader.scrollTop fresh at
-  // execution time (via syncScrollPosition itself), so a burst of events
-  // collapsing into one check still uses the latest position, not a stale one.
-  let _syncRafPending = false;
+  // instead of forcing it inline.
+  //
+  // Now on a timer (at most every SCROLL_SYNC_INTERVAL_MS while scrolling),
+  // not requestAnimationFrame (2026-09-24): a rAF per scroll event made the
+  // main thread produce a frame on every compositor frame of a fling, and
+  // some of those commits pushed a slightly stale scroll offset back onto
+  // the compositor -- the end-of-fling jitter (steps of +1/-8px, measured on
+  // the tablet; zero with this listener switched off, and not caused by
+  // window shifts, which only happened at scrollend). Nothing here needs
+  // per-frame precision: the window recenters EDGE_MARGIN pages before its
+  // edge. flushSyncScrollPosition() runs a pending sync immediately
+  // wherever the exact final position matters (scrollend, settle, resume).
+  const SCROLL_SYNC_INTERVAL_MS = 50;
+  let _syncTimer = null;
   function scheduleSyncScrollPosition() {
-    if (_syncRafPending) return;
-    _syncRafPending = true;
-    requestAnimationFrame(() => {
-      _syncRafPending = false;
-      syncScrollPosition();
-    });
+    if (_syncTimer !== null) return;
+    _syncTimer = setTimeout(flushSyncScrollPosition, SCROLL_SYNC_INTERVAL_MS);
+  }
+  function flushSyncScrollPosition() {
+    clearTimeout(_syncTimer);
+    _syncTimer = null;
+    syncScrollPosition();
   }
 
   reader.addEventListener('scroll', () => {
@@ -3702,6 +3712,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   if (supportsScrollEnd) {
     reader.addEventListener('scrollend', () => {
+      flushSyncScrollPosition();
       (readerSettings.canvasBufferEnabled && cbActive) ? canvasBufferTick(true) : recenterConveyor(true);
     }, { passive: true });
   }
@@ -3711,27 +3722,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // keeps working the instant the screen unlocks (it never depended on this
   // app's own JS), but reading position/progress-saving/chapter-completion --
   // and even the conveyor's own slot virtualization -- ALL live downstream of
-  // syncScrollPosition(), which only ever re-enters via requestAnimationFrame
-  // from inside the native 'scroll' listener above. If a rAF queued right as
+  // syncScrollPosition(), which only ever re-enters via a timer
+  // from inside the native 'scroll' listener above. If a sync queued right as
   // the screen locked is dropped rather than merely deferred (or the WebView
   // is simply slow to resume dispatching real 'scroll' events after resume),
   // nothing re-primes the chain until the user happens to scroll -- read live
   // as "chapter completion and the last-read page both silently stop
   // updating after locking mid-chapter." Force one synchronous resync
-  // directly (not through scheduleSyncScrollPosition/rAF, in case rAF itself
+  // directly (not through scheduleSyncScrollPosition, in case its timer
   // is what's stuck) the moment the page becomes visible again, so reading
   // can never resume with this pipeline dark. Harmless to call redundantly
   // when nothing was actually stuck -- syncScrollPosition() itself no-ops
   // past its own throttle/edge checks when nothing changed. Long-strip only,
   // matching checkChapterCompletion's own scope (its very first line) --
   // single-page mode's progress save is driven by its own per-flip settle
-  // handler (spGotoIdx's spProgressSaveTimer), not this scroll/rAF chain, and
+  // handler (spGotoIdx's spProgressSaveTimer), not this scroll/sync chain, and
   // #reader isn't even the active scroll surface there.
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (readerSettings.mode !== 'long-strip') return;
-    _syncRafPending = false;
-    syncScrollPosition();
+    flushSyncScrollPosition();
   });
 
   let _settledRaf   = null;
@@ -3749,6 +3759,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       _settledTicks++;
       if (_settledTicks >= 2) {
         _settledRaf = null;
+        flushSyncScrollPosition();
         (readerSettings.canvasBufferEnabled && cbActive) ? canvasBufferTick(true) : recenterConveyor(true);
         return;
       }
