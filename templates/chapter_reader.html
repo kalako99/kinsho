@@ -5153,21 +5153,37 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // CURRENT scrollLeft as the new start, same "always animate from wherever
   // it actually is" behavior the native version had.
   const SP_FLIP_DURATION_MS = 110;
-  const _spEaseOutCubic = t => 1 - Math.pow(1 - t, 3);
+  const SP_SWIPE_MAX_DURATION_MS = 280;  // a slow swipe's release animation
   let _spFlipAnimId = null;
-  function _spAnimateScrollTo(targetLeft) {
+  // startVelocity (px/ms of scrollLeft, from a finger swipe): the animation
+  // starts at exactly that speed and eases out to rest on the target, so a
+  // swipe's release is continuous with the finger. Without it (keys, taps,
+  // BLE) it's the fixed-duration ease-out. Recorded on the tablet
+  // 2026-09-24: the old fixed 110ms ease-out started ~5-10x faster than
+  // the finger, so every swipe jolted forward at release.
+  // Cubic Hermite from (0, v0) to (d, 0) over T ms. With v0 = 3d/T it is
+  // exactly the ease-out cubic; v0 is capped there so it never overshoots.
+  function _spAnimateScrollTo(targetLeft, startVelocity = null) {
     if (_spFlipAnimId !== null) cancelAnimationFrame(_spFlipAnimId);
     const startLeft = spStrip.scrollLeft;
     const delta     = targetLeft - startLeft;
     if (delta === 0) { _spFlipAnimId = null; spStrip.style.scrollSnapType = ''; return; }
+    let duration = SP_FLIP_DURATION_MS, v0 = 3 * delta / SP_FLIP_DURATION_MS;
+    if (startVelocity !== null) {
+      const v = Math.sign(startVelocity) === Math.sign(delta) ? startVelocity : 0;  // moving away: start from rest
+      duration = v === 0 ? SP_SWIPE_MAX_DURATION_MS
+        : Math.min(SP_SWIPE_MAX_DURATION_MS, Math.max(SP_FLIP_DURATION_MS, 3 * delta / v));
+      v0 = Math.sign(delta) * Math.min(Math.abs(v), 3 * Math.abs(delta) / duration);
+    }
     // Snapping off while the script moves the strip (mandatory snap can
     // pull a programmatic scroll to the nearest page mid-way), restored at
     // the end.
     spStrip.style.scrollSnapType = 'none';
     const startTime = performance.now();
     function step(now) {
-      const t = Math.min(1, (now - startTime) / SP_FLIP_DURATION_MS);
-      spStrip.scrollLeft = startLeft + delta * _spEaseOutCubic(t);
+      const t = Math.min(1, (now - startTime) / duration);
+      const h01 = t * t * (3 - 2 * t), h10 = t * (1 - t) * (1 - t);
+      spStrip.scrollLeft = startLeft + delta * h01 + v0 * duration * h10;
       _spFlipAnimId = t < 1 ? requestAnimationFrame(step) : null;
       if (t >= 1) spStrip.style.scrollSnapType = '';
     }
@@ -5237,17 +5253,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     else if (drag >= viewW * SP_SWIPE_MIN_FRACTION || (flick && s.v > 0)) dir = -1;
     const startR = Math.round(s.left0 / viewW);
     const idx = rOf(startR + dir);
+    const stripVelocity = recentMove ? -s.v : 0;  // the strip moves opposite to the finger
     if (idx >= 0 && idx < spManifest.length) {
-      spGotoIdx(idx);
+      spGotoIdx(idx, stripVelocity);
     } else {
-      _spAnimateScrollTo(startR * viewW);  // past the true start/end: spring back
+      _spAnimateScrollTo(startR * viewW, stripVelocity);  // past the true start/end: spring back
       if (idx >= spManifest.length) showLastPagePopup();
     }
   }
   spStrip.addEventListener('pointerup', _spEndSwipe);
   spStrip.addEventListener('pointercancel', _spEndSwipe);
 
-  function spGotoIdx(idx) {
+  // startVelocity: the strip's speed at the end of a finger swipe, see _spAnimateScrollTo.
+  function spGotoIdx(idx, startVelocity = null) {
     // spManifest is the whole manga now (see its own declaration comment),
     // so these are only the true start/end of the manga, never a chapter
     // seam -- an ordinary chapter-to-chapter flip falls straight through to
@@ -5291,7 +5309,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (targetR < spWindowLo || targetR > spWindowHi) {
         _spShiftWindow(targetR - Math.floor((spWindowLo + spWindowHi) / 2));
       }
-      _spAnimateScrollTo(targetR * viewW);
+      _spAnimateScrollTo(targetR * viewW, startVelocity);
     }
     _spLoadEntry(entry);
 
@@ -6702,8 +6720,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // jump correctly credits every chapter skipped over, not just the
   // adjacent one), for both ordinary flips and jumpToPosition() jumps.
   const _origSpGotoIdxE2E = spGotoIdx;
-  spGotoIdx = function(idx) {
-    _origSpGotoIdxE2E(idx);
+  spGotoIdx = function(...args) {
+    _origSpGotoIdxE2E(...args);
     checkChapterCompletion();
     if (bmEndToEndActive) checkEndToEnd();
   };
