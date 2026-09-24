@@ -5185,7 +5185,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const h01 = t * t * (3 - 2 * t), h10 = t * (1 - t) * (1 - t);
       spStrip.scrollLeft = startLeft + delta * h01 + v0 * duration * h10;
       _spFlipAnimId = t < 1 ? requestAnimationFrame(step) : null;
-      if (t >= 1) spStrip.style.scrollSnapType = '';
+      if (t >= 1) {
+        spStrip.style.scrollSnapType = '';
+        // Settle here rather than waiting for scrollend: the settle is
+        // skipped while the animation runs (see _spScriptMoving), and the
+        // last frame's write doesn't reliably fire another scrollend, which
+        // left the window off-centre after rapid turns.
+        spRecenterWindow();
+        _spSettleCurrentIdx();
+      }
     }
     _spFlipAnimId = requestAnimationFrame(step);
   }
