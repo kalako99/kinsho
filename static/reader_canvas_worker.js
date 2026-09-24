@@ -1,33 +1,28 @@
 // ── LONG-STRIP CANVAS BUFFER WORKER (opt-in, 2026-09-21; one canvas per
-// page 2026-09-22; memory-budgeted 2026-09-23; 1:1 source pixels 2026-09-23) ──
-// Owns the OffscreenCanvas elements transferred from the main-thread
-// long-strip reader (see the "CANVAS BUFFER" section of chapter_reader.html).
-// Every fetch/decode/paint for this feature happens in here, never on the
-// main thread (the 2026-09-03 canvas rewrite that was reverted 2026-09-20
-// did its ctx.drawImage() calls on the main thread).
+// page 2026-09-22; memory-budgeted 2026-09-23; 1:1 source pixels 2026-09-23;
+// decode-only, bitmaps sent back to the page 2026-09-24) ──
+// Fetches and decodes the pages for the long-strip canvas buffer (see the
+// "CANVAS BUFFER" section of chapter_reader.html), off the main thread, and
+// sends each finished ImageBitmap back (transferred, not copied). The page
+// hands it to its canvas with transferFromImageBitmap() -- no drawing
+// anywhere. This worker used to own the canvases (OffscreenCanvas + 2D
+// drawImage); that kept ~3.3 copies of every page on the GPU, see the
+// section comment in chapter_reader.html.
 //
-// Each canvas holds its page (or one piece of a very tall page) at the
-// source image's own pixel size, 1:1 -- the compositor scales it to the
-// displayed size exactly like it does an <img>. Screen-resolution canvases
-// (the earlier design) were both bigger than the source (upscaled ~1.3x on
-// the tablet) and, at 1848x8983, over the tablet GPU's 8192px texture limit,
-// which the compositor silently shows as BLACK (proven on the Galaxy Tab S10
-// Ultra, 2026-09-23). The main thread splits a page into pieces only when
-// the source image itself is taller than the device's limit.
-//
-// Memory: a decoded bitmap is closed the moment the last paint job waiting
-// on it has drawn it, and a canvas that leaves the buffer is shrunk to 1x1.
+// Bitmaps are 1:1 with the source image. A page taller than the device's GPU
+// texture limit is sent as several pieces (the main thread decides the
+// split): each piece is cropped from one shared decode, which is closed once
+// every piece has its crop.
 //
 // Message protocol (main -> worker):
-//   {type:'addSegments', segments:[{index, canvas /* transferred OffscreenCanvas */}]}
-//   {type:'assign',      segmentIndex, width, height, globalIdx} -- backing size in source px
-//   {type:'release',     segmentIndex}                             -- canvas left the buffer
-//   {type:'paint',       segmentIndex, globalIdx, url, iw, sy0, rows} -- source rows [sy0, sy0+rows)
+//   {type:'assign',  segmentIndex, globalIdx} -- canvas now shows this page
+//   {type:'release', segmentIndex}            -- canvas left the buffer
+//   {type:'paint',   segmentIndex, globalIdx, url, iw, sy0, rows} -- source rows [sy0, sy0+rows)
 // Worker -> main:
-//   {type:'paintFailed', segmentIndex, globalIdx} -- fetch/decode failed; main may retry
+//   {type:'bitmap',      segmentIndex, globalIdx, bitmap} -- transferred
+//   {type:'paintFailed', segmentIndex, globalIdx}         -- fetch/decode failed; main may retry
 
-const ctxBySegment = new Map();   // segmentIndex -> CanvasRenderingContext2D
-const assignedIdx  = new Map();   // segmentIndex -> globalIdx it currently shows (-1 = none)
+const assignedIdx = new Map();   // segmentIndex -> globalIdx it currently shows (-1 = none)
 
 // url -> { promise, users } -- one decode shared by every piece of a page
 // (and any re-dispatch while a decode is in flight). Entries only live
@@ -55,18 +50,41 @@ function releaseBitmap(url, d, bitmap) {
   if (bitmap) { try { bitmap.close(); } catch (err) {} }
 }
 
+function stillWanted(msg) {
+  return assignedIdx.get(msg.segmentIndex) === msg.globalIdx;
+}
+
+function send(msg, bitmap) {
+  self.postMessage({ type: 'bitmap', segmentIndex: msg.segmentIndex, globalIdx: msg.globalIdx, bitmap }, [bitmap]);
+}
+
 function paint(msg) {
   const d = acquireBitmap(msg.url);
-  d.promise.then(bitmap => {
-    const ctx = ctxBySegment.get(msg.segmentIndex);
-    // Only draw if this canvas still shows the page the job was for -- it
-    // can be reassigned to a different page while the decode is in flight.
-    if (ctx && assignedIdx.get(msg.segmentIndex) === msg.globalIdx) {
-      ctx.drawImage(bitmap, 0, msg.sy0, msg.iw, msg.rows, 0, 0, msg.iw, msg.rows);
+  let released = false;  // this job's hold on the shared decode
+  const release = (bitmap) => { if (!released) { released = true; releaseBitmap(msg.url, d, bitmap); } };
+  d.promise.then(async bitmap => {
+    // The canvas can be reassigned to a different page while the decode is in flight.
+    if (!stillWanted(msg)) { release(bitmap); return; }
+    const whole = msg.sy0 === 0 && msg.rows === bitmap.height && msg.iw === bitmap.width;
+    if (whole && d.users === 1) {
+      // The only job for this decode: send the bitmap itself. It now
+      // belongs to the page, so it must not be closed here.
+      released = true;
+      d.users = 0;
+      decoding.delete(msg.url);
+      send(msg, bitmap);
+      return;
     }
-    releaseBitmap(msg.url, d, bitmap);
-  }, err => {
-    releaseBitmap(msg.url, d, null);
+    let piece;
+    try {
+      piece = await createImageBitmap(bitmap, 0, msg.sy0, msg.iw, msg.rows);
+    } finally {
+      release(bitmap);
+    }
+    if (stillWanted(msg)) send(msg, piece);
+    else piece.close();
+  }).catch(err => {
+    release(null);
     console.error('[canvas buffer worker] paint failed', msg.url, err);
     self.postMessage({ type: 'paintFailed', segmentIndex: msg.segmentIndex, globalIdx: msg.globalIdx });
   });
@@ -74,38 +92,15 @@ function paint(msg) {
 
 self.onmessage = (e) => {
   const msg = e.data;
-  try {
-    switch (msg.type) {
-    case 'addSegments':
-      for (const { index, canvas } of msg.segments) {
-        const ctx = canvas.getContext('2d');
-        if (!ctx) throw new Error('canvas.getContext(2d) returned null for segment ' + index);
-        ctxBySegment.set(index, ctx);
-        assignedIdx.set(index, -1);
-      }
-      break;
-    case 'assign': {
-      const ctx = ctxBySegment.get(msg.segmentIndex);
-      if (!ctx) break;
-      // Resizing also clears the canvas.
-      ctx.canvas.width  = Math.max(1, msg.width);
-      ctx.canvas.height = Math.max(1, msg.height);
-      assignedIdx.set(msg.segmentIndex, msg.globalIdx);
-      break;
-    }
-    case 'release': {
-      const ctx = ctxBySegment.get(msg.segmentIndex);
-      if (!ctx) break;
-      ctx.canvas.width = 1;
-      ctx.canvas.height = 1;
-      assignedIdx.set(msg.segmentIndex, -1);
-      break;
-    }
-    case 'paint':
-      paint(msg);
-      break;
-    }
-  } catch (err) {
-    console.error('[canvas buffer worker] onmessage threw for', msg.type, err);
+  switch (msg.type) {
+  case 'assign':
+    assignedIdx.set(msg.segmentIndex, msg.globalIdx);
+    break;
+  case 'release':
+    assignedIdx.set(msg.segmentIndex, -1);
+    break;
+  case 'paint':
+    paint(msg);
+    break;
   }
 };

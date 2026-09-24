@@ -3130,9 +3130,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // browser dropping pre-rastered tiles of off-screen <img> pages while idle
   // (the confirmed black-flick mechanism, see CLAUDE.md).
   //
-  // Every decode and drawImage() happens inside
-  // static/reader_canvas_worker.js via transferControlToOffscreen() -- zero
-  // canvas API calls on the main thread.
+  // Every fetch and decode happens inside static/reader_canvas_worker.js.
+  // The worker sends back the finished ImageBitmap (transferred, not
+  // copied) and the main thread hands it to the page's canvas with a
+  // 'bitmaprenderer' context -- transferFromImageBitmap() takes ownership of
+  // the bitmap, no drawing and no copy, so it costs the main thread nothing
+  // (the 2026-09-03 rewrite that froze Android did drawImage() on the main
+  // thread). Plain on-page canvases on purpose: OffscreenCanvas
+  // (transferControlToOffscreen, 2026-09-21..24) kept ~3.3 copies of every
+  // page on the GPU -- its own buffer plus the frames it hands to the
+  // compositor (measured on desktop Chromium with the GPU on; the tablet's
+  // app process grew ~2.5x the budget).
   //
   // Each page is one slot: a <div class="canvas-page"> holding its
   // canvas(es) at the SOURCE image's own pixel size, 1:1, scaled to the
@@ -3150,7 +3158,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // alternating forward and backward, until the next one wouldn't fit.
   // Slots and canvases are created lazily and recycled by reassignment
   // (cbRecenter), never torn down during ordinary scrolling; a canvas that
-  // leaves the window is shrunk to 1x1 in the worker to free its memory.
+  // leaves the window is emptied and shrunk to 1x1 to free its memory.
   const CB_MAX_PAGES_PER_TICK = 4;  // how many not-yet-painted pages get dispatched per tick
   const CB_MAX_PAINT_RETRIES  = 2;  // per assignment, after a worker-reported fetch/decode failure
   const CB_MIN_MB = 200, CB_MAX_MB = 3000, CB_DEFAULT_MB = 500;
@@ -3257,9 +3265,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       };
       cbWorker.onmessage = (e) => {
         const msg = e.data;
+        const slot = cbPages.find(s => s.parts.some(p => p.workerIndex === msg.segmentIndex));
+        if (msg.type === 'bitmap') {
+          const part = slot?.parts.find(p => p.workerIndex === msg.segmentIndex);
+          // Reassigned while it was decoding -- not this canvas's page anymore.
+          if (!part || slot.globalIdx !== msg.globalIdx) { msg.bitmap.close(); return; }
+          part.ctx.transferFromImageBitmap(msg.bitmap);
+          return;
+        }
         if (msg.type !== 'paintFailed') return;
         dbg(`[canvas] paint failed ${dbgPage(msg.globalIdx)}`);
-        const slot = cbPages.find(s => s.parts.some(p => p.workerIndex === msg.segmentIndex));
         if (!slot || slot.globalIdx !== msg.globalIdx) return;  // reassigned since -- nothing to retry
         if (slot.retries >= CB_MAX_PAINT_RETRIES) return;
         slot.retries++;
@@ -3301,11 +3316,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   // Gives a slot at least n canvases. A canvas is only ever added during an
-  // activation, never removed until cbDeactivate -- transferControlToOffscreen
-  // can only happen once per element.
+  // activation, never removed until cbDeactivate.
   function cbEnsureParts(slot, n) {
-    if (slot.parts.length >= n) return;
-    const segments = [];
     while (slot.parts.length < n) {
       const el = document.createElement('canvas');
       el.className = 'canvas-part';
@@ -3313,11 +3325,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       el.width = 1;
       el.height = 1;
       slot.el.appendChild(el);
-      const workerIndex = cbNextWorkerIndex++;
-      slot.parts.push({ el, workerIndex });
-      segments.push({ index: workerIndex, canvas: el.transferControlToOffscreen() });
+      slot.parts.push({ el, ctx: el.getContext('bitmaprenderer'), workerIndex: cbNextWorkerIndex++ });
     }
-    cbEnsureWorker().postMessage({ type: 'addSegments', segments }, segments.map(s => s.canvas));
+  }
+
+  // Empties a canvas (its bitmap is freed). Canvases stay 1x1: a
+  // 'bitmaprenderer' canvas shows the handed-over bitmap at the bitmap's own
+  // resolution whatever its width/height (verified pixel-exact), while
+  // emptying a canvas sized to a page allocates a blank page-sized bitmap
+  // on the main thread -- 944ms for 36 pages of 1440x7000 on desktop.
+  function cbResetPart(part) {
+    part.ctx.transferFromImageBitmap(null);
   }
 
   // Assigns pool slot `slot` to manifest[globalIdx], or blanks it (-1) and
@@ -3332,13 +3350,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       slot.el.style.height = '0px';
       for (const part of slot.parts) {
         part.el.style.height = '0px';
+        cbResetPart(part);
         cbWorker?.postMessage({ type: 'release', segmentIndex: part.workerIndex });
       }
       return;
     }
     const entry = manifest[globalIdx];
     slot.el.style.height = entry.scaledH + 'px';
-    const nat = cbNaturalDims(entry);
     const pieces = cbPieces(entry);
     if (!pieces) return;  // no dims for this page -- nothing paintable
     slot.pieces = pieces;
@@ -3346,9 +3364,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     slot.parts.forEach((part, j) => {
       if (j < pieces.length) {
         part.el.style.height = pieces[j].cssH + 'px';
-        cbWorker?.postMessage({ type: 'assign', segmentIndex: part.workerIndex, width: nat.iw, height: pieces[j].rows, globalIdx });
+        cbResetPart(part);
+        cbEnsureWorker().postMessage({ type: 'assign', segmentIndex: part.workerIndex, globalIdx });
       } else {
         part.el.style.height = '0px';
+        cbResetPart(part);
         cbWorker?.postMessage({ type: 'release', segmentIndex: part.workerIndex });
       }
     });
@@ -3437,8 +3457,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }
   }
 
-  // One paint job per piece -- the worker decodes the page once and draws
-  // each piece's source rows into its own canvas.
+  // One paint job per piece -- the worker decodes the page once and sends
+  // back one bitmap per piece (the whole page when it isn't split).
   function cbPostPaint(slot, entry) {
     const nat = cbNaturalDims(entry);
     if (!entry.url || !nat || !slot.pieces) return;  // not resolvable yet -- retried next tick
@@ -3496,7 +3516,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (!cbActive) return;
     cbActive = false;
     dbg('[canvas] off');
-    for (const slot of cbPages) slot.el.remove();
+    for (const slot of cbPages) {
+      for (const part of slot.parts) part.ctx.transferFromImageBitmap(null);  // free now, not at GC
+      slot.el.remove();
+    }
     cbPages = [];
     cbWindowLo = 0; cbWindowHi = -1;
     if (cbWorker) { cbWorker.terminate(); cbWorker = null; }
