@@ -4848,6 +4848,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (Math.abs(e.clientX - _spPointerDownX) > SP_DRAG_MOVE_THRESHOLD) _spUserDragging = true;
   }, { passive: true });
 
+  // True while this script is moving the strip itself: the page-turn
+  // animation or a finger swipe. Each of their scrollLeft writes fires its
+  // own scroll/scrollend, and settling on those snapped the strip onto the
+  // target page mid-animation, after which the animation's next frame put
+  // it back part-way -- the page arrived twice on every turn (recorded
+  // frame by frame on the tablet 2026-09-24, BLE arrows and swipes alike).
+  // The final write of the animation settles as usual.
+  function _spScriptMoving() {
+    return _spFlipAnimId !== null || _spSwipe !== null;
+  }
+
   function _spSettleCurrentIdx() {
     if (spManifest.length === 0) return;
     if (_spUserDragging) {
@@ -4885,6 +4896,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         stableTicks++;
         if (stableTicks >= 2) {
           _spSettledRAF = null;
+          if (_spScriptMoving()) return;
           spRecenterWindow();
           _spSettleCurrentIdx();
           return;
@@ -4918,6 +4930,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }, { passive: true });
   if (supportsScrollEnd) {
     spStrip.addEventListener('scrollend', () => {
+      if (_spScriptMoving()) return;
       spRecenterWindow();
       _spSettleCurrentIdx();
     }, { passive: true });
