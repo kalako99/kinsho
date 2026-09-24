@@ -15,6 +15,7 @@ with the device's own log file:
 import collections
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -51,6 +52,9 @@ def dump() -> str:
 
 # ── stdout / stderr / logging capture ──
 
+_ACCESS_LINE = re.compile(r'^INFO:\s+[\d.:\[\]a-f]+ - "')
+
+
 class _Tee:
     """Passes writes through to the real stream and records complete lines."""
     def __init__(self, stream, tag):
@@ -65,7 +69,8 @@ class _Tee:
             self._buf += s
             while "\n" in self._buf:
                 line, self._buf = self._buf.split("\n", 1)
-                if line.strip():
+                # uvicorn's access log repeats what RequestLogMiddleware logs.
+                if line.strip() and not _ACCESS_LINE.match(line):
                     log(f"[{self._tag}] {line}")
         return n
 
