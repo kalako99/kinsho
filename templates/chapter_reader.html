@@ -3017,11 +3017,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // the visible content from moving (see FULL-HEIGHT SPACERS above). ──
   function _shiftConveyorWindow(delta) {
     dbg(`[conveyor] shift ${delta > 0 ? '+' : ''}${delta} (window was ${windowLo}-${windowHi})`);
+    // Pages entering the window are loaded only after assignedSlot is
+    // rebuilt below: _applyUrlToSlot skips a page with no slot, and the
+    // tier1 predecode skips one still flagged _realDispatched -- so a page
+    // that had loaded, left the window and came straight back (a small
+    // scroll back-and-forth at the window's edge) was never loaded again:
+    // a black page until a refresh, which then showed it instantly from
+    // cache. Caught twice on the tablet 2026-09-24 via the debug-log button.
+    const entering = [];
     if (delta > 0) {
       const frag = document.createDocumentFragment();
       for (let k = 0; k < delta; k++) {
         const oldIdx = windowLo + k;
         manifest[oldIdx].loaded = false;
+        manifest[oldIdx]._realDispatched = false;
         assignedSlot[oldIdx] = -1;
         // Abort any still-in-flight fetch on this vacated slot -- see
         // _clearSlotPool's comment for why this matters.
@@ -3033,7 +3042,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const { el } = _makeSlotEl();
         el.style.height = manifest[newIdx].scaledH + 'px';
         frag.appendChild(el);
-        loadEntry(manifest[newIdx]);
+        entering.push(newIdx);
       }
       readerInner.insertBefore(frag, bottomSpacer);
       windowLo += delta;
@@ -3046,12 +3055,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const { el } = _makeSlotEl();
         el.style.height = manifest[newIdx].scaledH + 'px';
         frag.appendChild(el);
-        loadEntry(manifest[newIdx]);
+        entering.push(newIdx);
       }
       readerInner.insertBefore(frag, topSpacer.nextSibling);
       for (let k = 0; k < n; k++) {
         const oldIdx = windowHi - k;
         manifest[oldIdx].loaded = false;
+        manifest[oldIdx]._realDispatched = false;
         assignedSlot[oldIdx] = -1;
         slotPool[slotPool.length - 1 - k].img.src = '';
         slotPool[slotPool.length - 1 - k].el.remove();
@@ -3076,6 +3086,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       k++;
     }
     _syncSpacers();
+    for (const i of entering) loadEntry(manifest[i]);
     const shiftCenterIdx = Math.floor((windowLo + windowHi) / 2);
     prefetchAroundIndex(shiftCenterIdx);
   }
