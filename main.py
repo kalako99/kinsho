@@ -1030,13 +1030,13 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
         # putting a new volume 25 before volume 01. Unparseable names are
         # excluded from the provider chain entirely regardless of where they
         # land here, so their own ordering only needs to be stable, not exact.
-        parsed = volume_rename.parse_volume_name(dirname)
+        parsed = volume_rename.parse_volume_name(dirname, manga_name)
         if parsed is not None:
             return (0, parsed[0])
         return (1, natural_sort_key(dirname))
 
     ordered = sorted(dirnames, key=_rename_order_key)
-    renamed = volume_rename.compute_renamed_volumes([(d, d) for d in ordered])
+    renamed = volume_rename.compute_renamed_volumes([(d, d) for d in ordered], manga_name)
 
     dims = None
     id_map: dict[str, str] = {}

@@ -23,7 +23,7 @@ as 24 moves the bracket from 24 to 25.
 import re
 
 
-def parse_volume_name(name: str) -> tuple[int, str | None] | None:
+def parse_volume_name(name: str, manga_name: str | None = None) -> tuple[int, str | None] | None:
     """Extract (volume_number, provider_or_None) from a volume folder name,
     or None if the name is ambiguous and must be left untouched (more than
     one number cluster, more than one bracket group, or any leftover text
@@ -32,8 +32,15 @@ def parse_volume_name(name: str) -> tuple[int, str | None] | None:
     "Grand Blue Dreaming v01 (2017) (Digital) (1r0n)" has THREE bracket
     groups and correctly fails here rather than guessing which one is the
     provider.
+
+    The manga's own folder name, when given, is stripped off the front
+    first, so a number in the title isn't counted: "25 Years in a Dungeon
+    - ... - 01" in the manga folder "25 Years in a Dungeon" is volume 1,
+    not ambiguous.
     """
     s = name.strip()
+    if manga_name and s.lower().startswith(manga_name.strip().lower()):
+        s = s[len(manga_name.strip()):].strip()
     if not s:
         return None
 
@@ -104,10 +111,11 @@ def recompact_providers(ordered_keys: list[str], resolved: dict[str, str | None]
     return display
 
 
-def compute_renamed_volumes(ordered: list[tuple[str, str]]) -> dict[str, str | None]:
+def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | None = None) -> dict[str, str | None]:
     """ordered: [(item_key, current_name), ...] in natural-sort volume
     order. Returns {item_key: new_name_or_None} -- None means "could not
-    parse this one, leave its name untouched entirely".
+    parse this one, leave its name untouched entirely". manga_name: see
+    parse_volume_name.
 
     An unparseable item is excluded from the provider chain (it's neither
     a source nor a target of decode/recompact) rather than resetting the
@@ -118,7 +126,7 @@ def compute_renamed_volumes(ordered: list[tuple[str, str]]) -> dict[str, str | N
     """
     keys_in_order = [key for key, _ in ordered]
     names = dict(ordered)
-    parsed = {key: parse_volume_name(names[key]) for key in keys_in_order}
+    parsed = {key: parse_volume_name(names[key], manga_name) for key in keys_in_order}
 
     parseable_keys = [k for k in keys_in_order if parsed[k] is not None]
     raw_pairs = [(k, parsed[k][1]) for k in parseable_keys]
