@@ -758,10 +758,29 @@ def save_manga_dims(library_id: int, manga_name: str, data: dict):
     # and Windows. This is what a dims.json corruption from an interrupted
     # write actually looked like before this fix (main.py's own scan_library
     # history has a real example) -- prevention, not just detection.
+    # Page counts before this write, to carry user page positions along when a
+    # chapter/volume was replaced with a different number of pages (see
+    # _rescale_page_positions). A 0 on either side (empty folder mid-copy,
+    # unreadable file) is skipped: there's no proportion to keep.
+    old_counts = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r") as f:
+                old_counts = _dims_page_counts(json.load(f))
+        except Exception:
+            old_counts = {}
     tmp_path = path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp_path, path)
+    new_counts = _dims_page_counts(data)
+    counts = {k: (old_counts[k], n) for k, n in new_counts.items()
+              if old_counts.get(k) and n and old_counts[k] != n}
+    if counts:
+        try:
+            _rescale_page_positions(library_id, make_id(manga_name), counts)
+        except Exception as e:
+            print(f"[ScanLib] Rescaling page positions failed for {manga_name}: {e}")
 
 # ── SCANNING ──
 
@@ -999,6 +1018,59 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
 
         if changed:
             print(f"[ScanLib] Remapped {len(id_map)} renamed-volume id(s) in {username}'s data for {manga_id}")
+            auth.save_user_data(username, user_data)
+
+def _dims_page_counts(dims: dict) -> dict[str, int]:
+    """{chapter_or_volume_id: page count} across both buckets."""
+    return {k: len(v.get("pages") or []) for bucket in ("chapters", "volumes")
+            for k, v in (dims.get(bucket) or {}).items()}
+
+def _rescale_page(page: int, old_count: int, new_count: int) -> int:
+    """Same relative position in a chapter/volume whose page count changed:
+    page 10 of 100 (index 9) in a chapter now 10 pages long -> index 0."""
+    return min(new_count - 1, max(0, int(page * new_count / old_count)))
+
+def _rescale_page_positions(library_id: int, manga_id: str, counts: dict[str, tuple[int, int]]) -> None:
+    """
+    A chapter/volume replaced with one of a different page count (same
+    folder/file name, so same id) keeps every per-user page position in the
+    same PROPORTION through it: bookmark start/end pageIdx, the resume page
+    (last_page, when last_chapter_id/last_volume_id is that item) and the
+    per-item last_page. counts maps id -> (old_count, new_count). Called
+    from save_manga_dims, so every scan path (loose/archive/PDF/EPUB) gets
+    it. Pages-read / total-pages stats need nothing here: they're computed
+    live from dims.json (manga_pages_read / manga_content_counts).
+    """
+    lib_key = str(library_id)
+    bm_key = f"{library_id}:{manga_id}"
+    for user in auth._load_users().get("users", []):
+        username = user.get("username")
+        if not username:
+            continue
+        user_data = auth.load_user_data(username)
+        changed = False
+
+        entry = user_data.get("reading_history", {}).get(lib_key, {}).get(manga_id)
+        if entry:
+            last_id = entry.get("last_chapter_id") or entry.get("last_volume_id")
+            if last_id in counts and entry.get("last_page"):
+                entry["last_page"] = _rescale_page(entry["last_page"], *counts[last_id])
+                changed = True
+            for item_id, ch_entry in (entry.get("chapters") or {}).items():
+                if item_id in counts and ch_entry.get("last_page"):
+                    ch_entry["last_page"] = _rescale_page(ch_entry["last_page"], *counts[item_id])
+                    changed = True
+
+        for bm in user_data.get("bookmarks", {}).get(bm_key) or []:
+            for side in ("start", "end"):
+                pos = bm.get(side)
+                if pos and pos.get("chapterId") in counts and pos.get("pageIdx"):
+                    pos["pageIdx"] = _rescale_page(pos["pageIdx"], *counts[pos["chapterId"]])
+                    changed = True
+
+        if changed:
+            print(f"[ScanLib] Rescaled page positions in {username}'s data for {manga_id} "
+                  f"({len(counts)} chapter(s)/volume(s) changed page count)")
             auth.save_user_data(username, user_data)
 
 def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, manga_id: str,
