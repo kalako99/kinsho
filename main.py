@@ -941,6 +941,7 @@ def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, sta
             continue
         for cid in removed:
             del entry["chapters"][cid]
+            (entry.get("avg_times") or {}).pop(cid, None)
         furthest, furthest_name = None, None
         for cid in ordered_ids:
             if entry["chapters"].get(cid, {}).get("completed"):
@@ -993,6 +994,11 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
                     if ch_entry.get("name") is not None and new_id in new_names:
                         ch_entry["name"] = new_names[new_id]
                     chapters[new_id] = ch_entry
+                    changed = True
+            avg_times = entry.get("avg_times") or {}
+            for old_id, new_id in id_map.items():
+                if old_id in avg_times:
+                    avg_times[new_id] = avg_times.pop(old_id)
                     changed = True
             if entry.get("last_volume_id") in id_map:
                 new_id = id_map[entry["last_volume_id"]]
@@ -6881,6 +6887,7 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
         cid for cid, ch in entry.get("chapters", {}).items()
         if ch.get("completed")
     ]
+    timing = _reading_timing_summary(dims_for_check, entry, is_volume_manga, completed_ids)
 
     if is_volume_manga:
         volume_pages = {
@@ -6893,13 +6900,113 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
             "last_volume_id":       entry.get("last_volume_id"),
             "last_page":            entry.get("last_page", 0),
             "volume_pages":         volume_pages,
+            **timing,
         })
     else:
         return JSONResponse({
             "completed_chapter_ids": completed_ids,
             "last_chapter_id":       entry.get("last_chapter_id"),
             "last_page":             entry.get("last_page", 0),
+            **timing,
         })
+
+# ── AVERAGE READING TIME PER CHAPTER/VOLUME (2026-09-25) ──
+# The reader times each page while it's at the reading position and posts a
+# chapter's page times once the user moves on from its last page. Per user,
+# per manga (reading_history entry):
+#   avg_times: {chapter_or_volume_id: seconds}, updated (previous + latest) / 2
+#   page_time: {"total": seconds, "pages": n}, the manga's running page average
+# Rules (the user's spec): a read counts only if ~all pages were timed; after
+# a 50-page warm-up, a read where more than 30% of the judged pages took under
+# half the page average is skimming and is discarded; a page the idle pause
+# (or screen lock / backgrounding) hit counts as exactly the page average in
+# the chapter total and never feeds the page average.
+READ_TIME_MIN_COVERAGE   = 0.9
+READ_TIME_WARMUP_PAGES   = 50
+READ_TIME_FAST_FRACTION  = 0.5
+READ_TIME_MAX_FAST_SHARE = 0.3
+
+def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, completed_ids: list) -> dict:
+    """Extra fields for the detail pages: per-chapter/volume average reading
+    times, their sum over the read ones, and where the last read page sits in
+    the whole series (percent + that chapter/volume's name)."""
+    buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
+    avg_times = {k: round(v) for k, v in (entry.get("avg_times") or {}).items() if k in buckets}
+    completed = set(completed_ids)
+    last_read = None
+    last_id = entry.get("last_volume_id" if is_volume_manga else "last_chapter_id")
+    ordered = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
+    total = sum(len(buckets[k].get("pages") or []) for k in ordered)
+    if last_id in buckets and total:
+        before = 0
+        for k in ordered:
+            if k == last_id:
+                break
+            before += len(buckets[k].get("pages") or [])
+        count = len(buckets[last_id].get("pages") or [])
+        pos = before + min(entry.get("last_page", 0), max(count - 1, 0)) + 1
+        last_read = {"percent": round(pos * 100 / total, 1), "name": buckets[last_id].get("name")}
+    return {
+        "avg_times":       avg_times,
+        "avg_sum_seconds": sum(v for k, v in avg_times.items() if k in completed),
+        "last_read":       last_read,
+    }
+
+@app.post("/api/reading/chapter-time")
+async def post_chapter_time(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    try:
+        library_id = int(body.get("library_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Bad library_id"}, status_code=400)
+    manga_id = body.get("manga_id")
+    unit_id = body.get("chapter_id")
+    times = body.get("times")
+    paused = {int(i) for i in (body.get("paused") or []) if isinstance(i, (int, float))}
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    manga = next((m for m in load_app_data_cached().get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
+                  if m.get("id") == manga_id), None)
+    if not manga or not isinstance(times, list):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    dims = load_manga_dims_cached(library_id, manga["name"])
+    unit = (dims.get("chapters") or {}).get(unit_id) or (dims.get("volumes") or {}).get(unit_id)
+    if not unit or len(unit.get("pages") or []) != len(times):
+        return JSONResponse({"ok": False, "reason": "page count mismatch"})
+
+    n = len(times)
+    timed = [i for i in range(n) if i in paused or isinstance(times[i], (int, float))]
+    if len(timed) < READ_TIME_MIN_COVERAGE * n:
+        return JSONResponse({"ok": False, "reason": "incomplete", "timed": len(timed), "pages": n})
+
+    user_data = auth.load_user_data(username)
+    entry = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id)
+    if entry is None:
+        return JSONResponse({"ok": False, "reason": "no reading history"})
+    page_time = entry.setdefault("page_time", {"total": 0.0, "pages": 0})
+    page_avg = page_time["total"] / page_time["pages"] if page_time["pages"] else None
+    judged = [i for i in timed if i not in paused]
+    judged_times = [max(0.0, float(times[i])) for i in judged]
+    if page_time["pages"] >= READ_TIME_WARMUP_PAGES and page_avg and judged:
+        fast = sum(1 for t in judged_times if t < READ_TIME_FAST_FRACTION * page_avg)
+        if fast > READ_TIME_MAX_FAST_SHARE * len(judged):
+            return JSONResponse({"ok": False, "reason": "skimmed", "fast": fast, "judged": len(judged)})
+    # Paused and untimed pages count as the page average (this chapter's own
+    # mean during the warm-up, when there isn't one yet).
+    fill = page_avg if page_avg else (sum(judged_times) / len(judged_times) if judged_times else 0.0)
+    chapter_secs = sum(judged_times) + (n - len(judged)) * fill
+    avg_times = entry.setdefault("avg_times", {})
+    prev = avg_times.get(unit_id)
+    avg_times[unit_id] = chapter_secs if prev is None else (prev + chapter_secs) / 2
+    page_time["total"] += sum(judged_times)
+    page_time["pages"] += len(judged)
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True, "seconds": round(chapter_secs), "average": round(avg_times[unit_id])})
 
 @app.get("/settings")
 def settings_page(request: Request):

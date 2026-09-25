@@ -704,6 +704,12 @@
       margin-bottom: 16px;
     }
     /* ── DESCRIPTION ── */
+    .lastread-area { margin-top: 18px; }
+    .lastread-row { display: flex; align-items: center; gap: 10px; }
+    .lastread-track { flex: 1; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+    .lastread-bar { height: 100%; background: var(--color-primary, #e94560); border-radius: 3px; transition: width 0.3s; }
+    .lastread-label { font-size: 0.8rem; color: var(--color-text, #f0f0f0); white-space: nowrap; }
+    .avg-time { font-size: 0.72rem; color: #888; white-space: nowrap; }
     .section-label {
       font-size: 0.65rem;
       font-weight: 700;
@@ -1373,11 +1379,23 @@
             </span>
           </div>
 
+          <!-- LAST READ: where the last read page sits in the whole series -->
+          <div v-if="lastRead" class="lastread-area">
+            <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
+            <div class="lastread-row">
+              <div class="lastread-track"><div class="lastread-bar" :style="{ width: lastRead.percent + '%' }"></div></div>
+              <span class="lastread-label">{{ lastRead.percent }}% · {{ lastRead.name }}</span>
+            </div>
+          </div>
+
           <!-- READING TIME -->
-          <div v-if="readingTimeMinutes > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
+          <div v-if="readingTimeMinutes > 0 || avgSumSeconds > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
             <div class="section-label" style="margin-bottom:4px;">READING TIME</div>
-            <div style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
+            <div v-if="readingTimeMinutes > 0" style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
               {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
+            </div>
+            <div v-if="avgSumSeconds > 0" class="avg-time" style="margin-top:2px;" title="Sum of your average reading times of the read volumes that have one">
+              Average to where you are: {{ formatDuration(avgSumSeconds) }}
             </div>
           </div>
 
@@ -1535,6 +1553,7 @@
             </div>
           </div>
           <div class="volume-title">{{ vol.name }}</div>
+          <div v-if="avgTimes[vol.id]" class="avg-time" style="padding:0 8px 6px;" title="Your average reading time">{{ formatDuration(avgTimes[vol.id]) }}</div>
           <div class="volume-progress" v-if="volumeProgress(vol)">
             <div class="volume-progress-track">
               <div class="volume-progress-bar" :style="{ width: volumeProgress(vol).pct + '%' }"></div>
@@ -1884,6 +1903,9 @@ createApp({
       lastVolumeId:         null,
       lastPage:             0,
       readVolumeIds:        new Set(),
+      lastRead:             null,
+      avgTimes:             {},
+      avgSumSeconds:        0,
       volumePages:          {},
       // selection mode (long-press or drag over volume cards to
       // multi-select, then "Check as Read" -- like Android's file manager)
@@ -2020,6 +2042,13 @@ createApp({
       }
     },
 
+    formatDuration(secs) {
+      const s = Math.round(secs || 0);
+      if (s >= 3600) return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' m';
+      if (s >= 60) return Math.floor(s / 60) + ' m ' + (s % 60) + ' s';
+      return s + ' s';
+    },
+
     async loadReadingProgress() {
       try {
         const res = await fetch(apiUrl(`/api/reading/history/${this.libraryId}/${this.mangaId}?t=${Date.now()}`));
@@ -2028,6 +2057,9 @@ createApp({
         this.lastPage      = data.last_page || 0;
         this.readVolumeIds = new Set(data.completed_volume_ids || []);
         this.volumePages   = data.volume_pages || {};
+        this.lastRead      = data.last_read || null;
+        this.avgTimes      = data.avg_times || {};
+        this.avgSumSeconds = data.avg_sum_seconds || 0;
         this.preloadReaderPages();   // continue-point now known
       } catch (e) {
         console.error('Failed to load reading progress:', e);

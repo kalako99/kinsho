@@ -6104,6 +6104,115 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return idx;
   }
 
+  // ── PER-PAGE READING TIME (2026-09-25) ──
+  // Times each page while it sits at the reading position (the same page
+  // getCurrentPageIdx reports), for the per-chapter average reading time
+  // (see /api/reading/chapter-time in main.py for the rules). A page the idle
+  // rule above hits (no input for ACTIVITY_TIMEOUT_MS), or that's on screen
+  // while the app is hidden/locked, is marked paused: the server counts it as
+  // the page average. Pages passed during normal scrolling get 0 (skimming);
+  // a jump of more than PT_JUMP pages (bookmark, dropdown) leaves the skipped
+  // ones untimed. A chapter is posted once the reader moves on from its last
+  // page (or leaves the reader on it); partial timings are kept per device in
+  // localStorage, so a chapter/volume read over several sessions adds up.
+  const PT_TICK_MS = 250;
+  const PT_JUMP = 5;
+  const PT_KEEP_MS = 7 * 24 * 3600 * 1000;
+  const PT_KEY = `kinsho_pagetimes_${libraryId}_${mangaId}`;
+  let ptTimes = {};  // {chapterId: {t: {localIdx: secs}, p: {localIdx: 1}, u: epoch ms}}
+  try { ptTimes = JSON.parse(localStorage.getItem(PT_KEY) || '{}') || {}; } catch (e) { ptTimes = {}; }
+  for (const cid of Object.keys(ptTimes)) {
+    if (!ptTimes[cid] || Date.now() - (ptTimes[cid].u || 0) > PT_KEEP_MS) delete ptTimes[cid];
+  }
+  let ptIdx = null;
+  let ptLast = performance.now();
+  let ptDirty = false;
+
+  function ptCurrentIdx() {
+    if (!manifest.length) return null;
+    if (readerSettings.mode === 'single-page') return spCurrentIdx;
+    return firstIndexAfter(currentTrackingY());
+  }
+  function ptChapter(cid) {
+    return (ptTimes[cid] ||= { t: {}, p: {}, u: Date.now() });
+  }
+  function ptAdd(idx, secs) {
+    const e = manifest[idx];
+    if (!e) return;
+    const c = ptChapter(e.chapterId);
+    c.t[e.localIdx] = (c.t[e.localIdx] || 0) + secs;
+    c.u = Date.now();
+    ptDirty = true;
+  }
+  function ptPause(idx) {
+    const e = manifest[idx];
+    if (!e) return;
+    const c = ptChapter(e.chapterId);
+    if (!c.p[e.localIdx]) { c.p[e.localIdx] = 1; c.u = Date.now(); ptDirty = true; }
+  }
+  function ptSave() {
+    if (!ptDirty) return;
+    ptDirty = false;
+    try { localStorage.setItem(PT_KEY, JSON.stringify(ptTimes)); } catch (e) {}
+  }
+  function ptIsLastOfChapter(idx) {
+    const e = manifest[idx], next = manifest[idx + 1];
+    return !!e && (!next || next.chapterId !== e.chapterId);
+  }
+  function ptReport(cid) {
+    const c = ptTimes[cid];
+    if (!c) return;
+    const count = manifest.reduce((n, e) => n + (e.chapterId === cid ? 1 : 0), 0);
+    const times = Array.from({ length: count }, (_, i) => (i in c.t ? Math.round(c.t[i] * 10) / 10 : null));
+    const paused = Object.keys(c.p).map(Number);
+    delete ptTimes[cid];
+    ptDirty = true;
+    ptSave();
+    fetch(apiUrl('/api/reading/chapter-time'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ library_id: libraryId, manga_id: mangaId, chapter_id: cid, times, paused }),
+      keepalive: true,
+    }).then(r => r.json()).then(d => dbg(`[readtime] ${cid}: ${JSON.stringify(d)}`)).catch(() => {});
+  }
+  function ptTick() {
+    const now = performance.now();
+    const dt = (now - ptLast) / 1000;
+    ptLast = now;
+    const idx = ptCurrentIdx();
+    if (idx == null || !manifest[idx]) return;
+    if (ptIdx == null || !manifest[ptIdx]) { ptIdx = idx; return; }
+    // Timers are throttled while hidden, so a long gap also means "paused".
+    if (document.hidden || dt > 5 || Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) {
+      ptPause(ptIdx);
+    } else {
+      ptAdd(ptIdx, dt);
+    }
+    if (idx === ptIdx) return;
+    const from = ptIdx;
+    ptIdx = idx;
+    if (idx > from && idx - from <= PT_JUMP) {
+      for (let i = from + 1; i < idx; i++) ptAdd(i, 0);  // scrolled past: counted as fast
+    }
+    // Moved forward off a chapter's last page (normally, not by a jump that
+    // skipped it): that chapter is finished.
+    const fromCid = manifest[from].chapterId;
+    if (idx > from && manifest[idx].chapterId !== fromCid) {
+      let lastIdx = from;
+      while (manifest[lastIdx + 1] && manifest[lastIdx + 1].chapterId === fromCid) lastIdx++;
+      if (lastIdx === from || idx - from <= PT_JUMP) ptReport(fromCid);
+    }
+  }
+  setInterval(ptTick, PT_TICK_MS);
+  setInterval(ptSave, 5000);
+  // Leaving the reader on a chapter's last page (the next-chapter button,
+  // back, or the manga's last page) finishes that chapter too.
+  window.addEventListener('pagehide', () => {
+    ptTick();
+    if (ptIdx != null && ptIsLastOfChapter(ptIdx)) ptReport(manifest[ptIdx].chapterId);
+    ptSave();
+  });
+
   async function checkChapterCompletion() {
     // Mode-agnostic now that single-page mode's spManifest is the same
     // whole-manga array as long-strip's -- getVisibleChapterId() already
