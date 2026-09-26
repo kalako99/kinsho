@@ -224,7 +224,7 @@ def get_covers_dir():
 # `docker build`/container recreate the same way covers/thumbnails do --
 # unlike anything saved under the app's own source tree, which is baked into
 # the image and gets overwritten on every rebuild.
-VUE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.js"
+VUE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/vue/3.4.21/vue.global.prod.js"
 GOOGLE_SANS_CSS_URL = (
     "https://fonts.googleapis.com/css2?"
     "family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap"
@@ -239,7 +239,7 @@ def local_assets_dir() -> Optional[str]:
 def local_assets_available() -> bool:
     # NOTE: this only checks that the files exist, not that they match
     # VUE_CDN_URL's currently-pinned version -- if that version ever gets
-    # bumped in a future update, an already-downloaded vue.global.js from an
+    # bumped in a future update, an already-downloaded vue.global.prod.js from an
     # older version will keep being served silently until an admin presses
     # "Switch back to CDN" + re-downloads. Add a version check here (e.g.
     # store the downloaded version alongside the file and compare) if/when
@@ -247,12 +247,12 @@ def local_assets_available() -> bool:
     d = local_assets_dir()
     if not d:
         return False
-    return (os.path.isfile(os.path.join(d, "vue.global.js"))
+    return (os.path.isfile(os.path.join(d, "vue.global.prod.js"))
             and os.path.isfile(os.path.join(d, "google-sans.css")))
 
 def get_asset_urls() -> dict:
     if local_assets_available():
-        return {"vue_src": "/local-assets/vue.global.js"}
+        return {"vue_src": "/local-assets/vue.global.prod.js"}
     return {"vue_src": VUE_CDN_URL}
 
 @app.get("/local-assets/{filename:path}")
@@ -288,8 +288,12 @@ async def download_local_assets_endpoint(request: Request):
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             vue_resp = await client.get(VUE_CDN_URL)
             vue_resp.raise_for_status()
-            with open(os.path.join(d, "vue.global.js"), "wb") as f:
+            with open(os.path.join(d, "vue.global.prod.js"), "wb") as f:
                 f.write(vue_resp.content)
+            # Leftover from before the switch to Vue's production build.
+            old_dev_vue = os.path.join(d, "vue.global.js")
+            if os.path.isfile(old_dev_vue):
+                os.remove(old_dev_vue)
 
             css_resp = await client.get(GOOGLE_SANS_CSS_URL, headers=browser_ua)
             css_resp.raise_for_status()
