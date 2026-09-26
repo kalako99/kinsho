@@ -1516,9 +1516,18 @@ def get_epub_image_list(epub_path: str) -> list:
             )
     try:
         book = ebooklib_epub.read_epub(epub_path)
-        images = []
-        for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
-            images.append(item.get_name())
+        # A declared cover image is its own item type, not ITEM_IMAGE; put it
+        # first so it becomes the volume cover (else it's e.g. a publisher logo).
+        images = [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_COVER)]
+        images += [item.get_name() for item in book.get_items_of_type(ebooklib.ITEM_IMAGE)]
+        # ebooklib names are relative to the .opf file's folder, but every
+        # caller reads them from the zip, which needs the full path.
+        with zipfile.ZipFile(epub_path, 'r') as arc:
+            container = arc.read("META-INF/container.xml").decode("utf-8", "replace")
+        m = re.search(r'full-path="([^"]+)"', container)
+        opf_dir = os.path.dirname(m.group(1)) if m else ""
+        if opf_dir:
+            images = [f"{opf_dir}/{name}" for name in images]
         return images
     except Exception as e:
         print(f"[EPUB] Failed to parse {epub_path}: {e}")
