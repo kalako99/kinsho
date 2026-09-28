@@ -134,7 +134,6 @@ async function fetchLastUpdatedPage(libraryId, page, historyByMangaId, columns) 
       return {
         id:          m.id,
         title:       m.name,
-        path:        m.path,
         cover:       m.cover_url,
         chapters:    m.chapters,
         is_complete: m.is_complete || false,
@@ -206,7 +205,6 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
       return {
         id:          m.id,
         title:       m.name,
-        path:        m.path,
         cover:       m.cover_url,
         // Prefer the server's own cover_url_large (carries that exact
         // file's own cache-busting version) over deriving one.

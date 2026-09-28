@@ -4740,16 +4740,19 @@ def get_mangas(
     username = auth.get_current_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"mangas": [], "total": 0, "page": page, "per_page": 50})
-    data = load_app_data()
+    data = load_app_data_cached()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
         return JSONResponse({"mangas": [], "total": 0, "page": page, "per_page": 50})
     mangas = manga_data.get("mangas", [])
     user_data = auth.load_user_data(username)
     user_covers = user_data.get("covers", {}).get(str(library_id), {})
- 
+
     perms = auth.resolve_permissions(username)
     blocked_tags = perms.get("blocked_tags", []) if not perms.get("is_admin") else []
+    # Filtering needs every manga's dims (total/offsets count only visible
+    # ones); covers and the tile fields are built below for the returned
+    # page only.
     result = []
     for manga in mangas:
         dims = _load_dims_or_flag_for_repair(library_id, manga["name"])
@@ -4758,30 +4761,11 @@ def get_mangas(
         if blocked_tags:
             if any(t in blocked_tags for t in dims.get("tags", [])):
                 continue
-        m = dict(manga)
-        cover = user_covers.get(m["id"]) or m.get("cover")
-        if cover:
-            cover_filename = os.path.basename(cover)
-            m["cover_url"], m["cover_url_large"] = _cover_urls_for(library_id, m["name"], cover_filename)
-        else:
-            m["cover_url"] = None
-            m["cover_url_large"] = None
-        if "is_complete" not in m:
-            volumes = dims.get("volumes", {})
-            chapters = dims.get("chapters", {})
-            last_name = None
-            if volumes:
-                sorted_vols = sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", "")))
-                last_name = sorted_vols[-1].get("name", "")
-            elif chapters:
-                sorted_chs = sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", "")))
-                last_name = sorted_chs[-1].get("name", "")
-            m["is_complete"] = bool(last_name and last_name.split()[-1] == "END")
-        result.append(m)
- 
+        result.append((manga, dims))
+
     if sort == "last_updated":
-        result.sort(key=lambda m: m.get("last_updated") or "", reverse=True)
- 
+        result.sort(key=lambda md: md[0].get("last_updated") or "", reverse=True)
+
     total = len(result)
     if sort == "last_updated":
         per_page_1 = _round_up_to_multiple(50, columns)
@@ -4796,8 +4780,41 @@ def get_mangas(
     else:
         per_page = total
         page_items = result
- 
-    return JSONResponse({"mangas": page_items, "total": total, "page": page, "per_page": per_page})
+
+    return JSONResponse({"mangas": [_manga_tile(library_id, manga, dims, user_covers)
+                                    for manga, dims in page_items],
+                         "total": total, "page": page, "per_page": per_page})
+
+
+def _manga_tile(library_id: int, manga: dict, dims: dict, user_covers: dict) -> dict:
+    """The fields the library page's tiles use (static/tab_state.js) -- the
+    whole data.json record (cover mtimes, paths) is several times bigger."""
+    m = {
+        "id":         manga["id"],
+        "name":       manga["name"],
+        "manga_type": manga.get("manga_type"),
+    }
+    cover = user_covers.get(m["id"]) or manga.get("cover")
+    if cover:
+        cover_filename = os.path.basename(cover)
+        m["cover_url"], m["cover_url_large"] = _cover_urls_for(library_id, m["name"], cover_filename)
+    else:
+        m["cover_url"] = None
+        m["cover_url_large"] = None
+    if "is_complete" in manga:
+        m["is_complete"] = manga["is_complete"]
+    else:
+        volumes = dims.get("volumes", {})
+        chapters = dims.get("chapters", {})
+        last_name = None
+        if volumes:
+            sorted_vols = sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", "")))
+            last_name = sorted_vols[-1].get("name", "")
+        elif chapters:
+            sorted_chs = sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", "")))
+            last_name = sorted_chs[-1].get("name", "")
+        m["is_complete"] = bool(last_name and last_name.split()[-1] == "END")
+    return m
 
 @app.get("/api/mangas/{library_id}/search")
 def get_mangas_for_search(request: Request, library_id: int):
@@ -4969,7 +4986,8 @@ def _can_edit_collection(username: str, is_shared: bool) -> bool:
     return bool(auth.resolve_permissions(username).get("is_admin"))
 
 def _lookup_manga(library_id: int, manga_id: str) -> Optional[dict]:
-    manga_data = load_app_data().get("manga_data", {}).get(str(library_id), {})
+    """Read-only result (from the data.json cache) -- never mutate it."""
+    manga_data = load_app_data_cached().get("manga_data", {}).get(str(library_id), {})
     return next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None)
 
 def _visible_members(username: str, members: list) -> list:
@@ -4981,7 +4999,7 @@ def _visible_members(username: str, members: list) -> list:
         manga = _lookup_manga(m["library_id"], m["manga_id"])
         if not manga:
             continue
-        dims = load_manga_dims(m["library_id"], manga["name"])
+        dims = load_manga_dims_cached(m["library_id"], manga["name"])
         if auth.is_manga_blocked(username, dims.get("tags", [])):
             continue
         visible.append(m)
