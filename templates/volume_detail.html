@@ -1389,14 +1389,22 @@
           </div>
 
           <!-- READING TIME -->
-          <div v-if="readingTimeMinutes > 0 || avgSumSeconds > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
+          <div v-if="readingTimeMinutes > 0 || avgUnitSeconds" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
             <div class="section-label" style="margin-bottom:4px;">READING TIME</div>
             <div v-if="readingTimeMinutes > 0" style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
               {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
             </div>
-            <div v-if="avgSumSeconds > 0" class="avg-time" style="margin-top:2px;" title="Sum of your average reading times of the read volumes that have one">
-              Average to where you are: {{ formatDuration(avgSumSeconds) }}
-            </div>
+            <template v-if="avgUnitSeconds">
+              <div class="avg-time" style="margin-top:2px;" title="Average of your reading times of the volumes that were timed">
+                Average per volume: {{ formatDuration(avgUnitSeconds) }}
+              </div>
+              <div class="avg-time" title="Average per volume × the volumes you've read">
+                To where you are: {{ formatDuration(avgToHereSeconds) }} ({{ readCount }} read)
+              </div>
+              <div class="avg-time" title="Average per volume × all volumes">
+                Whole series: {{ formatDuration(avgSeriesSeconds) }}
+              </div>
+            </template>
           </div>
 
           <!-- DESCRIPTION -->
@@ -1553,7 +1561,6 @@
             </div>
           </div>
           <div class="volume-title">{{ vol.name }}</div>
-          <div v-if="avgTimes[vol.id]" class="avg-time" style="padding:0 8px 6px;" title="Your average reading time">{{ formatDuration(avgTimes[vol.id]) }}</div>
           <div class="volume-progress" v-if="volumeProgress(vol)">
             <div class="volume-progress-track">
               <div class="volume-progress-bar" :style="{ width: volumeProgress(vol).pct + '%' }"></div>
@@ -1904,8 +1911,10 @@ createApp({
       lastPage:             0,
       readVolumeIds:        new Set(),
       lastRead:             null,
-      avgTimes:             {},
-      avgSumSeconds:        0,
+      avgUnitSeconds:       null,
+      avgToHereSeconds:     null,
+      avgSeriesSeconds:     null,
+      readCount:            0,
       volumePages:          {},
       // selection mode (long-press or drag over volume cards to
       // multi-select, then "Check as Read" -- like Android's file manager)
@@ -2058,8 +2067,10 @@ createApp({
         this.readVolumeIds = new Set(data.completed_volume_ids || []);
         this.volumePages   = data.volume_pages || {};
         this.lastRead      = data.last_read || null;
-        this.avgTimes      = data.avg_times || {};
-        this.avgSumSeconds = data.avg_sum_seconds || 0;
+        this.avgUnitSeconds   = data.avg_unit_seconds || null;
+        this.avgToHereSeconds = data.avg_to_here_seconds || null;
+        this.avgSeriesSeconds = data.avg_series_seconds || null;
+        this.readCount        = data.read_count || 0;
         this.preloadReaderPages();   // continue-point now known
       } catch (e) {
         console.error('Failed to load reading progress:', e);

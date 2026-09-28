@@ -6014,50 +6014,128 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return chapterList.length > 0 && getVisibleChapterId() === chapterList[chapterList.length - 1].id;
   }
 
-  async function saveReadingProgress(completedChapterId = null) {
-    const currentPage      = getCurrentPageIdx();
-    const visibleChapterId = getVisibleChapterId();
-    // keepalive: true -- the true-last-chapter completion save (syncScrollPosition)
-    // fires the instant the user hits the real bottom, and the very next thing
-    // they typically do is hit "back" to leave the reader. Without keepalive, a
-    // plain fetch can be aborted mid-flight by the browser when the document
-    // starts unloading, silently dropping the completion write even though the
-    // popup already confirmed the end was reached. Same class of fix as the
-    // sendBeacon used for the reading-session tick above.
-    //
-    // signal: AbortSignal.timeout(...) -- checkChapterCompletion's multi-
-    // chapter catch-up loop awaits this sequentially under a reentrancy guard
-    // (_creditingInFlight). A plain hung request (accepted but never
-    // resolving -- more likely right around a screen lock/wake, a dropped
-    // WiFi association, etc.) never rejects on its own, so without a bound
-    // the guard would stay stuck true for the rest of the page's session,
-    // silently blocking every future completion-credit. Wrapped in try/catch
-    // so a timeout (or any other fetch failure) just drops this one save
-    // instead of throwing -- most callers don't await/catch this function.
-    const saveTimeout = new AbortController();
-    const saveTimer = setTimeout(() => saveTimeout.abort(), 15000);
+  // ── SAVES THAT FAIL ARE KEPT AND RESENT (2026-09-28) ──
+  // Every progress save and chapter timing is written to localStorage BEFORE
+  // it's sent and removed once the server has answered it. Anything that
+  // failed (network error, error status, 15s timeout) or never got its
+  // answer (the page unloaded first) stays there and is resent, oldest
+  // first, after the next successful save and when a reader opens -- for any
+  // manga, since the queue is shared. Found 2026-09-28: Hima-Ten! 089-096
+  // were read to the end but none of their saves ever reached the server,
+  // and every failure used to be dropped silently. A resent progress save
+  // carries saved_at, so the server applies its position only if nothing
+  // newer was saved since (its completion always counts); a resent timing
+  // carries report_id, so it's counted once.
+  const PENDING_KEY = 'kinsho_pending_saves';
+  const PENDING_MAX = 500;
+  function pendingLoad() {
+    try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]') || []; } catch (e) { return []; }
+  }
+  function pendingStore(list) {
+    try { localStorage.setItem(PENDING_KEY, JSON.stringify(list.slice(-PENDING_MAX))); } catch (e) {}
+  }
+  function pendingNewId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+  // item.key: a newer item with the same key replaces the older one (only
+  // the latest plain position of a manga is worth keeping).
+  function pendingAdd(item) {
+    pendingStore(pendingLoad().filter(i => !item.key || i.key !== item.key).concat([item]));
+  }
+  function pendingRemove(id) {
+    pendingStore(pendingLoad().filter(i => i.id !== id));
+  }
+
+  // keepalive: true -- a save fired right before the user leaves the reader
+  // (the completion save at the true last page, a timing on pagehide) would
+  // otherwise be aborted when the document unloads.
+  // The 15s timeout: a hung request never rejects on its own, and
+  // checkChapterCompletion awaits saves one by one under _creditingInFlight,
+  // so an unbounded one would block every later completion credit.
+  async function postSave(path, body) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
     try {
-      await fetch(apiUrl('/api/reading/progress'), {
+      const res = await fetch(apiUrl(path), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          library_id:           libraryId,
-          manga_id:             mangaId,
-          chapter_id:           visibleChapterId,
-          page:                 currentPage,
-          completed_chapter_id: completedChapterId,
-        }),
+        body: JSON.stringify(body),
         keepalive: true,
-        signal: saveTimeout.signal,
+        signal: ctrl.signal,
       });
-      // Cleared on success -- AbortSignal.timeout() kept running after the
-      // save had already succeeded and "aborted" its finished response at
-      // 15s, making every successful save look failed in DevTools.
-      clearTimeout(saveTimer);
-      savedTabsAfterProgressSave(completedChapterId);
-    } catch (_) {
-      // Swallowed -- see the timeout comment above.
+      if (!res.ok) return { ok: false, status: res.status, reason: `HTTP ${res.status}` };
+      let data = null;
+      try { data = await res.json(); } catch (e) {}
+      return { ok: true, data };
+    } catch (e) {
+      return { ok: false, reason: e.name === 'AbortError' ? 'no answer in 15s' : `${e.name}: ${e.message}` };
+    } finally {
+      clearTimeout(timer);
     }
+  }
+
+  // Sends one queued item; true when the server answered it.
+  async function sendQueued(item, live) {
+    const body = live ? item.body : { ...item.body, ...(item.kind === 'progress' ? { saved_at: new Date(item.savedAt).toISOString() } : {}) };
+    let r = await postSave(item.path, body);
+    // A timing can arrive before this manga's first progress save has (a
+    // first read while saves were failing): kept until that one is in.
+    if (r.ok && r.data && r.data.reason === 'no reading history') r = { ok: false, reason: 'no reading history yet' };
+    if (r.ok) {
+      pendingRemove(item.id);
+      if (!live) dbg(`[save] resent ${item.label} from ${new Date(item.savedAt).toISOString()}: ${JSON.stringify(r.data)}`);
+      return r;
+    }
+    // 400/403/404: this save can never succeed (the manga was renamed or
+    // removed, the app now points at another server...) -- dropped, or it
+    // would block the queue forever.
+    if ([400, 403, 404].includes(r.status)) {
+      pendingRemove(item.id);
+      dbg(`[save] ${item.label} refused (${r.reason}) -- dropped`);
+      return { ok: true, dropped: true };
+    }
+    const msg = `[save] ${live ? '' : 'resend of '}${item.label} failed: ${r.reason} -- kept (${pendingLoad().length} waiting)`;
+    dbg(msg);
+    console.warn(msg);
+    return r;
+  }
+
+  let _pendingFlushing = false;
+  async function flushPendingSaves() {
+    if (_pendingFlushing) return;
+    _pendingFlushing = true;
+    try {
+      const startedAt = Date.now();
+      // Items queued by saves still in flight on this page are left to them.
+      for (const item of pendingLoad().filter(i => i.savedAt < startedAt - 20000)) {
+        if (!(await sendQueued(item, false)).ok) break;  // still failing: try again later
+      }
+    } finally {
+      _pendingFlushing = false;
+    }
+  }
+  setTimeout(flushPendingSaves, 3000);
+
+  async function saveReadingProgress(completedChapterId = null) {
+    const item = {
+      id:      pendingNewId(),
+      kind:    'progress',
+      path:    '/api/reading/progress',
+      savedAt: Date.now(),
+      key:     completedChapterId ? null : `position:${libraryId}:${mangaId}`,
+      label:   completedChapterId ? `completion of ${chapterName(completedChapterId)}` : `position ${chapterName(getVisibleChapterId())} p${getCurrentPageIdx() + 1}`,
+      body: {
+        library_id:           libraryId,
+        manga_id:             mangaId,
+        chapter_id:           getVisibleChapterId(),
+        page:                 getCurrentPageIdx(),
+        completed_chapter_id: completedChapterId,
+      },
+    };
+    pendingAdd(item);
+    if (!(await sendQueued(item, true)).ok) return;
+    savedTabsAfterProgressSave(completedChapterId);
+    flushPendingSaves();
   }
 
   // ── KEEP THE LIBRARY'S SAVED TAB COPIES CURRENT (2026-09-23) ──
@@ -6168,12 +6246,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     delete ptTimes[cid];
     ptDirty = true;
     ptSave();
-    fetch(apiUrl('/api/reading/chapter-time'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ library_id: libraryId, manga_id: mangaId, chapter_id: cid, times, paused }),
-      keepalive: true,
-    }).then(r => r.json()).then(d => dbg(`[readtime] ${cid}: ${JSON.stringify(d)}`)).catch(() => {});
+    const id = pendingNewId();
+    const item = {
+      id, kind: 'chapter-time', path: '/api/reading/chapter-time', savedAt: Date.now(),
+      label: `timing of ${chapterName(cid)}`,
+      body: { library_id: libraryId, manga_id: mangaId, chapter_id: cid, times, paused, report_id: id },
+    };
+    pendingAdd(item);
+    // An {ok: false, reason} answer (skimmed, incomplete...) is the server's
+    // decision, not a failure: logged, not resent.
+    sendQueued(item, true).then(r => { if (r.ok) dbg(`[readtime] ${cid}: ${JSON.stringify(r.data)}`); });
   }
   function ptTick() {
     const now = performance.now();
@@ -6452,8 +6534,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     `gate ${netInFlight} in flight / ${netQueue.length} queued` +
     (cbActive ? `, canvas ${cbPages.filter(s => s.painted).length}/${cbPages.length} painted` : ''));
 
+  // Every logged-in user while debugging (was admin-only until 2026-09-28).
   const debugLogBtn = document.getElementById('debugLogBtn');
-  if (adminData?.is_admin && window.kinshoDebugLog) {
+  if (window.kinshoDebugLog) {
     window.kinshoDebugLog.setSnapshot(dbgSnapshot);
     debugLogBtn.style.display = '';
     debugLogBtn.addEventListener('click', async () => {

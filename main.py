@@ -5471,10 +5471,10 @@ def get_admin_status(request: Request):
 async def save_debug_log(request: Request):
     """The reader's debug-log button: saves the device's last 5 minutes (sent
     in the body, see static/debug_log.js) and the server's (debug_log.py) as
-    two txt files under {data_path}/debug_logs/."""
-    err = auth.require_admin(request)
-    if err:
-        return err
+    two txt files under {data_path}/debug_logs/. Any logged-in user, while
+    debugging (2026-09-28: a non-admin account lost saves with no log)."""
+    if not auth.get_current_user(request):
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
     received = time.time()
     body = await request.json()
     sent = body.get("sent_at", 0) / 1000
@@ -6494,6 +6494,9 @@ async def save_reader_settings(request: Request):
 @app.post("/api/reading/progress")
 async def save_reading_progress(request: Request):
     username = auth.get_current_user(request)
+    if not username:
+        # Used to answer 200 and save nothing, so the reader couldn't know.
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
     body = await request.json()
     library_id  = str(body.get("library_id", ""))
     manga_id    = str(body.get("manga_id", ""))
@@ -6525,6 +6528,20 @@ async def save_reading_progress(request: Request):
     history = user_data.setdefault("reading_history", {})
     lib_history = history.setdefault(library_id, {})
 
+    # saved_at: set only when the reader resends a save that failed earlier
+    # (see the pending-saves queue in chapter_reader.html). Its completion
+    # still counts, but its position is applied only if nothing newer was
+    # saved since, so a late resend never moves Continue reading back.
+    apply_position = True
+    saved_at = body.get("saved_at")
+    previous_read = (lib_history.get(manga_id) or {}).get("last_read")
+    if saved_at and previous_read:
+        try:
+            sent = datetime.fromisoformat(str(saved_at).replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+            apply_position = sent > datetime.fromisoformat(previous_read)
+        except ValueError:
+            pass
+
     if is_volume_manga:
         entry = lib_history.setdefault(manga_id, {
             "manga_name":          None,
@@ -6536,16 +6553,17 @@ async def save_reading_progress(request: Request):
             "furthest_volume_name": None,
             "chapters":            {},
         })
-        entry["last_read"]        = datetime.now().isoformat()
-        entry["last_volume_id"]   = chapter_id
-        entry["last_page"]        = page
+        if apply_position:
+            entry["last_read"]        = datetime.now().isoformat()
+            entry["last_volume_id"]   = chapter_id
+            entry["last_page"]        = page
+            if source_name:
+                entry["last_volume_name"] = source_name
+            if chapter_id:
+                ch_entry = entry["chapters"].setdefault(chapter_id, {})
+                ch_entry["last_page"] = page
         if manga_name:
             entry["manga_name"] = manga_name
-        if source_name:
-            entry["last_volume_name"] = source_name
-        if chapter_id:
-            ch_entry = entry["chapters"].setdefault(chapter_id, {})
-            ch_entry["last_page"] = page
 
         if completed_chapter_id:
             completed_name = None
@@ -6589,13 +6607,14 @@ async def save_reading_progress(request: Request):
             "furthest_chapter_name": None,
             "chapters":              {},
         })
-        entry["last_read"]       = datetime.now().isoformat()
-        entry["last_chapter_id"] = chapter_id
-        entry["last_page"]       = page
+        if apply_position:
+            entry["last_read"]       = datetime.now().isoformat()
+            entry["last_chapter_id"] = chapter_id
+            entry["last_page"]       = page
+            if source_name:
+                entry["last_chapter_name"] = source_name
         if manga_name:
             entry["manga_name"] = manga_name
-        if source_name:
-            entry["last_chapter_name"] = source_name
 
         if completed_chapter_id:
             completed_name = None
@@ -6626,7 +6645,7 @@ async def save_reading_progress(request: Request):
             entry["furthest_chapter_name"] = furthest_name
 
     auth.save_user_data(username, user_data)
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "position_applied": apply_position})
 
 @app.post("/api/manga/{library_id}/{manga_id}/mark-read")
 async def bulk_mark_read(request: Request, library_id: int, manga_id: str):
@@ -6958,9 +6977,12 @@ READ_TIME_FAST_FRACTION  = 0.5
 READ_TIME_MAX_FAST_SHARE = 0.3
 
 def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, completed_ids: list) -> dict:
-    """Extra fields for the detail pages: per-chapter/volume average reading
-    times, their sum over the read ones, and where the last read page sits in
-    the whole series (percent + that chapter/volume's name)."""
+    """Extra fields for the detail pages: the average reading time of a
+    chapter/volume (mean of every timed one's own average), that times the
+    read ones and times all of them, and where the last read page sits in
+    the whole series (percent + that chapter/volume's name). Multiplying
+    instead of summing the timed ones (2026-09-28) keeps "to where you are"
+    right for series partly read before timing existed."""
     buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
     avg_times = {k: round(v) for k, v in (entry.get("avg_times") or {}).items() if k in buckets}
     completed = set(completed_ids)
@@ -6977,10 +6999,15 @@ def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, comp
         count = len(buckets[last_id].get("pages") or [])
         pos = before + min(entry.get("last_page", 0), max(count - 1, 0)) + 1
         last_read = {"percent": round(pos * 100 / total, 1), "name": buckets[last_id].get("name")}
+    avg_unit = sum(avg_times.values()) / len(avg_times) if avg_times else None
+    read_count = sum(1 for k in buckets if k in completed)
     return {
-        "avg_times":       avg_times,
-        "avg_sum_seconds": sum(v for k, v in avg_times.items() if k in completed),
-        "last_read":       last_read,
+        "avg_times":          avg_times,
+        "avg_unit_seconds":   round(avg_unit) if avg_unit else None,
+        "avg_to_here_seconds": round(avg_unit * read_count) if avg_unit else None,
+        "avg_series_seconds": round(avg_unit * len(buckets)) if avg_unit else None,
+        "read_count":         read_count,
+        "last_read":          last_read,
     }
 
 @app.post("/api/reading/chapter-time")
@@ -7019,6 +7046,11 @@ async def post_chapter_time(request: Request):
     entry = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id)
     if entry is None:
         return JSONResponse({"ok": False, "reason": "no reading history"})
+    # report_id: the reader resends a report whose answer it never got, so
+    # one that already counted must not count twice.
+    report_id = body.get("report_id")
+    if report_id and report_id in entry.get("time_reports", []):
+        return JSONResponse({"ok": True, "duplicate": True})
     page_time = entry.setdefault("page_time", {"total": 0.0, "pages": 0})
     page_avg = page_time["total"] / page_time["pages"] if page_time["pages"] else None
     judged = [i for i in timed if i not in paused]
@@ -7036,6 +7068,8 @@ async def post_chapter_time(request: Request):
     avg_times[unit_id] = chapter_secs if prev is None else (prev + chapter_secs) / 2
     page_time["total"] += sum(judged_times)
     page_time["pages"] += len(judged)
+    if report_id:
+        entry["time_reports"] = (entry.get("time_reports", []) + [report_id])[-50:]
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True, "seconds": round(chapter_secs), "average": round(avg_times[unit_id])})
 
