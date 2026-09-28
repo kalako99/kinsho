@@ -1378,6 +1378,13 @@
         <span class="settings-toggle-slider"></span>
       </label>
     </div>
+    <div class="settings-preload">
+      <span class="settings-preload-label">Page turn (taps, keys, BLE)</span>
+      <div class="settings-preload-right">
+        <input class="settings-preload-range" type="range" min="110" max="500" step="10" value="250" id="settingsSpTurnRange">
+        <span class="settings-preload-value" id="settingsSpTurnValue">250 ms</span>
+      </div>
+    </div>
   </div>
   <!-- PDF quality (only shown for PDF sources) -->
   <div id="settingsPdfQualityWrap" style="display:none">
@@ -1900,7 +1907,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
     { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
-      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false },
+      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false, spTurnMs: 250 },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -4495,6 +4502,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (canvasBufferWrap) canvasBufferWrap.style.display = isLong ? '' : 'none';
     settingsCanvasBufferToggle.checked = !!readerSettings.canvasBufferEnabled;
     document.getElementById('settingsSpCanvasToggle').checked = !!readerSettings.spCanvasEnabled;
+    document.getElementById('settingsSpTurnRange').value = spTurnMs();
+    document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
     document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
       readerSettings.canvasBufferEnabled ? '' : 'none';
     document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
@@ -4559,6 +4568,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     applyPreloadRadius(Number(e.target.value));
     saveReaderSettings();
   });
+
+  document.getElementById('settingsSpTurnRange').addEventListener('input', (e) => {
+    readerSettings.spTurnMs = Number(e.target.value);
+    document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
+  });
+  document.getElementById('settingsSpTurnRange').addEventListener('change', () => saveReaderSettings());
 
   document.getElementById('settingsSpCanvasToggle').addEventListener('change', (e) => {
     readerSettings.spCanvasEnabled = e.target.checked;
@@ -5190,9 +5205,36 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // Retargeting mid-animation (holding the arrow key) reads the strip's
   // CURRENT scrollLeft as the new start, same "always animate from wherever
   // it actually is" behavior the native version had.
-  const SP_FLIP_DURATION_MS = 110;
+  const SP_SWIPE_MIN_DURATION_MS = 110;  // a fast flick's release animation
   const SP_SWIPE_MAX_DURATION_MS = 180;  // a slow swipe's release animation
+  // Taps, keys and the BLE scroller (readerSettings.spTurnMs, 2026-09-28):
+  // recorded on the tablet, a 110ms turn got 3 frames (350/500/190px) --
+  // the display idles at 30Hz between pages and a key press, unlike a touch,
+  // takes ~125ms to bring it back to 120Hz, so the whole turn was over
+  // before it sped up. A longer turn keeps sliding once the display has.
+  function spTurnMs() {
+    return Math.min(500, Math.max(110, Number(readerSettings.spTurnMs) || 250));
+  }
+  // One 120Hz frame: a swipe's release animation starts this far in (below).
+  const SP_FRAME_MS = 8.3;
   let _spFlipAnimId = null;
+  // Work that doesn't have to happen while a page slides in (the page-window
+  // recenter, canvas pages, progress bar) runs once the turn has landed: on
+  // the tablet the recenter's slot rebuild landed mid-animation as a 90-130ms
+  // task and the last 130-600px became a single jump. The incoming page itself
+  // is loaded before the turn starts, as before.
+  let _spAfterTurnFns = [];
+  function _spAfterTurn(fn) {
+    if (_spFlipAnimId === null) fn();
+    else _spAfterTurnFns.push(fn);
+  }
+  function _spRunAfterTurn() {
+    const fns = _spAfterTurnFns;
+    _spAfterTurnFns = [];
+    for (const fn of fns) {
+      try { fn(); } catch (e) { console.error('[sp] after-turn task failed', e); }
+    }
+  }
   // startVelocity (px/ms of scrollLeft, from a finger swipe): the animation
   // starts at exactly that speed and eases out to rest on the target, so a
   // swipe's release is continuous with the finger. Its duration is the time
@@ -5208,11 +5250,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const startLeft = spStrip.scrollLeft;
     const delta     = targetLeft - startLeft;
     if (delta === 0) { _spFlipAnimId = null; spStrip.style.scrollSnapType = ''; return; }
-    let duration = SP_FLIP_DURATION_MS, v0 = 3 * delta / SP_FLIP_DURATION_MS;
+    let duration = spTurnMs(), v0 = 3 * delta / duration;
     if (startVelocity !== null) {
       const v = Math.sign(startVelocity) === Math.sign(delta) ? startVelocity : 0;  // moving away: start from rest
       duration = v === 0 ? SP_SWIPE_MAX_DURATION_MS
-        : Math.min(SP_SWIPE_MAX_DURATION_MS, Math.max(SP_FLIP_DURATION_MS, delta / v));
+        : Math.min(SP_SWIPE_MAX_DURATION_MS, Math.max(SP_SWIPE_MIN_DURATION_MS, delta / v));
       v0 = Math.sign(delta) * Math.min(Math.abs(v), 3 * Math.abs(delta) / duration);
       dbg(`[sp] swipe release: finger ${startVelocity.toFixed(2)} px/ms, ${Math.round(Math.abs(delta))}px left, ${Math.round(duration)}ms`);
     }
@@ -5220,7 +5262,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // pull a programmatic scroll to the nearest page mid-way), restored at
     // the end.
     spStrip.style.scrollSnapType = 'none';
-    const startTime = performance.now();
+    // A swipe's release continues the finger's motion right away: the frame
+    // the finger lifts in already moves, one frame's worth in. Starting at 0
+    // left two frames without motion at every release (recorded on the tablet).
+    const isSwipe = startVelocity !== null;
+    const startTime = performance.now() - (isSwipe ? SP_FRAME_MS : 0);
     function step(now) {
       const t = Math.min(1, (now - startTime) / duration);
       const h01 = t * t * (3 - 2 * t), h10 = t * (1 - t) * (1 - t);
@@ -5232,11 +5278,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // skipped while the animation runs (see _spScriptMoving), and the
         // last frame's write doesn't reliably fire another scrollend, which
         // left the window off-centre after rapid turns.
-        spRecenterWindow();
         _spSettleCurrentIdx();
+        // The recenter and the deferred work after the landed frame has been
+        // drawn (a task queued from rAF runs after rendering); a turn that
+        // started meanwhile takes them to its own end.
+        setTimeout(() => {
+          if (_spScriptMoving()) return;
+          spRecenterWindow();
+          _spRunAfterTurn();
+        }, 0);
       }
     }
-    _spFlipAnimId = requestAnimationFrame(step);
+    if (isSwipe) step(performance.now());
+    else _spFlipAnimId = requestAnimationFrame(step);
   }
 
   // ── SINGLE-PAGE SWIPE, DRIVEN BY THIS SCRIPT (2026-09-23) ──
@@ -5364,9 +5418,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     const globalIdx = manifest.indexOf(entry);
     if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
-    spCbUpdate();
-
-    updateProgressBar();
+    _spAfterTurn(() => { spCbUpdate(); updateProgressBar(); });
 
     // No separate chapter-boundary prefetch needed anymore -- _spSchedulePrefetch
     // just above already reaches ahead/behind by the same tier1/tier2 radius
