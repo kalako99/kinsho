@@ -643,7 +643,9 @@
       margin-bottom: 16px;
     }
     /* ── DESCRIPTION ── */
-    .lastread-area { margin-top: 18px; }
+    .progress-section { max-width: 900px; margin: 0 auto; padding: 18px 20px 6px; }
+    .lastread-area { margin: 0; }
+    .avg-times { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 8px; }
     .lastread-row { display: flex; align-items: center; gap: 10px; }
     .lastread-track { flex: 1; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
     .lastread-bar { height: 100%; background: var(--color-primary, #e94560); border-radius: 3px; transition: width 0.3s; }
@@ -1149,6 +1151,9 @@
       .chapters-section {
         padding: 0 4px 30px;
       }
+      .progress-section {
+        padding: 14px 24px 4px;
+      }
     }
   </style>
   <script>
@@ -1325,32 +1330,12 @@
             </span>
           </div>
 
-          <!-- LAST READ: where the last read page sits in the whole series -->
-          <div v-if="lastRead" class="lastread-area">
-            <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
-            <div class="lastread-row">
-              <div class="lastread-track"><div class="lastread-bar" :style="{ width: lastRead.percent + '%' }"></div></div>
-              <span class="lastread-label">{{ lastRead.percent }}% · {{ lastRead.name }}</span>
-            </div>
-          </div>
-
           <!-- READING TIME -->
-          <div v-if="readingTimeMinutes > 0 || avgUnitSeconds" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
+          <div v-if="readingTimeMinutes > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
             <div class="section-label" style="margin-bottom:4px;">READING TIME</div>
-            <div v-if="readingTimeMinutes > 0" style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
+            <div style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
               {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
             </div>
-            <template v-if="avgUnitSeconds">
-              <div class="avg-time" style="margin-top:2px;" title="Average of your reading times of the chapters that were timed">
-                Average per chapter: {{ formatDuration(avgUnitSeconds) }}
-              </div>
-              <div class="avg-time" title="Average per chapter × the chapters you've read">
-                To where you are: {{ formatDuration(avgToHereSeconds) }} ({{ readCount }} read)
-              </div>
-              <div class="avg-time" title="Average per chapter × all chapters">
-                Whole series: {{ formatDuration(avgSeriesSeconds) }}
-              </div>
-            </template>
           </div>
 
           <!-- DESCRIPTION -->
@@ -1466,6 +1451,24 @@
         </div>  <!-- /hero-head -->
       </div>    <!-- /hero-inner -->
     </div>      <!-- /hero -->
+
+    <!-- READING PROGRESS: under the cover and description, lined up with the
+         chapters list: where the last read page sits in the whole series, and
+         the average reading times. -->
+    <div v-if="lastRead || avgUnitSeconds" class="progress-section">
+      <div v-if="lastRead" class="lastread-area">
+        <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
+        <div class="lastread-row">
+          <div class="lastread-track"><div class="lastread-bar" :style="{ width: lastRead.percent + '%' }"></div></div>
+          <span class="lastread-label">{{ lastRead.percent }}% · {{ lastRead.name }}</span>
+        </div>
+      </div>
+      <div v-if="avgUnitSeconds" class="avg-times">
+        <span class="avg-time" title="Average of your reading times of the chapters that were timed">Average per chapter: {{ formatDuration(avgUnitSeconds) }}</span>
+        <span class="avg-time" title="Average per chapter × the chapters you've read">To where you are: {{ formatDuration(avgToHereSeconds) }} ({{ readCount }} read)</span>
+        <span class="avg-time" title="Average per chapter × all chapters">Whole series: {{ formatDuration(avgSeriesSeconds) }}</span>
+      </div>
+    </div>
 
     <!-- CHAPTERS -->
     <div class="chapters-section">
