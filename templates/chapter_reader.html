@@ -5266,13 +5266,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // the finger lifts in already moves, one frame's worth in. Starting at 0
     // left two frames without motion at every release (recorded on the tablet).
     const isSwipe = startVelocity !== null;
-    const startTime = performance.now() - (isSwipe ? SP_FRAME_MS : 0);
+    const calledAt = performance.now();
+    const startTime = calledAt - (isSwipe ? SP_FRAME_MS : 0);
+    // Debug log: every frame of the turn (ms after the call : px still to go),
+    // to see where a turn freezes (user report 2026-09-29).
+    const frames = [];
     function step(now) {
       const t = Math.min(1, (now - startTime) / duration);
       const h01 = t * t * (3 - 2 * t), h10 = t * (1 - t) * (1 - t);
       spStrip.scrollLeft = startLeft + delta * h01 + v0 * duration * h10;
+      frames.push(`${Math.round(now - calledAt)}:${Math.round(Math.abs(targetLeft - spStrip.scrollLeft))}`);
       _spFlipAnimId = t < 1 ? requestAnimationFrame(step) : null;
       if (t >= 1) {
+        dbg(`[sp] turn ${isSwipe ? 'swipe' : 'tap/key'} ${Math.round(duration)}ms, frames (ms:px left) ${frames.join(' ')}`);
         spStrip.style.scrollSnapType = '';
         // Settle here rather than waiting for scrollend: the settle is
         // skipped while the animation runs (see _spScriptMoving), and the

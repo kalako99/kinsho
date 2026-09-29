@@ -81,6 +81,24 @@
     }).observe({ type: 'longtask' });
   } catch (e) {}
 
+  // Every frame over 50ms, with the scripts that ran in it (Chrome's Long
+  // Animation Frames API). A frame gap with no entry here means the main
+  // thread was free and the stall was in rendering/raster/GPU.
+  try {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        const at = iso(performance.timeOrigin + e.startTime);
+        const layout = e.styleAndLayoutStart ? Math.round(e.startTime + e.duration - e.styleAndLayoutStart) : 0;
+        const render = e.renderStart ? Math.round(e.startTime + e.duration - e.renderStart) : 0;
+        const scripts = (e.scripts || []).map((s) =>
+          `${s.invoker || '?'} ${s.sourceFunctionName || ''}@${shortUrl(s.sourceURL || '')}:${s.sourceCharPosition ?? ''} ` +
+          `${Math.round(s.duration)}ms (forced layout ${Math.round(s.forcedStyleAndLayoutDuration || 0)}ms)`).join('; ');
+        log(`[loaf] ${Math.round(e.duration)}ms frame at ${at}: blocking ${Math.round(e.blockingDuration || 0)}ms, ` +
+            `render+layout ${render}ms (style/layout ${layout}ms)` + (scripts ? ` | ${scripts}` : ' | no script'));
+      }
+    }).observe({ type: 'long-animation-frame', buffered: false });
+  } catch (e) { log('[loaf] not supported: ' + e); }
+
   let lastTick = performance.now();
   setInterval(() => {
     const now = performance.now();
