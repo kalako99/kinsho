@@ -882,6 +882,7 @@
   const IDLE_PAGE_FACTOR = 2;
   const IDLE_SESSION_MIN_SCREENS = 10;
   const PACE_MAX_SPEEDUP = 3;
+  const PACE_MIN_WORDS = 50;  // fewer (a title page) says nothing about reading speed
   let lastActivityTs = Date.now();
   const markActivity = () => { lastActivityTs = Date.now(); };
   ['keydown', 'mousedown', 'touchstart', 'touchmove', 'wheel'].forEach(evt =>
@@ -932,7 +933,7 @@
     const words = el.scrollHeight ? chapterWords * (top - screenTop) / el.scrollHeight : 0;
     const wpm = readingWpm();
     const plausible = !wpm || words / screenSecs * 60 <= PACE_MAX_SPEEDUP * wpm;
-    if (!screenPaused && screenSecs >= 1 && words >= 10 && plausible) {
+    if (!screenPaused && screenSecs >= 1 && words >= PACE_MIN_WORDS && plausible) {
       sessWords += words; sessSecs += screenSecs; sessScreens++;
       unsentWords += words; unsentSecs += screenSecs;
     }
