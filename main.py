@@ -4292,6 +4292,7 @@ def get_settings(request: Request):
         "favourites":               user_data.get("favourites", []),
         "backdrop_list":            user_data.get("backdrop_list",   True),
         "backdrop_detail":          user_data.get("backdrop_detail", True),
+        "reading_stats_open":       user_data.get("reading_stats_open", True),
         "lock_backdrop":            user_data.get("lock_backdrop",   False),
         "locked_backdrop_url":      user_data.get("locked_backdrop_url", ""),
         "hide_ble_scroller":        user_data.get("hide_ble_scroller", True),
@@ -4582,6 +4583,19 @@ async def delete_custom_theme(name: str, request: Request):
     user_data["custom_themes"] = themes
     if user_data.get("active_custom_theme_name") == name:
         user_data["active_custom_theme_name"] = ""
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
+# The detail pages' "Reading statistics" row, expanded or collapsed: one
+# choice per user for every manga in every library (2026-09-29).
+@app.post("/api/settings/reading-stats")
+async def save_reading_stats_open(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    user_data = auth.load_user_data(username)
+    user_data["reading_stats_open"] = bool(body.get("open", True))
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 

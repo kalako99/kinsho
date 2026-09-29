@@ -643,7 +643,13 @@
       margin-bottom: 16px;
     }
     /* ── DESCRIPTION ── */
-    .progress-section { max-width: 900px; margin: 0 auto; padding: 18px 20px 6px; }
+    .stats-section { max-width: 900px; margin: 0 auto; padding: 18px 20px 6px; }
+    .stats-head { display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 0; color: var(--color-text, #f0f0f0); cursor: pointer; font: inherit; }
+    .stats-arrow { transition: transform 0.2s; opacity: 0.8; }
+    .stats-arrow.open { transform: rotate(90deg); }
+    .stats-body { padding: 8px 0 0 20px; }
+    .stats-total { font-size: 0.85rem; color: var(--color-text, #f0f0f0); margin-bottom: 12px; }
+    .stats-key { color: #999; margin-right: 6px; }
     .lastread-area { margin: 0; }
     .avg-times { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 8px; }
     .lastread-row { display: flex; align-items: center; gap: 10px; }
@@ -1151,7 +1157,7 @@
       .chapters-section {
         padding: 0 4px 30px;
       }
-      .progress-section {
+      .stats-section {
         padding: 14px 24px 4px;
       }
     }
@@ -1330,14 +1336,6 @@
             </span>
           </div>
 
-          <!-- READING TIME -->
-          <div v-if="readingTimeMinutes > 0" class="desc-area" style="margin-bottom:0; padding-bottom:8px;">
-            <div class="section-label" style="margin-bottom:4px;">READING TIME</div>
-            <div style="font-size:0.85rem; color:var(--color-text,#f0f0f0);">
-              {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
-            </div>
-          </div>
-
           <!-- DESCRIPTION -->
           <div class="desc-area">
             <div class="section-label">
@@ -1452,21 +1450,31 @@
       </div>    <!-- /hero-inner -->
     </div>      <!-- /hero -->
 
-    <!-- READING PROGRESS: under the cover and description, lined up with the
-         chapters list: where the last read page sits in the whole series, and
-         the average reading times. -->
-    <div v-if="lastRead || avgUnitSeconds" class="progress-section">
-      <div v-if="lastRead" class="lastread-area">
-        <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
-        <div class="lastread-row">
-          <div class="lastread-track"><div class="lastread-bar" :style="{ width: lastRead.percent + '%' }"></div></div>
-          <span class="lastread-label">{{ lastRead.percent }}% · {{ lastRead.name }}</span>
+    <!-- READING STATISTICS: under the cover and description, lined up with the
+         list below. A row with a side arrow; expanded or collapsed is one
+         choice per user for every manga (reading_stats_open, /api/settings). -->
+    <div v-if="readingTimeMinutes > 0 || lastRead || avgUnitSeconds" class="stats-section">
+      <button type="button" class="stats-head" @click="toggleReadingStats" :aria-expanded="readingStatsOpen ? 'true' : 'false'">
+        <svg class="stats-arrow" :class="{ open: readingStatsOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+        <span class="section-label" style="margin:0;">READING STATISTICS</span>
+      </button>
+      <div v-if="readingStatsOpen" class="stats-body">
+        <div v-if="readingTimeMinutes > 0" class="stats-total">
+          <span class="stats-key">Reading time</span>
+          {{ readingTimeMinutes >= 60 ? Math.floor(readingTimeMinutes / 60) + ' h ' + (readingTimeMinutes % 60) + ' m' : readingTimeMinutes + ' m' }}
         </div>
-      </div>
-      <div v-if="avgUnitSeconds" class="avg-times">
-        <span class="avg-time" title="Average of your reading times of the chapters that were timed">Average per chapter: {{ formatDuration(avgUnitSeconds) }}</span>
-        <span class="avg-time" title="Average per chapter × the chapters you've read">To where you are: {{ formatDuration(avgToHereSeconds) }} ({{ readCount }} read)</span>
-        <span class="avg-time" title="Average per chapter × all chapters">Whole series: {{ formatDuration(avgSeriesSeconds) }}</span>
+        <div v-if="lastRead" class="lastread-area">
+          <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
+          <div class="lastread-row">
+            <div class="lastread-track"><div class="lastread-bar" :style="{ width: lastRead.percent + '%' }"></div></div>
+            <span class="lastread-label">{{ lastRead.percent }}% · {{ lastRead.name }}</span>
+          </div>
+        </div>
+        <div v-if="avgUnitSeconds" class="avg-times">
+          <span class="avg-time" title="Average of your reading times of the chapters that were timed">Average per chapter: {{ formatDuration(avgUnitSeconds) }}</span>
+          <span class="avg-time" title="Average per chapter × the chapters you've read">To where you are: {{ formatDuration(avgToHereSeconds) }} ({{ readCount }} read)</span>
+          <span class="avg-time" title="Average per chapter × all chapters">Whole series: {{ formatDuration(avgSeriesSeconds) }}</span>
+        </div>
       </div>
     </div>
 
@@ -1784,6 +1792,7 @@ createApp({
       manga:                null,
       loading:              true,
       showBackdrop:         true,
+      readingStatsOpen:     true,
       sortDesc:             true,
       isAdmin:              false,
       readingTimeMinutes:   null,
@@ -1960,6 +1969,7 @@ createApp({
 
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
+      this.readingStatsOpen = d.reading_stats_open !== false;
     }).catch(() => {});
     // Start the dims prefetch immediately: loadReadChapters() triggers the
     // reader-page image preload, which awaits this._dimsPromise — the
@@ -2392,6 +2402,14 @@ createApp({
       }
     },
 
+    toggleReadingStats() {
+      this.readingStatsOpen = !this.readingStatsOpen;
+      fetch(apiUrl('/api/settings/reading-stats'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ open: this.readingStatsOpen }),
+      }).catch(() => {});
+    },
     async loadReadingTime() {
       try {
         const name = this.manga?.name || '';
