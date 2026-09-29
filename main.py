@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Request, Query, Depends, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, FileResponse
+from fastapi.responses import JSONResponse, RedirectResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 import json
@@ -7483,15 +7483,14 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         ext = os.path.splitext(fname)[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
                       "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
-        try:
-            with open(file_path, "rb") as f:
-                img_bytes = f.read()
-        except Exception:
+        if not os.path.isfile(file_path):
             return JSONResponse({"error": "Failed to read page"}, status_code=500)
-        return StreamingResponse(
-            io.BytesIO(img_bytes), media_type=media_type,
-            headers={"Cache-Control": "public, max-age=480"},
-        )
+        # Never StreamingResponse(io.BytesIO(...)): iterating a BytesIO yields
+        # it line by line (split on every \n byte), so a 3.7MB JPEG went out
+        # as ~15,000 chunks, one thread-pool hop each: 4s per page, ~29s when
+        # the reader loads 8 at once (measured 2026-09-29).
+        return FileResponse(file_path, media_type=media_type,
+                            headers={"Cache-Control": "public, max-age=480"})
 
     try:
         page_index = int(filename_or_index)
@@ -7508,8 +7507,8 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         ext = os.path.splitext(images[page_index])[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
                       "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
-        return StreamingResponse(
-            io.BytesIO(img_bytes), media_type=media_type,
+        return Response(
+            content=img_bytes, media_type=media_type,
             headers={"Cache-Control": "public, max-age=480"},
         )
 
@@ -7558,8 +7557,8 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             return JSONResponse({"error": "Failed to read epub page"}, status_code=500)
         ext = os.path.splitext(image_list[page_index])[1].lower().lstrip('.')
         media_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
-        return StreamingResponse(
-            io.BytesIO(img_bytes), media_type=media_type,
+        return Response(
+            content=img_bytes, media_type=media_type,
             headers={"Cache-Control": "public, max-age=480"},
         )
 
@@ -7723,8 +7722,8 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
         ext = os.path.splitext(images[page_index])[1].lower().lstrip('.')
         media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
                       "webp": "image/webp", "gif": "image/gif", "avif": "image/avif"}.get(ext, "image/jpeg")
-        return StreamingResponse(
-            io.BytesIO(img_bytes), media_type=media_type,
+        return Response(
+            content=img_bytes, media_type=media_type,
             headers={"Cache-Control": "public, max-age=480"},
         )
     elif filename_or_index.isdigit():
