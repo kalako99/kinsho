@@ -838,6 +838,16 @@ createApp({
             try {
                 const res = await fetch(apiUrl(`/api/scan/${libraryId}/status`));
                 const data = await res.json();
+                // A recheck stays running through auto-extraction and the
+                // rescan after it (2026-09-29): say which part is going on.
+                if (data.running) {
+                    const msg = data.phase === 'extract'
+                        ? `Extracting volumes ${data.processed} / ${data.total}…`
+                        : 'Scanning...';
+                    if (this.scanStatus[libraryId]?.msg !== msg) {
+                        this.scanStatus = { ...this.scanStatus, [libraryId]: { msg, type: 'scanning' } };
+                    }
+                }
                 if (!data.running && data.scanned) {
                     const d = new Date(data.last_scanned);
                     const timeStr = d.toLocaleTimeString();

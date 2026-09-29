@@ -381,6 +381,7 @@ def _cleanup_stale_archive_thumbs(library_id: int, manga_name: str, source_id: s
 _scan_running: set = set()  # library_ids whose run_scan() is actively executing right now
 _scan_progress: dict = {}  # library_id -> {"processed": int, "total": int}, present only while running
 _extraction_running: set = set()  # library_ids currently running background auto-extraction
+_extraction_progress: dict = {}  # library_id -> {"processed", "total"} files, while extracting
 
 # ── SCAN QUEUE ──
 #
@@ -4093,14 +4094,13 @@ def run_auto_extraction(library_id: int, pending_paths: list):
     etc.) never blocks the rest of the batch -- logged and skipped, source
     file left untouched so it's simply retried on the next scan that finds
     it again."""
-    if library_id in _extraction_running:
-        print(f"[AutoExtract] Library {library_id} already has an extraction pass running -- skipping.")
-        return
-    _extraction_running.add(library_id)
+    # _extraction_running is set by run_scan before this thread starts (see
+    # there), so the library never looks idle between its scan and this.
     print(f"[AutoExtract] Starting: {len(pending_paths)} file(s) queued for library {library_id}.")
     converted = 0
     try:
-        for path in pending_paths:
+        for i, path in enumerate(pending_paths):
+            _extraction_progress[library_id] = {"processed": i, "total": len(pending_paths)}
             if not os.path.isfile(path):
                 print(f"[AutoExtract] Skipping (no longer exists): {path}")
                 continue
@@ -4141,11 +4141,14 @@ def run_auto_extraction(library_id: int, pending_paths: list):
             print(f"[AutoExtract] Converted: {path} -> {output_dir}")
             converted += 1
     finally:
+        print(f"[AutoExtract] Done for library {library_id}: {converted}/{len(pending_paths)} converted.")
+        # The rescan that picks the new folders up is queued BEFORE the flag
+        # drops: Settings shows the recheck as running until that rescan is
+        # done too, with no idle moment in between (2026-09-29).
+        if converted:
+            enqueue_library_scan(library_id)
+        _extraction_progress.pop(library_id, None)
         _extraction_running.discard(library_id)
-
-    print(f"[AutoExtract] Done for library {library_id}: {converted}/{len(pending_paths)} converted.")
-    if converted:
-        enqueue_library_scan(library_id)
 
 
 def run_scan(library_id: int):
@@ -4210,10 +4213,19 @@ def run_scan(library_id: int):
     t.start()
 
     if pending_extractions:
-        et = threading.Thread(
-            target=run_auto_extraction, args=(library_id, pending_extractions), daemon=True
-        )
-        et.start()
+        if library_id in _extraction_running:
+            print(f"[AutoExtract] Library {library_id} already has an extraction pass running -- skipping.")
+        else:
+            # Set here, not in the thread: the queue worker drops this library
+            # from _scan_queued_ids as soon as run_scan returns, and the
+            # recheck must look busy without a gap until extraction and its
+            # rescan are done.
+            _extraction_running.add(library_id)
+            _extraction_progress[library_id] = {"processed": 0, "total": len(pending_extractions)}
+            et = threading.Thread(
+                target=run_auto_extraction, args=(library_id, pending_extractions), daemon=True
+            )
+            et.start()
 
 
 # ── API ROUTES ──
@@ -4680,11 +4692,21 @@ async def trigger_scan(library_id: int):
     enqueue_library_scan(library_id)
     return JSONResponse({"ok": True, "message": "Scan started"})
 
+def _library_busy(library_id: int):
+    """None when idle, else (phase, progress): a recheck stays busy through
+    auto-extraction and the rescan after it (phase "scan" or "extract")."""
+    if library_id in _extraction_running and library_id not in _scan_running:
+        return "extract", _extraction_progress.get(library_id, {"processed": 0, "total": 1})
+    if library_id in _scan_queued_ids or library_id in _extraction_running:
+        return "scan", _scan_progress.get(library_id, {"processed": 0, "total": 1})
+    return None
+
 @app.get("/api/scan/{library_id}/status")
 def scan_status(library_id: int):
-    if library_id in _scan_queued_ids:
-        progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
-        return JSONResponse({"scanned": False, "running": True, **progress})
+    busy = _library_busy(library_id)
+    if busy:
+        phase, progress = busy
+        return JSONResponse({"scanned": False, "running": True, "phase": phase, **progress})
     data = load_app_data()
     manga_data = data.get("manga_data", {}).get(str(library_id))
     if not manga_data:
@@ -4711,18 +4733,23 @@ def scan_activity(request: Request):
     username = auth.get_current_user(request)
     if not username:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
-    if not _scan_queued_ids:
+    busy_ids = set(_scan_queued_ids) | set(_extraction_running)
+    if not busy_ids:
         return JSONResponse({"scanning": False, "libraries": []})
     data = load_app_data()
     lib_names = {lib["id"]: lib.get("name", f"Library {lib['id']}") for lib in data.get("libraries", [])}
     active = []
-    for library_id in sorted(_scan_queued_ids):
+    for library_id in sorted(busy_ids):
         if not auth.can_access_library(username, library_id):
             continue
-        progress = _scan_progress.get(library_id, {"processed": 0, "total": 1})
+        busy = _library_busy(library_id)
+        if not busy:
+            continue
+        phase, progress = busy
         active.append({
             "library_id":   library_id,
             "library_name": lib_names.get(library_id, f"Library {library_id}"),
+            "phase":        phase,
             **progress,
         })
     return JSONResponse({"scanning": bool(active), "libraries": active})
