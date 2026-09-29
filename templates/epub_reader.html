@@ -826,6 +826,7 @@
     else if (land === 'clampFraction') el.scrollTop = prevFraction * (el.scrollHeight - el.clientHeight);
     else if (land === 'fraction') el.scrollTop = fraction * (el.scrollHeight - el.clientHeight);
     else el.scrollTop = 0;
+    paceStartScreen(doc);
     if (bmEndToEndActive) checkEndToEnd();
   }
 
@@ -846,6 +847,7 @@
   async function loadSpineChapter(index, { land = 'start', fraction = 0, saveProgress = true } = {}) {
     const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`);
     if (data.error) return;
+    paceLeaveChapter(data.spine_index === currentIndex + 1 && land === 'start');
     currentIndex = data.spine_index;
     spineCount   = data.spine_count;
     await renderChapterContent(data.html, data.css, { land, fraction });
@@ -862,6 +864,146 @@
   document.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); scrollWithinOrFlip(1); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); scrollWithinOrFlip(-1); }
+  });
+
+  // ── READING TIME + READING PACE (2026-09-29) ──
+  // Reading-time minutes work like chapter_reader.html's: a minute counts
+  // only if there was input recently. "Recently" follows the reader's pace:
+  // a page here is one screen of text, and the limit is IDLE_PAGE_FACTOR x
+  // the time the words on this screen take at the user's words per minute,
+  // never under 90s. Words per minute: this book's own (server, wpm_time),
+  // else this session's once IDLE_SESSION_MIN_SCREENS screens were read,
+  // else the user's average over the whole library, else just 90s.
+  // A screen's sample: the words scrolled past (the chapter's word count x
+  // the share of the chapter's height) over the active time it took. Going
+  // back discards the screen (rereading), a paused one never counts, and one
+  // read over 3x faster than the current pace is flipping, not reading.
+  const ACTIVITY_TIMEOUT_MS = 90000;
+  const IDLE_PAGE_FACTOR = 2;
+  const IDLE_SESSION_MIN_SCREENS = 10;
+  const PACE_MAX_SPEEDUP = 3;
+  let lastActivityTs = Date.now();
+  const markActivity = () => { lastActivityTs = Date.now(); };
+  ['keydown', 'mousedown', 'touchstart', 'touchmove', 'wheel'].forEach(evt =>
+    document.addEventListener(evt, markActivity, { passive: true, capture: true }));
+
+  let pace = {};
+  fetch(apiUrl(`/api/reading/pace/${libraryId}/${mangaId}`))
+    .then(r => (r.ok ? r.json() : null)).then(j => { if (j) pace = j; }).catch(() => {});
+  let chapterWords = 0;
+  let sessWords = 0, sessSecs = 0, sessScreens = 0;
+  let unsentWords = 0, unsentSecs = 0;
+  let screenTop = null, screenSecs = 0, screenPaused = false;
+  let paceLast = performance.now();
+
+  function pageEl() {
+    const doc = epubFrame.contentDocument;
+    return doc && doc.getElementById('pg-outer');
+  }
+  function readingWpm() {
+    if (pace.wpm) return pace.wpm;
+    if (sessScreens >= IDLE_SESSION_MIN_SCREENS) return sessWords / sessSecs * 60;
+    return pace.library_wpm || null;
+  }
+  function idleLimitMs() {
+    const wpm = readingWpm(), el = pageEl();
+    if (!wpm || !el || !el.scrollHeight) return ACTIVITY_TIMEOUT_MS;
+    const wordsOnScreen = chapterWords * Math.min(1, el.clientHeight / el.scrollHeight);
+    return Math.max(ACTIVITY_TIMEOUT_MS, IDLE_PAGE_FACTOR * wordsOnScreen / wpm * 60000);
+  }
+  function isIdle() { return Date.now() - lastActivityTs > idleLimitMs(); }
+
+  // A new chapter (or a re-render after a font-size change): count its words
+  // and start a fresh screen at the top of what's shown.
+  function paceStartScreen(doc) {
+    const el = doc.getElementById('pg-outer');
+    chapterWords = el ? (el.textContent.match(/\S+/g) || []).length : 0;
+    screenTop = el ? el.scrollTop : null;
+    screenSecs = 0;
+    screenPaused = false;
+    for (const evt of ['mousedown', 'touchstart', 'touchmove', 'wheel']) {
+      doc.addEventListener(evt, markActivity, { passive: true, capture: true });
+    }
+    if (el) el.addEventListener('scroll', markActivity, { passive: true });
+  }
+  // Ends the current screen at scroll position `top` (px), counting the words
+  // between where it started and there.
+  function paceCloseScreen(el, top) {
+    const words = el.scrollHeight ? chapterWords * (top - screenTop) / el.scrollHeight : 0;
+    const wpm = readingWpm();
+    const plausible = !wpm || words / screenSecs * 60 <= PACE_MAX_SPEEDUP * wpm;
+    if (!screenPaused && screenSecs >= 1 && words >= 10 && plausible) {
+      sessWords += words; sessSecs += screenSecs; sessScreens++;
+      unsentWords += words; unsentSecs += screenSecs;
+    }
+    screenTop = top;
+    screenSecs = 0;
+    screenPaused = false;
+  }
+  // Leaving the chapter: moving on to the next one finishes its last screen.
+  function paceLeaveChapter(forward) {
+    const el = pageEl();
+    if (el && screenTop !== null && forward) paceCloseScreen(el, el.scrollHeight);
+    screenTop = null;
+    sendPace(false);
+  }
+  setInterval(() => {
+    const now = performance.now();
+    const dt = (now - paceLast) / 1000;
+    paceLast = now;
+    const el = pageEl();
+    if (!el || screenTop === null) return;
+    // Timers are throttled while hidden, so a long gap also means "paused".
+    if (document.hidden || dt > 5 || isIdle()) screenPaused = true;
+    else screenSecs += dt;
+    const top = el.scrollTop;
+    if (top < screenTop - 2) { screenTop = top; screenSecs = 0; screenPaused = false; }  // went back
+    else if (top - screenTop >= 0.9 * el.clientHeight) paceCloseScreen(el, top);
+  }, 250);
+
+  function sendPace(leaving) {
+    if (unsentSecs < 30) return;
+    const body = { library_id: libraryId, manga_id: mangaId, words: Math.round(unsentWords),
+                   seconds: Math.round(unsentSecs), report_id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8) };
+    unsentWords = 0; unsentSecs = 0;
+    fetch(apiUrl('/api/reading/epub-pace'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), keepalive: leaving,
+    }).catch(() => {});
+  }
+
+  // Reading-time minutes (same endpoints and rules as chapter_reader.html).
+  const MIN_CREDIT_INTERVAL_MS = 60000;
+  let lastCreditedTs = Date.now();
+  let finalTickSent = false;
+  function startReadingSession(mangaName) {
+    fetch(apiUrl('/api/reading/session/start'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ manga_name: mangaName, library_id: String(libraryId) }),
+    }).catch(() => {});
+  }
+  const tickInterval = setInterval(() => {
+    if (isIdle()) return;
+    lastCreditedTs = Date.now();
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
+  }, 60000);
+  function creditPartialMinute() {
+    const now = Date.now();
+    if (isIdle() || now - lastCreditedTs < MIN_CREDIT_INTERVAL_MS) return;
+    lastCreditedTs = now;
+    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') return;
+    creditPartialMinute();
+    sendPace(true);
+  });
+  window.addEventListener('beforeunload', () => {
+    if (finalTickSent) return;
+    finalTickSent = true;
+    clearInterval(tickInterval);
+    creditPartialMinute();
+    sendPace(true);
   });
 
   async function saveReadingProgress(completedVolumeId) {
@@ -1491,6 +1633,7 @@
       loadBookmarks(),
     ]);
     topbarTitle.textContent = mangaData.name || 'KINSHO';
+    startReadingSession(mangaData.name || 'Unknown');
     volumesList = volumesData.volumes || [];
     buildVolumeMenu();
     const land = startFraction > 0 ? 'fraction' : 'start';

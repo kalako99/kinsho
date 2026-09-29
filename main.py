@@ -6480,7 +6480,7 @@ async def save_reader_settings(request: Request):
         return JSONResponse({"ok": False, "error": "Missing library_id"}, status_code=400)
     user_data    = auth.load_user_data(username)
     allowed_keys = {"mode", "padding", "direction", "stripWidth", "preloadRadius", "pdfScale",
-                     "canvasBufferEnabled", "canvasBufferMB", "spCanvasEnabled", "spTurnMs"}
+                     "canvasBufferEnabled", "canvasBufferMB", "spCanvasEnabled", "spTurnMs", "spAnimate"}
     by_tab       = user_data.get("reader_settings_by_tab", {})
     current      = by_tab.get(library_id, {})
     for key in allowed_keys:
@@ -7072,6 +7072,74 @@ async def post_chapter_time(request: Request):
         entry["time_reports"] = (entry.get("time_reports", []) + [report_id])[-50:]
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True, "seconds": round(chapter_secs), "average": round(avg_times[unit_id])})
+
+# ── READING PACE (2026-09-29) ──
+# The readers stop counting reading time (and mark the page paused) after a
+# stretch without input: at least 90s, longer for slow reads (a book), from
+# the user's own pace. Image readers use the page average (page_time above);
+# the EPUB reader uses words per minute, kept per book like page_time:
+#   wpm_time: {"words": n, "seconds": s}
+# Each is pooled over every manga of the user's in that library for the
+# library average, used before a manga/book has its own.
+EPUB_PACE_MAX_WPM = 2000  # a report faster than this is flipping, not reading
+
+def _pooled(entries, key: str, num: str, den: str, per: float = 1.0):
+    n = sum((e.get(key) or {}).get(num, 0) for e in entries)
+    d = sum((e.get(key) or {}).get(den, 0) for e in entries)
+    return round(n / d * per, 2) if d else None
+
+@app.get("/api/reading/pace/{library_id}/{manga_id}")
+def get_reading_pace(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"error": "Not logged in"}, status_code=401)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    history = auth.load_user_data(username).get("reading_history", {}).get(str(library_id), {})
+    entries = [e for e in history.values() if isinstance(e, dict)]
+    entry = history.get(manga_id) if isinstance(history.get(manga_id), dict) else {}
+    return JSONResponse({
+        "page_avg":         _pooled([entry], "page_time", "total", "pages"),
+        "library_page_avg": _pooled(entries, "page_time", "total", "pages"),
+        "wpm":              _pooled([entry], "wpm_time", "words", "seconds", 60),
+        "library_wpm":      _pooled(entries, "wpm_time", "words", "seconds", 60),
+    })
+
+@app.post("/api/reading/epub-pace")
+async def post_epub_pace(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    try:
+        library_id = int(body.get("library_id"))
+        words = float(body.get("words"))
+        seconds = float(body.get("seconds"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Bad request"}, status_code=400)
+    manga_id = body.get("manga_id")
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    if words <= 0 or seconds <= 0 or words / seconds * 60 > EPUB_PACE_MAX_WPM:
+        return JSONResponse({"ok": False, "reason": "implausible"})
+    user_data = auth.load_user_data(username)
+    entry = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id)
+    if entry is None:
+        return JSONResponse({"ok": False, "reason": "no reading history"})
+    report_id = body.get("report_id")
+    if report_id and report_id in entry.get("time_reports", []):
+        return JSONResponse({"ok": True, "duplicate": True})
+    wpm_time = entry.setdefault("wpm_time", {"words": 0.0, "seconds": 0.0})
+    wpm_time["words"] += words
+    wpm_time["seconds"] += seconds
+    if report_id:
+        entry["time_reports"] = (entry.get("time_reports", []) + [report_id])[-50:]
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True, "wpm": round(wpm_time["words"] / wpm_time["seconds"] * 60)})
 
 @app.get("/settings")
 def settings_page(request: Request):

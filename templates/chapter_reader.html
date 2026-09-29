@@ -1378,7 +1378,14 @@
         <span class="settings-toggle-slider"></span>
       </label>
     </div>
-    <div class="settings-preload">
+    <div class="settings-row">
+      <span class="settings-row-label">Page turn animation</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsSpAnimateToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
+    <div class="settings-preload" id="settingsSpTurnWrap">
       <span class="settings-preload-label">Page turn (taps, keys, BLE)</span>
       <div class="settings-preload-right">
         <input class="settings-preload-range" type="range" min="110" max="500" step="10" value="250" id="settingsSpTurnRange">
@@ -1751,6 +1758,30 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // read of one dense page (no scrolling needed for a while) doesn't itself
   // look idle -- only a genuine pause (locked screen, walked away) does.
 
+  // The idle limit grows with the reader's own pace (2026-09-29): a page of
+  // a book can take longer than 90s to read, so the limit is
+  // IDLE_PAGE_FACTOR x the average page time, never under 90s. The average:
+  // this manga's own (server, page_time), else this session's once
+  // IDLE_SESSION_MIN_PAGES pages were read, else the user's average over the
+  // whole library, else just 90s.
+  const IDLE_PAGE_FACTOR = 2;
+  const IDLE_SESSION_MIN_PAGES = 10;
+  let _pace = {};
+  let _sessPageSecs = 0, _sessPages = 0;  // pages read this session (ptTick)
+  fetch(apiUrl(`/api/reading/pace/${libraryId}/${mangaId}`))
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => { if (j) { _pace = j; dbg(`[readtime] pace ${JSON.stringify(j)}`); } })
+    .catch(() => {});
+  function avgPageSecs() {
+    if (_pace.page_avg) return _pace.page_avg;
+    if (_sessPages >= IDLE_SESSION_MIN_PAGES) return _sessPageSecs / _sessPages;
+    return _pace.library_page_avg || null;
+  }
+  function idleLimitMs() {
+    const avg = avgPageSecs();
+    return avg ? Math.max(ACTIVITY_TIMEOUT_MS, IDLE_PAGE_FACTOR * avg * 1000) : ACTIVITY_TIMEOUT_MS;
+  }
+
   // Anchor for how long it's been since a minute was actually credited --
   // starts at session mount, not just at the first successful tick, so a
   // visit that ends before ever reaching 60s has a real elapsed-time figure
@@ -1769,7 +1800,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   let _tickSent = false;
   const _tickInterval = setInterval(() => {
-    if (Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // paused -- don't count this minute
+    if (Date.now() - _lastActivityTs > idleLimitMs()) return; // paused -- don't count this minute
     _lastCreditedTs = Date.now();
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
   }, 60000);
@@ -1789,7 +1820,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // as the first anchor).
   function _creditPartialMinute() {
     const now = Date.now();
-    if (now - _lastActivityTs > ACTIVITY_TIMEOUT_MS) return; // already idle when leaving -- nothing to credit
+    if (now - _lastActivityTs > idleLimitMs()) return; // already idle when leaving -- nothing to credit
     if (now - _lastCreditedTs < MIN_CREDIT_INTERVAL_MS) return; // hasn't been open long enough to earn a minute yet
     _lastCreditedTs = now;
     fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
@@ -1907,7 +1938,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
     { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
-      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false, spTurnMs: 250 },
+      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false, spTurnMs: 250, spAnimate: true },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -4504,6 +4535,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     document.getElementById('settingsSpCanvasToggle').checked = !!readerSettings.spCanvasEnabled;
     document.getElementById('settingsSpTurnRange').value = spTurnMs();
     document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
+    document.getElementById('settingsSpAnimateToggle').checked = readerSettings.spAnimate !== false;
+    document.getElementById('settingsSpTurnWrap').style.display = readerSettings.spAnimate !== false ? '' : 'none';
     document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
       readerSettings.canvasBufferEnabled ? '' : 'none';
     document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
@@ -4574,6 +4607,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
   });
   document.getElementById('settingsSpTurnRange').addEventListener('change', () => saveReaderSettings());
+
+  document.getElementById('settingsSpAnimateToggle').addEventListener('change', (e) => {
+    readerSettings.spAnimate = e.target.checked;
+    document.getElementById('settingsSpTurnWrap').style.display = e.target.checked ? '' : 'none';
+    saveReaderSettings();
+  });
 
   document.getElementById('settingsSpCanvasToggle').addEventListener('change', (e) => {
     readerSettings.spCanvasEnabled = e.target.checked;
@@ -5250,6 +5289,33 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const startLeft = spStrip.scrollLeft;
     const delta     = targetLeft - startLeft;
     if (delta === 0) { _spFlipAnimId = null; spStrip.style.scrollSnapType = ''; return; }
+    // "Page turn animation" off (readerSettings.spAnimate, 2026-09-29): the
+    // strip jumps straight to the page, for a side-by-side test of the
+    // freeze-then-jump the animated turn shows on big pages. The deferred
+    // work waits one frame, as after an animation, so it never delays the
+    // frame showing the new page. Logged: when the next 3 frames started,
+    // counted from the jump (a late 2nd/3rd frame = the browser waiting to
+    // draw the new page).
+    if (readerSettings.spAnimate === false) {
+      const calledAt = performance.now();
+      spStrip.style.scrollSnapType = '';
+      spStrip.scrollLeft = targetLeft;
+      const at = [];
+      const frame = (now) => {
+        at.push(Math.round(now - calledAt));
+        if (at.length < 3) { _spFlipAnimId = requestAnimationFrame(frame); return; }
+        _spFlipAnimId = null;
+        dbg(`[sp] turn instant ${startVelocity !== null ? 'swipe' : 'tap/key'}, next frames at ${at.join(' ')} ms`);
+        _spSettleCurrentIdx();
+        setTimeout(() => {
+          if (_spScriptMoving()) return;
+          spRecenterWindow();
+          _spRunAfterTurn();
+        }, 0);
+      };
+      _spFlipAnimId = requestAnimationFrame(frame);
+      return;
+    }
     let duration = spTurnMs(), v0 = 3 * delta / duration;
     if (startVelocity !== null) {
       const v = Math.sign(startVelocity) === Math.sign(delta) ? startVelocity : 0;  // moving away: start from rest
@@ -6244,7 +6310,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // Times each page while it sits at the reading position (the same page
   // getCurrentPageIdx reports), for the per-chapter average reading time
   // (see /api/reading/chapter-time in main.py for the rules). A page the idle
-  // rule above hits (no input for ACTIVITY_TIMEOUT_MS), or that's on screen
+  // rule above hits (no input for idleLimitMs()), or that's on screen
   // while the app is hidden/locked, is marked paused: the server counts it as
   // the page average. Pages passed during normal scrolling get 0 (skimming);
   // a jump of more than PT_JUMP pages (bookmark, dropdown) leaves the skipped
@@ -6261,6 +6327,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (!ptTimes[cid] || Date.now() - (ptTimes[cid].u || 0) > PT_KEEP_MS) delete ptTimes[cid];
   }
   let ptIdx = null;
+  let ptVisitSecs = 0, ptVisitPaused = false;  // the current visit to ptIdx
   let ptLast = performance.now();
   let ptDirty = false;
 
@@ -6323,14 +6390,21 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (idx == null || !manifest[idx]) return;
     if (ptIdx == null || !manifest[ptIdx]) { ptIdx = idx; return; }
     // Timers are throttled while hidden, so a long gap also means "paused".
-    if (document.hidden || dt > 5 || Date.now() - _lastActivityTs > ACTIVITY_TIMEOUT_MS) {
+    if (document.hidden || dt > 5 || Date.now() - _lastActivityTs > idleLimitMs()) {
       ptPause(ptIdx);
+      ptVisitPaused = true;
     } else {
       ptAdd(ptIdx, dt);
+      ptVisitSecs += dt;
     }
     if (idx === ptIdx) return;
     const from = ptIdx;
     ptIdx = idx;
+    // This session's page average (for idleLimitMs): pages actually stayed
+    // on, not passed while scrolling (under 1s) or paused on.
+    if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages++; }
+    ptVisitSecs = 0;
+    ptVisitPaused = false;
     if (idx > from && idx - from <= PT_JUMP) {
       for (let i = from + 1; i < idx; i++) ptAdd(i, 0);  // scrolled past: counted as fast
     }
