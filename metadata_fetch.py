@@ -35,6 +35,27 @@ def strip_source_credit(text):
         return text
     return _TRAILING_BREAKS_RX.sub("", _SOURCE_CREDIT_RX.sub("", text))
 
+
+# The detail pages show a description as plain text, so the HTML AniList
+# sends shows up literally: <br> becomes a real line break and the
+# formatting tags are dropped (2026-09-29). Only these tags: MangaDex link
+# labels like "[Book <German Edition>](...)" and "<3" are text and stay.
+_BR_RX = re.compile(r"<br\s*/?>[ \t]*\r?\n?", re.IGNORECASE)  # a newline right after <br> is just source layout
+_FORMAT_TAG_RX = re.compile(
+    r"</?(?:b|i|em|strong|u|s|span|p|a|div|sub|sup|small)(?:\s[^>]*)?>", re.IGNORECASE)
+_LINE_END_SPACES_RX = re.compile(r"[ \t]+\n")
+_EXTRA_BLANK_LINES_RX = re.compile(r"\n{3,}")
+
+
+def clean_description(text):
+    """strip_source_credit, then the HTML turned into plain text."""
+    text = strip_source_credit(text)
+    if not text:
+        return text
+    text = _FORMAT_TAG_RX.sub("", _BR_RX.sub("\n", text))
+    text = _EXTRA_BLANK_LINES_RX.sub("\n\n", _LINE_END_SPACES_RX.sub("\n", text))
+    return text.strip()
+
 # All MediaFormat values that are valid under type: MANGA on AniList.
 # Exposed here so the settings UI can build its checkbox/select list
 # from the same source of truth rather than hardcoding them elsewhere.
@@ -129,7 +150,7 @@ def _normalize_anilist_media(m: dict) -> dict:
         "title_romaji":     title_obj.get("romaji"),
         "title_english":    title_obj.get("english"),
         "title_native":     title_obj.get("native"),
-        "description":      strip_source_credit(m.get("description")),
+        "description":      clean_description(m.get("description")),
         "genres":           m.get("genres") or [],
         "tags":             m.get("tags") or [],
         "synonyms":         m.get("synonyms") or [],
@@ -306,7 +327,7 @@ async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
                 native = alt["ja"]
 
         desc_map = attrs.get("description") or {}
-        description = strip_source_credit(desc_map.get("en") or next(iter(desc_map.values()), None))
+        description = clean_description(desc_map.get("en") or next(iter(desc_map.values()), None))
 
         genres, tags = [], []
         for t in attrs.get("tags") or []:
