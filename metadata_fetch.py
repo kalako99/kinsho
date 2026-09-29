@@ -21,6 +21,20 @@ import re
 
 ANILIST_API_URL = "https://graphql.anilist.co"
 
+# The source credit AniList and MangaDex put in descriptions
+# ("<br><br>\n(Source: Kodansha USA)", "(Source: WEBTOON, edited)",
+# "*Source: J-Novel Club, Vol. 1*", once "(Source. TOPTOON+)"), removed with
+# the line breaks in front of it (2026-09-29). A note after it stays.
+_SOURCE_CREDIT_RX = re.compile(
+    r"(?:\s|<br\s*/?>)*(?:\(Source[:.][^)]*\)|\*Source:[^*\n]*\*)", re.IGNORECASE)
+_TRAILING_BREAKS_RX = re.compile(r"(?:\s|<br\s*/?>)+$", re.IGNORECASE)
+
+
+def strip_source_credit(text):
+    if not text:
+        return text
+    return _TRAILING_BREAKS_RX.sub("", _SOURCE_CREDIT_RX.sub("", text))
+
 # All MediaFormat values that are valid under type: MANGA on AniList.
 # Exposed here so the settings UI can build its checkbox/select list
 # from the same source of truth rather than hardcoding them elsewhere.
@@ -115,7 +129,7 @@ def _normalize_anilist_media(m: dict) -> dict:
         "title_romaji":     title_obj.get("romaji"),
         "title_english":    title_obj.get("english"),
         "title_native":     title_obj.get("native"),
-        "description":      m.get("description"),
+        "description":      strip_source_credit(m.get("description")),
         "genres":           m.get("genres") or [],
         "tags":             m.get("tags") or [],
         "synonyms":         m.get("synonyms") or [],
@@ -292,7 +306,7 @@ async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
                 native = alt["ja"]
 
         desc_map = attrs.get("description") or {}
-        description = desc_map.get("en") or next(iter(desc_map.values()), None)
+        description = strip_source_credit(desc_map.get("en") or next(iter(desc_map.values()), None))
 
         genres, tags = [], []
         for t in attrs.get("tags") or []:
