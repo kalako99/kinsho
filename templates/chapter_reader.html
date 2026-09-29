@@ -767,6 +767,8 @@
     }
     .sp-slot.sp-cb-ready .sp-canvas { display: block; }
     .sp-slot.sp-cb-ready img { display: none; }
+    /* Pages more than one away are loaded but not drawn: see spMarkFarSlots. */
+    .sp-slot.sp-far img { visibility: hidden; }
 
     /* ── BOOKMARK PANEL ── */
     .bookmark-panel {
@@ -4860,6 +4862,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     _spSyncSpacers();
     spStrip.scrollLeft = targetR * viewW;
+    spMarkFarSlots();
 
     for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
     _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.max(0, Math.min(spManifest.length - 1, targetR)))]));
@@ -4922,6 +4925,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       k++;
     }
     _spSyncSpacers();
+    spMarkFarSlots();
 
     // Load AFTER spAssignedSlot is rebuilt above, not during the add/remove
     // loops -- _spLoadEntry -> _spApplyUrlToSlot looks up spAssignedSlot[r]
@@ -4937,6 +4941,24 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // new slots, is harmless for the ones already loaded.
     for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
     _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.floor((spWindowLo + spWindowHi) / 2))]));
+  }
+
+  // The <img> of every page more than SP_DRAW_RADIUS away from the current
+  // one is loaded but not drawn (.sp-far). Recorded on the tablet
+  // 2026-09-29: while a turn slides in, Chrome prepaints ahead in the scroll
+  // direction and decodes the pages 2-3 ahead (~130ms each for a 12MP JPEG);
+  // those decodes held up the frames of the page being shown, so every turn
+  // froze ~100ms and then jumped, canvas pages or not. With the far pages
+  // hidden, 7/7 turns ran without a stall and the decodes came after the
+  // landing. A page is drawn again as soon as it's the next one.
+  const SP_DRAW_RADIUS = 1;
+  function spMarkFarSlots() {
+    const curR = rOf(spCurrentIdx);
+    for (let r = spWindowLo; r <= spWindowHi; r++) {
+      const si = spAssignedSlot[r];
+      if (si == null || si === -1 || !spSlotPool[si]) continue;
+      spSlotPool[si].el.classList.toggle('sp-far', Math.abs(r - curR) > SP_DRAW_RADIUS);
+    }
   }
 
   function spRecenterWindow() {
@@ -5486,6 +5508,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       }
       _spAnimateScrollTo(targetR * viewW, startVelocity);
     }
+    spMarkFarSlots();
     _spLoadEntry(entry);
 
     const globalIdx = manifest.indexOf(entry);
