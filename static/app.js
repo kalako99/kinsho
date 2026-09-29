@@ -295,6 +295,12 @@ const app = createApp({
   },
 
   computed: {
+    // A manga in a collection opens its own detail page, which has a
+    // Collection button (2026-09-29). A oneshot has no detail page, so its
+    // Continue/Start popup offers the collection instead.
+    oneshotCollectionId() {
+      return this.oneshotManga ? this.collectionMembership[`${this.activeTab}:${this.oneshotManga.id}`] || null : null;
+    },
     lastUpdatedTotalPages() {
       const perPage1 = roundUpToMultiple(50, this.lastUpdatedColumns);
       const perPageN = roundUpToMultiple(100, this.lastUpdatedColumns);
@@ -867,8 +873,6 @@ const app = createApp({
     },
 
     openManga(manga) {
-      const cid = this.collectionMembership[`${this.activeTab}:${manga.id}`];
-      if (cid) { window.location.href = `/collection/${cid}`; return; }
       if (manga.is_oneshot) { this.openOneshotPopup(manga); return; }
       window.location.href = `/manga/${this.activeTab}/${manga.id}`;
     },

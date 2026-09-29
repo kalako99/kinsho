@@ -469,6 +469,12 @@
           </svg>
           Start Reading
         </button>
+        <button class="ctx-menu-item" v-if="oneshotCollectionId" @click="openCollection(oneshotCollectionId)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="7" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/>
+          </svg>
+          Open Collection
+        </button>
       </div>
     </div>
   </div>
@@ -535,6 +541,12 @@ createApp({
   },
 
   computed: {
+    // A manga in a collection opens its own detail page, which has a
+    // Collection button (2026-09-29). A oneshot has no detail page, so its
+    // Continue/Start popup offers the collection instead.
+    oneshotCollectionId() {
+      return this.oneshotManga ? this.collectionMembership[`${this.libraryId}:${this.oneshotManga.id}`] || null : null;
+    },
     filteredMangas() {
       const q = this.liveQuery.trim().toLowerCase();
       return this.mangas.filter(m => {
@@ -590,6 +602,7 @@ createApp({
   },
 
   methods: {
+    openCollection(id) { window.location.href = `/collection/${id}`; },
     async loadMangas() {
       if (!this.libraryId) { this.loading = false; return; }
       try {
@@ -675,8 +688,6 @@ createApp({
     },
 
     openManga(manga) {
-      const cid = this.collectionMembership[`${this.libraryId}:${manga.id}`];
-      if (cid) { window.location.href = `/collection/${cid}`; return; }
       if (manga.manga_type === 'oneshot') { this.openOneshotPopup(manga); return; }
       window.location.href = `/manga/${this.libraryId}/${manga.id}`;
     },

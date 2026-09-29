@@ -356,6 +356,12 @@
           </svg>
           Start Reading
         </button>
+        <button class="ctx-menu-item" v-if="oneshotCollectionId" @click="openCollection(oneshotCollectionId)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="7" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/>
+          </svg>
+          Open Collection
+        </button>
       </div>
     </div>
   </div>

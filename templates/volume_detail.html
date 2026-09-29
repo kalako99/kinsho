@@ -45,6 +45,24 @@
       align-items: center;
     }
     .back-btn:hover { background: #2a2a2a; }
+    .topbar-collection-btn {
+      margin-left: auto;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      font: inherit;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--color-text, #f0f0f0);
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .topbar-collection-btn:hover { background: rgba(255,255,255,0.13); }
     .topbar-title {
       font-size: 1rem;
       font-weight: 600;
@@ -1259,6 +1277,12 @@
       </svg>
     </button>
     <span class="topbar-title">{{ manga ? manga.name : 'Loading…' }}</span>
+    <button v-if="collectionId" class="topbar-collection-btn" @click="openCollection" title="Open the collection this manga is in">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="7" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/>
+      </svg>
+      Collection
+    </button>
   </div>
 
   <div v-if="loading" class="state-msg">Loading…</div>
@@ -1845,6 +1869,7 @@ createApp({
       loading:              true,
       showBackdrop:         true,
       readingStatsOpen:     true,
+      collectionId:         null,
       isAdmin:              false,
       readingTimeMinutes:   null,
       canEditTags:          false,
@@ -1999,6 +2024,11 @@ createApp({
       this._selDragTouched = null;
     });
 
+    // The collection this manga is in, if any the user can see (the same
+    // map the library pages use), for the top bar's Collection button.
+    fetch(apiUrl('/api/collections/membership')).then(r => r.json()).then(d => {
+      this.collectionId = (d.membership || {})[`${this.libraryId}:${this.mangaId}`] || null;
+    }).catch(() => {});
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
       this.readingStatsOpen = d.reading_stats_open !== false;
@@ -2604,6 +2634,9 @@ createApp({
       return '#888';
     },
 
+    openCollection() {
+      window.location.href = `/collection/${this.collectionId}`;
+    },
     toggleReadingStats() {
       this.readingStatsOpen = !this.readingStatsOpen;
       fetch(apiUrl('/api/settings/reading-stats'), {
