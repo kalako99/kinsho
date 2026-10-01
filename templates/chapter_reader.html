@@ -1374,25 +1374,11 @@
       </button>
     </div>
     <div class="settings-row">
-      <span class="settings-row-label">Canvas pages (experimental)</span>
+      <span class="settings-row-label">Canvas pages</span>
       <label class="settings-toggle">
         <input type="checkbox" id="settingsSpCanvasToggle">
         <span class="settings-toggle-slider"></span>
       </label>
-    </div>
-    <div class="settings-row">
-      <span class="settings-row-label">Page turn animation</span>
-      <label class="settings-toggle">
-        <input type="checkbox" id="settingsSpAnimateToggle">
-        <span class="settings-toggle-slider"></span>
-      </label>
-    </div>
-    <div class="settings-preload" id="settingsSpTurnWrap">
-      <span class="settings-preload-label">Page turn (taps, keys, BLE)</span>
-      <div class="settings-preload-right">
-        <input class="settings-preload-range" type="range" min="110" max="500" step="10" value="250" id="settingsSpTurnRange">
-        <span class="settings-preload-value" id="settingsSpTurnValue">250 ms</span>
-      </div>
     </div>
   </div>
   <!-- PDF quality (only shown for PDF sources) -->
@@ -1940,7 +1926,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
     { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
-      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: false, spTurnMs: 250, spAnimate: true },
+      canvasBufferEnabled: false, canvasBufferMB: 500, spCanvasEnabled: true },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
 
@@ -4535,10 +4521,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (canvasBufferWrap) canvasBufferWrap.style.display = isLong ? '' : 'none';
     settingsCanvasBufferToggle.checked = !!readerSettings.canvasBufferEnabled;
     document.getElementById('settingsSpCanvasToggle').checked = !!readerSettings.spCanvasEnabled;
-    document.getElementById('settingsSpTurnRange').value = spTurnMs();
-    document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
-    document.getElementById('settingsSpAnimateToggle').checked = readerSettings.spAnimate !== false;
-    document.getElementById('settingsSpTurnWrap').style.display = readerSettings.spAnimate !== false ? '' : 'none';
     document.getElementById('settingsCanvasBufferSegmentsWrap').style.display =
       readerSettings.canvasBufferEnabled ? '' : 'none';
     document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
@@ -4601,18 +4583,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   document.getElementById('settingsPreloadRange').addEventListener('input', (e) => {
     applyPreloadRadius(Number(e.target.value));
-    saveReaderSettings();
-  });
-
-  document.getElementById('settingsSpTurnRange').addEventListener('input', (e) => {
-    readerSettings.spTurnMs = Number(e.target.value);
-    document.getElementById('settingsSpTurnValue').textContent = `${spTurnMs()} ms`;
-  });
-  document.getElementById('settingsSpTurnRange').addEventListener('change', () => saveReaderSettings());
-
-  document.getElementById('settingsSpAnimateToggle').addEventListener('change', (e) => {
-    readerSettings.spAnimate = e.target.checked;
-    document.getElementById('settingsSpTurnWrap').style.display = e.target.checked ? '' : 'none';
     saveReaderSettings();
   });
 
@@ -5268,14 +5238,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // it actually is" behavior the native version had.
   const SP_SWIPE_MIN_DURATION_MS = 110;  // a fast flick's release animation
   const SP_SWIPE_MAX_DURATION_MS = 180;  // a slow swipe's release animation
-  // Taps, keys and the BLE scroller (readerSettings.spTurnMs, 2026-09-28):
-  // recorded on the tablet, a 110ms turn got 3 frames (350/500/190px) --
-  // the display idles at 30Hz between pages and a key press, unlike a touch,
-  // takes ~125ms to bring it back to 120Hz, so the whole turn was over
-  // before it sped up. A longer turn keeps sliding once the display has.
-  function spTurnMs() {
-    return Math.min(500, Math.max(110, Number(readerSettings.spTurnMs) || 250));
-  }
+  // Taps, keys and the BLE scroller (2026-09-28): recorded on the tablet, a
+  // 110ms turn got 3 frames (350/500/190px) -- the display idles at 30Hz
+  // between pages and a key press, unlike a touch, takes ~125ms to bring it
+  // back to 120Hz, so the whole turn was over before it sped up. A longer
+  // turn keeps sliding once the display has. A 110-500ms slider until
+  // 2026-10-01, now fixed at the user's pick.
+  const SP_TURN_MS = 250;
   // One 120Hz frame: a swipe's release animation starts this far in (below).
   const SP_FRAME_MS = 8.3;
   let _spFlipAnimId = null;
@@ -5311,34 +5280,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const startLeft = spStrip.scrollLeft;
     const delta     = targetLeft - startLeft;
     if (delta === 0) { _spFlipAnimId = null; spStrip.style.scrollSnapType = ''; return; }
-    // "Page turn animation" off (readerSettings.spAnimate, 2026-09-29): the
-    // strip jumps straight to the page, for a side-by-side test of the
-    // freeze-then-jump the animated turn shows on big pages. The deferred
-    // work waits one frame, as after an animation, so it never delays the
-    // frame showing the new page. Logged: when the next 3 frames started,
-    // counted from the jump (a late 2nd/3rd frame = the browser waiting to
-    // draw the new page).
-    if (readerSettings.spAnimate === false) {
-      const calledAt = performance.now();
-      spStrip.style.scrollSnapType = '';
-      spStrip.scrollLeft = targetLeft;
-      const at = [];
-      const frame = (now) => {
-        at.push(Math.round(now - calledAt));
-        if (at.length < 3) { _spFlipAnimId = requestAnimationFrame(frame); return; }
-        _spFlipAnimId = null;
-        dbg(`[sp] turn instant ${startVelocity !== null ? 'swipe' : 'tap/key'}, next frames at ${at.join(' ')} ms`);
-        _spSettleCurrentIdx();
-        setTimeout(() => {
-          if (_spScriptMoving()) return;
-          spRecenterWindow();
-          _spRunAfterTurn();
-        }, 0);
-      };
-      _spFlipAnimId = requestAnimationFrame(frame);
-      return;
-    }
-    let duration = spTurnMs(), v0 = 3 * delta / duration;
+    let duration = SP_TURN_MS, v0 = 3 * delta / duration;
     if (startVelocity !== null) {
       const v = Math.sign(startVelocity) === Math.sign(delta) ? startVelocity : 0;  // moving away: start from rest
       duration = v === 0 ? SP_SWIPE_MAX_DURATION_MS
