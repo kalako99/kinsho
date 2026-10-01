@@ -1172,6 +1172,35 @@ def completed_chapter_count(history_entry: dict) -> int:
     at position 50/100 is 1 completed chapter, not "50% progress")."""
     return sum(1 for ch in history_entry.get("chapters", {}).values() if ch.get("completed"))
 
+def is_volume_manga_type(manga: dict, dims: dict) -> bool:
+    """case2, or a loose manga whose subfolders are volumes (manga_type is
+    "loose" for those, so the type alone isn't enough)."""
+    return manga.get("manga_type") == "case2" or bool(dims.get("volumes"))
+
+def tile_progress(manga: dict, dims: dict, history_entry: dict) -> int:
+    """The % on a manga tile. Volumes: pages read out of every volume's
+    pages (a completed volume counts whole, an unfinished one up to its
+    resume page), since volumes are long and "1 of 4 read" would sit at
+    25% through the whole second volume. Chapters: completed chapters out
+    of all chapters (completed_chapter_count)."""
+    if is_volume_manga_type(manga, dims):
+        volumes = dims.get("volumes") or {}
+        total = sum(len(v.get("pages", [])) for v in volumes.values())
+        if total <= 0:
+            return 0
+        read = 0
+        for vid, h in history_entry.get("chapters", {}).items():
+            pages = len(volumes.get(vid, {}).get("pages", []))
+            if h.get("completed"):
+                read += pages
+            elif h.get("last_page", 0) > 0:
+                read += min(h["last_page"] + 1, pages)
+        return min(100, read * 100 // total)
+    total = len(dims.get("chapters") or {})
+    if total <= 0:
+        return 0
+    return round(completed_chapter_count(history_entry) / total * 100)
+
 def find_comicinfo_for_manga(manga_path: str, dims: dict) -> dict | None:
     """
     A ComicInfo.xml sitting directly in the manga's own folder (next to the
@@ -4397,7 +4426,7 @@ def get_library_page_counts(request: Request):
             volumes += v
             history_entry = lib_history.get(manga["id"])
             if history_entry:
-                is_volume_manga = manga.get("manga_type") == "case2"
+                is_volume_manga = is_volume_manga_type(manga, dims)
                 pages_read += manga_pages_read(dims, history_entry, is_volume_manga)
         libraries.append({
             "library_id":      lib_id,
@@ -5212,11 +5241,7 @@ def get_collection(request: Request, collection_id: str):
         progress = 0
         entry = reading_history.get(str(m["library_id"]), {}).get(m["manga_id"])
         if entry and manga and manga.get("name"):
-            dims_m = load_manga_dims(m["library_id"], manga["name"])
-            is_volume_manga = manga.get("manga_type") == "case2"
-            total_ch = len(dims_m.get("volumes" if is_volume_manga else "chapters", {}))
-            if total_ch > 0:
-                progress = round(completed_chapter_count(entry) / total_ch * 100)
+            progress = tile_progress(manga, load_manga_dims(m["library_id"], manga["name"]), entry)
         members_out.append({
             "library_id":      m["library_id"],
             "manga_id":        m["manga_id"],
@@ -6794,7 +6819,7 @@ def get_reading_history(request: Request, library_id: int):
         dims = load_manga_dims_cached(library_id, manga["name"])
         if auth.is_manga_blocked(username, dims.get("tags", [])):
             continue
-        is_volume_manga = manga.get("manga_type") == "case2"
+        is_volume_manga = is_volume_manga_type(manga, dims)
 
         if is_volume_manga:
             ordered = sorted(
@@ -6832,6 +6857,7 @@ def get_reading_history(request: Request, library_id: int):
             # own "highest position reached" semantics (see
             # completed_chapter_count's own docstring for why they differ).
             "completed_count":      completed_chapter_count(entry),
+            "progress":             tile_progress(manga, dims, entry),
         })
 
     result.sort(key=lambda x: x["last_read"] or "", reverse=True)
@@ -6936,15 +6962,7 @@ def get_category_list(
         entry = lib_history.get(manga_id)
         progress = 0
         if entry:
-            dims = load_manga_dims_cached(library_id, m["name"])
-            is_volume_manga = m.get("manga_type") == "case2"
-            # "X of Y chapters read" -- a plain count of chapters actually
-            # marked completed, not furthest_chapter/furthest_volume's
-            # "highest position reached" (see completed_chapter_count's
-            # docstring for why they can differ substantially).
-            total_chapters = len(dims.get("volumes" if is_volume_manga else "chapters", {}))
-            if total_chapters > 0:
-                progress = round(completed_chapter_count(entry) / total_chapters * 100)
+            progress = tile_progress(m, load_manga_dims_cached(library_id, m["name"]), entry)
         result.append({
             "id":          m["id"],
             "title":       m["name"],

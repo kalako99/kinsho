@@ -90,10 +90,10 @@ function deriveCoverLarge(coverUrl) {
   return `${dir}${filename.slice(0, dotIdx)}+${filename.slice(dotIdx)}`;
 }
 
-// "X of Y chapters read" -- a plain count of chapters actually marked
-// completed (h.completed_count), not the furthest position reached.
+// The server's tile % (tile_progress in main.py: pages read for volume
+// manga, completed chapters for chapter manga).
 function historyProgress(h) {
-  return h && h.total_chapters > 0 ? Math.round(h.completed_count / h.total_chapters * 100) : 0;
+  return h && h.progress ? h.progress : 0;
 }
 
 function shuffled(list) {
