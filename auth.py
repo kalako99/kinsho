@@ -13,7 +13,7 @@ import uuid
 import hashlib
 import hmac
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import Request
@@ -350,7 +350,7 @@ def append_reading_session(username: str, manga_name: str, library_id: str):
     data     = load_user_data(username)
     sessions = data.get("reading_sessions", [])
     sessions.append({
-        "start":      datetime.now().isoformat(timespec="seconds"),
+        "start":      datetime.now(timezone.utc).isoformat(timespec="seconds"),   # UTC, zone included; shown in the viewer's time zone
         "manga_name": manga_name,
         "library_id": str(library_id),
         "minutes":    0,

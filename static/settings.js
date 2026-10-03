@@ -1,5 +1,17 @@
 const { createApp } = Vue;
 
+// Reading-session start times are saved in UTC; ones saved before 2026-10-03
+// have no zone marker, so a bare time is read as UTC too. Shown in the
+// browser's own time zone.
+function sessionDate(start) {
+  return new Date(/(Z|[+-]\d\d:\d\d)$/.test(start) ? start : start + 'Z');
+}
+
+// 'YYYY-MM-DD' of a Date in the browser's time zone (toISOString gives UTC).
+function localDayStr(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 // ── COMMUNITY: donut chart (genre/tag preference) ──
 // Hand-built inline SVG -- this codebase has no charting library dependency
 // anywhere, and this is the one small chart in the whole app. Palette is the
@@ -324,7 +336,7 @@ createApp({
       analyticsPrecision:     'month',
       analyticsSelectedYear:  new Date().getFullYear(),
       analyticsSelectedMonth: new Date().getMonth() + 1,
-      analyticsSelectedDay:   new Date().toISOString().slice(0, 10),
+      analyticsSelectedDay:   localDayStr(new Date()),
       _graphDragStartX:       null,
       _graphDragDelta:        0,
       // admin reading stats
@@ -382,23 +394,23 @@ createApp({
       return this.allUsers.filter(u => u.username.toLowerCase().includes(q));
     },
     analyticsAvailableYears() {
-      const years = new Set(this.analyticsSessions.map(s => new Date(s.start).getFullYear()));
+      const years = new Set(this.analyticsSessions.map(s => sessionDate(s.start).getFullYear()));
       years.add(new Date().getFullYear());
       return [...years].sort((a, b) => b - a);
     },
     analyticsPeriodTotal() {
       const s = this.analyticsSessions;
       if (this.analyticsPrecision === 'year') {
-        return s.filter(e => new Date(e.start).getFullYear() === this.analyticsSelectedYear)
+        return s.filter(e => sessionDate(e.start).getFullYear() === this.analyticsSelectedYear)
                 .reduce((n, e) => n + (e.minutes || 0), 0);
       }
       if (this.analyticsPrecision === 'month') {
         return s.filter(e => {
-          const d = new Date(e.start);
+          const d = sessionDate(e.start);
           return d.getFullYear() === this.analyticsSelectedYear && d.getMonth() + 1 === this.analyticsSelectedMonth;
         }).reduce((n, e) => n + (e.minutes || 0), 0);
       }
-      return s.filter(e => e.start.slice(0, 10) === this.analyticsSelectedDay)
+      return s.filter(e => localDayStr(sessionDate(e.start)) === this.analyticsSelectedDay)
                .reduce((n, e) => n + (e.minutes || 0), 0);
     },
   },
@@ -1208,9 +1220,9 @@ createApp({
 
     analyticsPrev() {
       if (this.analyticsPrecision === 'day') {
-        const d = new Date(this.analyticsSelectedDay);
+        const d = new Date(this.analyticsSelectedDay + 'T00:00');
         d.setDate(d.getDate() - 1);
-        this.analyticsSelectedDay = d.toISOString().slice(0, 10);
+        this.analyticsSelectedDay = localDayStr(d);
       } else if (this.analyticsPrecision === 'month') {
         if (this.analyticsSelectedMonth === 1) { this.analyticsSelectedMonth = 12; this.analyticsSelectedYear--; }
         else this.analyticsSelectedMonth--;
@@ -1222,9 +1234,9 @@ createApp({
 
     analyticsNext() {
       if (this.analyticsPrecision === 'day') {
-        const d = new Date(this.analyticsSelectedDay);
+        const d = new Date(this.analyticsSelectedDay + 'T00:00');
         d.setDate(d.getDate() + 1);
-        this.analyticsSelectedDay = d.toISOString().slice(0, 10);
+        this.analyticsSelectedDay = localDayStr(d);
       } else if (this.analyticsPrecision === 'month') {
         if (this.analyticsSelectedMonth === 12) { this.analyticsSelectedMonth = 1; this.analyticsSelectedYear++; }
         else this.analyticsSelectedMonth++;
@@ -1315,7 +1327,7 @@ createApp({
       const year    = this.analyticsSelectedYear;
       const byMonth = Array(12).fill(0);
       for (const s of this.analyticsSessions) {
-        const d = new Date(s.start);
+        const d = sessionDate(s.start);
         if (d.getFullYear() === year) byMonth[d.getMonth()] += s.minutes || 0;
       }
       const maxVal = Math.max(...byMonth, 1);
@@ -1368,7 +1380,7 @@ createApp({
       const days  = new Date(year, month, 0).getDate();
       const byDay = Array(days).fill(0);
       for (const s of this.analyticsSessions) {
-        const d = new Date(s.start);
+        const d = sessionDate(s.start);
         if (d.getFullYear() === year && d.getMonth() + 1 === month)
           byDay[d.getDate() - 1] += s.minutes || 0;
       }
@@ -1420,7 +1432,7 @@ createApp({
 
     _renderDayGraph(ctx, primary, textCol, muted, border, pL, pT, W, H) {
       const dayStr   = this.analyticsSelectedDay;
-      const sessions = this.analyticsSessions.filter(s => s.start.slice(0, 10) === dayStr);
+      const sessions = this.analyticsSessions.filter(s => localDayStr(sessionDate(s.start)) === dayStr);
       // Vertical grid lines per hour
       ctx.lineWidth = 0.5;
       for (let h = 0; h <= 24; h++) {
@@ -1439,7 +1451,7 @@ createApp({
       const barH = Math.max(24, Math.min(40, H * 0.55));
       const barY  = pT + (H - barH) / 2;
       for (const s of sessions) {
-        const sd    = new Date(s.start);
+        const sd    = sessionDate(s.start);
         const sMins = sd.getHours() * 60 + sd.getMinutes();
         const eMins = Math.min(sMins + (s.minutes || 0), 24 * 60);
         const x1    = pL + (sMins / 1440) * W;
