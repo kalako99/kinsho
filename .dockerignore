@@ -3,3 +3,12 @@ __pycache__/
 *.pyc
 venv/
 kinsho-data/
+bootstrap.json
+users.json
+sessions.json
+CLAUDE.md
+yesterday.md
+read.txt
+kinsho_features.md
+arduino/
+.claude/

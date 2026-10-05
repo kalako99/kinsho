@@ -1,0 +1,16 @@
+services:
+  kinsho:
+    image: ghcr.io/kalako99/kinsho:latest
+    container_name: kinsho
+    restart: unless-stopped
+    # Run as your own user so files Kinsho creates aren't owned by root.
+    # Find yours with `id -u` and `id -g`; the data folder must belong to it.
+    user: "1000:1000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Kinsho's own data (users, progress, covers). Keep it on a backed-up drive.
+      - ./kinsho-data:/data
+      # Your manga/comics. Add one line per drive or folder you want to use;
+      # read-only (:ro) is fine unless you turn on auto-extract or volume renaming.
+      - /path/to/your/manga:/manga
