@@ -4232,7 +4232,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const idx = Array.from(leftSegs).indexOf(leftActiveEl);
       leftTooltip.textContent = `${idx + 1} / ${totalPages}`;
       leftTooltip.style.left      = (r.right + 14) + 'px';
-      leftTooltip.style.top       = (r.top + r.height / 2) + 'px';
+      // Never higher than a bit below the top bar, so it can't cover the back button
+      // on the first pages; below that it follows the segment.
+      const minTop = topbar.getBoundingClientRect().bottom + 8 + leftTooltip.offsetHeight / 2;
+      leftTooltip.style.top       = Math.max(r.top + r.height / 2, minTop) + 'px';
       leftTooltip.style.transform = 'translateY(-50%)';
       leftTooltip.classList.add('pinned');
     }
