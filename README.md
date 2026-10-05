@@ -1,89 +1,104 @@
 # Kinsho
 
-Self-hosted manga/comic reader.
+A self-hosted manga, webtoon and comic reader for your own library.
 
-> **Beta**: Kinsho is still under active testing. Expect frequent updates —
-> and occasional breaking changes — in the coming days.
+> **Beta**: Kinsho is in active development and gets frequent updates.
 
-> **Built first for loose image folders**: Kinsho was designed and optimized
-> specifically around reading manga/comics stored as plain folders of loose
-> image files (not just CBZ/CBR archives). That's the use case it performs
-> best on.
+> **Built first for loose image folders**: Kinsho was designed around manga and
+> webtoons stored as plain folders of images, and that is where it is fastest. CBZ/CBR
+> archives, PDFs and EPUBs work too.
 
-Kinsho is a self-hosted manga/comic reader built for people who want to
-serve their own library — CBZ/CBR archives, PDFs, EPUBs, or plain folders of
-images — without a database, without an account with a third party, and
-without giving up control of their own files. The backend is a single
-FastAPI application; the frontend is plain JavaScript. Everything it stores
-about your library — reading progress, tags, collections, users — lives in
-plain JSON files under a data folder you choose.
+Kinsho serves your own files to any browser on your network: phone, tablet or PC. There
+is no database and no third-party account. Everything it stores (users, reading progress,
+tags, collections) is plain JSON in a folder you choose, easy to back up or edit by hand.
 
 ## Support
 
-If Kinsho's useful to you, consider [supporting development on Ko-fi](https://ko-fi.com/kalako99) — it's free to use either way, but a coffee is always appreciated.
+Kinsho is free to use. If it's useful to you, consider
+[supporting development on Ko-fi](https://ko-fi.com/kalako99).
 
 ## Features
 
-- **Reads almost anything**: CBZ/ZIP out of the box, plus optional CBR/RAR,
-  PDF, and EPUB support (EPUBs get a real paginated text reader, not just
-  their embedded images).
-- **No database** — your whole library's metadata lives in JSON files you
-  can read, back up, or edit by hand.
-- **Metadata fetching** from AniList and MangaDex, plus automatic reading of
-  `ComicInfo.xml` sidecars (the same convention Komga/Kavita/ComicRack use).
-- **Collections** — group manga across libraries under one name, shared
-  (visible to everyone) or private, with per-viewer cover overrides.
-- **Themes** — a built-in accent-color system plus a Default/Sharp/Custom
-  visual theme system with a live CSS editor for full customization.
-- **OPDS + OPDS-PSE catalog**, so OPDS-aware readers (Chunky, KOReader) can
-  browse and stream your library directly, page by page.
-- **Background integrity checking** — flags corrupt archives and duplicate
-  pages (including near-duplicates via perceptual hashing + SSIM) during
-  idle periods, surfaced to admins with one-click rechecking.
-- **Multi-user with real permission boundaries** — per-library visibility
-  and per-tag blocking for restricted accounts, enforced on every route.
-- **Long-strip and single-page reading modes**, tuned for both webtoon-style
-  scrolling and traditional page-by-page manga/comics.
+- **Two readers, tuned for long reading sessions**: a long-strip reader for webtoons that
+  stays smooth through thousands of pages, and a single-page reader with swipes, taps or
+  keys. Both flow from one chapter into the next without reloading.
+- **Reads almost anything**: plain image folders, CBZ/ZIP, CBR/RAR, PDF and EPUB. EPUB
+  novels get a real text reader, not just their pictures. Kinsho works out on its own
+  whether a folder holds chapters or volumes.
+- **Reading statistics**: reading time per manga, where you are in the whole series, the
+  average time per chapter, and a reading graph by month and year.
+- **Progress that follows you**: continue on any device from the exact page, with
+  bookmarks, favourites and a Last Read row.
+- **Metadata**: descriptions, genres, tags and covers from AniList and MangaDex, or from
+  `ComicInfo.xml` files (the Komga / Kavita / ComicRack convention). Your own edits are
+  kept.
+- **Collections**: group manga, even across libraries, shared with everyone or private.
+- **Multi-user with real permissions**: admin-created accounts, per-user library access
+  and blocked tags, checked on every request.
+- **Library tools**: automatic rescans, background integrity checks for corrupt files,
+  optional conversion of archives/PDFs to image folders, volume-name cleanup, and oneshot
+  libraries.
+- **Themes**: accent colours, a polished default theme, or your own CSS in a live editor.
+- **OPDS catalog**: browse and read your library from OPDS apps like Chunky and KOReader.
+- **Bluetooth scroller** *(experimental)*: hands-free scrolling with a small DIY device.
+- **No database**: one Python app or one Docker container.
 
-## Running it
+## Install with Docker (recommended)
+
+A ready-made image is published for `amd64` and `arm64` (e.g. Raspberry Pi 4/5):
+
+```bash
+docker run -d --name kinsho --restart unless-stopped \
+  --user 1000:1000 \
+  -p 8000:8000 \
+  -v /path/to/kinsho-data:/data \
+  -v /path/to/your/manga:/manga \
+  ghcr.io/kalako99/kinsho:latest
+```
+
+Or download [`docker-compose.yml`](docker-compose.yml), set your manga folder in it,
+and run `docker compose up -d`.
+
+- `/data` holds Kinsho's own data (users, progress, covers). Put it on a drive you back
+  up, and make sure it belongs to the user in `--user` (`id -u` / `id -g` show yours).
+- `/manga` is your library. Mount as many folders as you like (for example
+  `-v /mnt/disk2/comics:/comics`); you choose which ones become libraries in Kinsho's
+  Settings.
+
+Then open `http://<your-server>:8000`, log in as `admin` / `admin` (you'll be asked to
+change the password right away), and go to **Settings → Libraries** to add your
+folders.
+
+**Updating:** `docker pull ghcr.io/kalako99/kinsho:latest` and recreate the container (or
+`docker compose pull && docker compose up -d`). Your data in `/data` is untouched.
+
+## Install without Docker
 
 ```bash
 pip install -r requirements.txt
 python main.py
 ```
 
-This starts a server on port 8000 and prints the LAN IP it's reachable at.
-The first run auto-creates an `admin`/`admin` account (you'll be required to
-change the password immediately). No build step, no package manager beyond
-pip.
+This starts the server on port 8000 and prints the LAN address it can be reached at. The
+first run creates the `admin` / `admin` account. For CBR/RAR files also install the `unrar`
+program (included in the Docker image).
 
-### Docker
+## File formats
 
-```bash
-docker build -t kinsho .
-```
+| Format | Support |
+|---|---|
+| Folders of images (JPG, PNG, WEBP, ...) | built in |
+| CBZ / ZIP | built in |
+| CBR / RAR | built in with Docker; needs `unrar` otherwise |
+| PDF | built in |
+| EPUB | built in (text reader for novels, image reader for comics) |
 
-This only builds the image — you still create the container yourself with
-`docker run`. Kinsho needs at least two volumes mounted: one for its own
-app data (put this on your server's main/system drive) and one pointing at
-your actual manga/comics library.
-
-### Optional format support
-
-| Format | Needs | Install |
-|---|---|---|
-| CBZ / ZIP | nothing extra | included |
-| CBR / RAR | `rarfile` + `unrar` binary | `pip install rarfile` |
-| PDF | `pymupdf` | already in requirements.txt |
-| EPUB | `ebooklib` | already in requirements.txt |
-
-Missing optional libraries degrade gracefully — Kinsho just skips files it
-can't read and logs why.
+If a format's library is missing, Kinsho skips those files and logs why.
 
 ## License
 
-Kinsho is free to use, modify, and self-host for personal or non-commercial
-purposes. Commercial use is allowed, but requires contacting the author
-first to arrange terms. See [LICENSE.md](LICENSE.md) for the full text.
+Kinsho is free to use, modify and self-host for personal or non-commercial purposes.
+Commercial use is allowed, but requires contacting the author first to arrange terms. See
+[LICENSE.md](LICENSE.md) for the full text.
 
 Questions about a specific use case: monkeyddarko@gmail.com.
