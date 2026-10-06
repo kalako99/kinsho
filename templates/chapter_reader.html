@@ -1427,6 +1427,8 @@
 </div>
 
 <script>
+// Opening a reader resets the search screen's remembered filters (search_page.html).
+try { sessionStorage.removeItem('kinsho_search_state'); } catch (e) {}
 window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 (async () => {
 

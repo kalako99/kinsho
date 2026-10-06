@@ -141,12 +141,20 @@
       font-style: italic;
     }
 
+    /* ── ADVANCED SEARCH ── (same row look as the detail pages' Reading statistics) */
+    .adv-section { max-width: 1200px; margin: 0 auto; padding: 14px 20px 0; }
+    .adv-head { display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 0; color: var(--color-text, #f0f0f0); cursor: pointer; font: inherit; }
+    .adv-arrow { transition: transform 0.2s; opacity: 0.8; }
+    .adv-arrow.open { transform: rotate(90deg); }
+    .adv-label { font-size: 0.65rem; font-weight: 700; letter-spacing: 2px; color: #aaa; }
+    .adv-count { font-size: 0.72rem; font-weight: 600; color: var(--color-primary, #e94560); }
+
     /* ── RESULTS ── */
     .results-section {
       padding: 16px 20px 40px;
       max-width: 1200px;
       margin: 0 auto;
-      margin-top: 24px;
+      margin-top: 8px;
     }
     .results-header {
       display: flex;
@@ -348,6 +356,17 @@
     />
   </div>
 
+  <!-- Advanced Search (2026-10-06): every filter except the title box sits
+       in a row that is always collapsed when the screen opens. -->
+  <div class="adv-section">
+    <button type="button" class="adv-head" @click="advancedOpen = !advancedOpen" :aria-expanded="advancedOpen ? 'true' : 'false'">
+      <svg class="adv-arrow" :class="{ open: advancedOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+      <span class="adv-label">ADVANCED SEARCH</span>
+      <span v-if="activeFilterCount > 0" class="adv-count">· {{ activeFilterCount }} filter{{ activeFilterCount !== 1 ? 's' : '' }} active</span>
+    </button>
+  </div>
+
+  <div v-if="advancedOpen">
   <div class="filters">
     <div class="filter-label-row">
       <div class="filter-label">Genres</div>
@@ -425,6 +444,7 @@
       <span style="font-size:0.78rem;font-weight:600;color:var(--color-text,#f0f0f0);">Only Completed</span>
     </label>
   </div>
+  </div>
 
   <div class="results-section">
     <div class="results-header">
@@ -484,18 +504,33 @@
 <script>
 const { createApp } = Vue;
 
+// The title text and filters survive going to a manga and back (2026-10-06).
+// sessionStorage is gone once the app/tab is closed, and the readers remove
+// this key when they open, so the search starts empty after either.
+const SEARCH_STATE_KEY = 'kinsho_search_state';
+function readSearchState(libraryId) {
+  try {
+    const s = JSON.parse(sessionStorage.getItem(SEARCH_STATE_KEY) || 'null');
+    return s && s.libraryId === libraryId ? s : null;
+  } catch (e) { return null; }
+}
+
 createApp({
   data() {
     const params = new URLSearchParams(window.location.search);
     const preGenre = params.get('genre');
     const preTag   = params.get('tag');
+    const libraryId = parseInt(params.get('lib')) || null;
+    // A genre/tag link from a manga page is a new search, not a return.
+    const saved = (preGenre || preTag) ? null : readSearchState(libraryId);
     return {
-      libraryId:      parseInt(params.get('lib')) || null,
-      query:          '',
+      libraryId:      libraryId,
+      advancedOpen:   false,
+      query:          saved ? saved.query : '',
       allGenres:      [],
       allTags:        [],
-      selectedGenres: preGenre ? [preGenre] : [],
-      selectedTags:   preTag   ? [preTag]   : [],
+      selectedGenres: saved ? saved.genres : (preGenre ? [preGenre] : []),
+      selectedTags:   saved ? saved.tags   : (preTag   ? [preTag]   : []),
       // Mirrors `query`, but updated straight from the input's own native
       // 'input' event instead of through v-model -- Vue's v-model
       // deliberately skips updating its bound value while an IME
@@ -509,7 +544,7 @@ createApp({
       // update on every keystroke regardless of composition state, while
       // `query` (still v-model-bound to the input itself) stays untouched
       // and IME-safe for what's actually displayed in the box (2026-08-11).
-      liveQuery:      '',
+      liveQuery:      saved ? saved.query : '',
       // Collapsed to one row by default (see .pills-row.collapsed) --
       // starts expanded when arriving with a specific genre/tag already
       // selected (from a manga/collection page's click-to-search link) so
@@ -525,8 +560,8 @@ createApp({
       // dismissed), not live per-keystroke like the browser.
       liveGenreSearch: '',
       liveTagSearch:   '',
-      onlyCompleted:  false,
-      selectedCollection:   null,
+      onlyCompleted:  saved ? saved.onlyCompleted : false,
+      selectedCollection:   saved ? saved.collection : null,
       showCollectionFilterDropdown: false,
       allCollections:       {},
       collectionMembership: {},
@@ -541,6 +576,20 @@ createApp({
   },
 
   computed: {
+    activeFilterCount() {
+      return this.selectedGenres.length + this.selectedTags.length
+        + (this.selectedCollection ? 1 : 0) + (this.onlyCompleted ? 1 : 0);
+    },
+    searchState() {
+      return {
+        libraryId:     this.libraryId,
+        query:         this.liveQuery,
+        genres:        this.selectedGenres.slice(),
+        tags:          this.selectedTags.slice(),
+        onlyCompleted: this.onlyCompleted,
+        collection:    this.selectedCollection,
+      };
+    },
     // A manga in a collection opens its own detail page, which has a
     // Collection button (2026-09-29). A oneshot has no detail page, so its
     // Continue/Start popup offers the collection instead.
@@ -579,6 +628,12 @@ createApp({
     },
   },
 
+  watch: {
+    searchState(state) {
+      try { sessionStorage.setItem(SEARCH_STATE_KEY, JSON.stringify(state)); } catch (e) {}
+    },
+  },
+
   async mounted() {
     await Promise.all([
       this.loadMangas(),
@@ -597,7 +652,10 @@ createApp({
     // created/changed on whatever page this tab is coming back from isn't
     // shown stale here.
     window.addEventListener('pageshow', (e) => {
-      if (e.persisted) this.loadCollectionsFilter();
+      if (!e.persisted) return;
+      this.loadCollectionsFilter();
+      // Restored by Back after a reader was opened: start empty.
+      if (!readSearchState(this.libraryId)) this.clearSearch();
     });
   },
 
@@ -733,6 +791,16 @@ createApp({
 
     goBack() {
       window.kinshoGoBack('/');
+    },
+
+    clearSearch() {
+      this.query = '';
+      this.liveQuery = '';
+      this.selectedGenres = [];
+      this.selectedTags = [];
+      this.onlyCompleted = false;
+      this.selectedCollection = null;
+      this.advancedOpen = false;
     },
 
     onInput(e) { this.liveQuery = e.target.value; },
