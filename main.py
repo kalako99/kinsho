@@ -3421,6 +3421,45 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         print(f"[ScanLib] {len(pending_extractions)} file(s) queued for auto-extraction.")
     return result, comicinfo_changed, pending_extractions
 
+# ── AUTO-RESCAN WAITS FOR COPYING TO FINISH (2026-10-06) ──
+# An automatic scan that ran while files were still being copied in once
+# corrupted a file (a half-copied chapter looks deleted, or gets extracted /
+# renamed mid-copy). Before each library's automatic scan, look for signs of
+# an ongoing copy and wait until the library has been quiet for a while.
+# A copy keeps the source's modification time on the finished file (Windows
+# does), so the signs are: a folder whose entries changed recently (adding a
+# file always updates its folder), and, inside folders changed in the last
+# hour, a file whose content or metadata changed recently (st_ctime on Linux
+# is set when the file is created, even when its mtime is copied over).
+# Manual "Reload scan" isn't held back: the user chose that moment.
+AUTOSCAN_QUIET_SECONDS  = 3 * 60
+AUTOSCAN_RECHECK_SECONDS = 5 * 60
+AUTOSCAN_MAX_WAIT_SECONDS = 6 * 60 * 60
+
+def _library_recently_written(lib: dict) -> str | None:
+    """The first path found changed in the last AUTOSCAN_QUIET_SECONDS, or None."""
+    now = time.time()
+    for root_path in lib.get("paths", []):
+        if not root_path or not os.path.isdir(root_path):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(root_path):
+            try:
+                st = os.stat(dirpath)
+            except OSError:
+                continue
+            dir_changed = max(st.st_mtime, st.st_ctime)
+            if now - dir_changed < AUTOSCAN_QUIET_SECONDS:
+                return dirpath
+            if now - dir_changed < 60 * 60:
+                for f in filenames:
+                    try:
+                        fst = os.stat(os.path.join(dirpath, f))
+                    except OSError:
+                        continue
+                    if now - max(fst.st_mtime, fst.st_ctime) < AUTOSCAN_QUIET_SECONDS:
+                        return os.path.join(dirpath, f)
+    return None
+
 async def periodic_library_rescan():
     INTERVAL_SECONDS = 12 * 60 * 60
     while True:
@@ -3450,6 +3489,18 @@ async def periodic_library_rescan():
                 # another one here on top of it would just race the same
                 # files being converted/deleted mid-walk.
                 if lib_id is not None and lib_id not in _extraction_running:
+                    waited = 0
+                    busy = await asyncio.to_thread(_library_recently_written, lib)
+                    while busy and waited < AUTOSCAN_MAX_WAIT_SECONDS:
+                        print(f"[AutoScan] Library {lib_id} is being written to ({busy}) -- "
+                              f"waiting {AUTOSCAN_RECHECK_SECONDS // 60} min before scanning it.")
+                        await asyncio.sleep(AUTOSCAN_RECHECK_SECONDS)
+                        waited += AUTOSCAN_RECHECK_SECONDS
+                        busy = await asyncio.to_thread(_library_recently_written, lib)
+                    if busy:
+                        print(f"[AutoScan] Library {lib_id} still being written to after "
+                              f"{AUTOSCAN_MAX_WAIT_SECONDS // 3600} h -- skipping it this cycle.")
+                        continue
                     print(f"[AutoScan] Re-scanning library {lib_id}...")
                     # Enqueues onto the SAME shared scan queue a manual Reload
                     # click or Save Libraries uses (see enqueue_library_scan)
