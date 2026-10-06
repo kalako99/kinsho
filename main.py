@@ -6487,17 +6487,27 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-async def _try_anilist_primary(name: str, manga_formats: set) -> tuple[dict | None, bool]:
+async def _try_anilist_primary(name: str, manga_formats: set, novel_library: bool = False) -> tuple[dict | None, bool]:
     """
     Try to find a single, confident, manga-type-formatted AniList candidate
     for `name`. Returns (candidate_or_None, hit_rate_limit) -- the caller
     uses hit_rate_limit to flip its own anilist_enabled circuit breaker for
     the rest of a batch scan.
+
+    Several results: a series often exists as both a manga and a light novel
+    under the same name. Among the results whose name matches exactly, the
+    library decides (2026-10-06, user's request): a library with "novel" in
+    its name takes the novel, any other library the non-novel one, provided
+    exactly one is left.
     """
     try:
         a_results = await metadata_fetch.search_anilist_manga(name, per_page=8)
         a_typed = [r for r in a_results if (r.get("format") or "").upper() in manga_formats]
-        return (a_typed[0] if len(a_typed) == 1 else None), False
+        if len(a_typed) == 1:
+            return a_typed[0], False
+        exact = [c for c in metadata_fetch.score_all_candidates(name, a_typed) if c["match_score"] >= 1.0]
+        preferred = [c for c in exact if ((c.get("format") or "").upper() == "NOVEL") == novel_library]
+        return (preferred[0] if len(preferred) == 1 else None), False
     except httpx.HTTPStatusError as e:
         if e.response is not None and e.response.status_code == 429:
             return None, True
@@ -6534,6 +6544,13 @@ async def scan_library_metadata(request: Request, library_id: int):
     # Only affects this bulk/automatic scan; the manual single-manga popup
     # always searches AniList directly regardless of this setting.
     priority = data.get("metadata_fetch_priority", "anilist")
+    # A library named like "Novels" / "Light Novel": AniList's NOVEL entries win
+    # over a same-named manga, and MangaDex (comics only) isn't used at all,
+    # since its match would be the manga adaptation.
+    library = next((l for l in data.get("libraries", []) if l.get("id") == library_id), {})
+    novel_library = "novel" in (library.get("name") or "").lower()
+    if novel_library:
+        priority = "anilist"
     # Once AniList rate-limits us, stop hitting it for the rest of the scan and
     # run on MangaDex alone — the whole point of the fallback. Also gates the
     # AniList half of MangaDex-first mode's counterpart lookup below.
@@ -6585,15 +6602,15 @@ async def scan_library_metadata(request: Request, library_id: int):
             else:  # priority == "anilist" (default, original behavior)
                 anilist_primary = None
                 if anilist_enabled:
-                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats)
+                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats, novel_library)
                     if rate_limited:
                         anilist_enabled = False
                     await asyncio.sleep(0.7)
                 if anilist_primary:
-                    mangadex_best = await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
+                    mangadex_best = None if novel_library else await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
                     primary, fallback = anilist_primary, mangadex_best
                     anilist_for_cover, mangadex_for_cover = anilist_primary, mangadex_best
-                else:
+                elif not novel_library:
                     mangadex_single = await _try_mangadex_primary(name)
                     if mangadex_single:
                         primary = mangadex_for_cover = mangadex_single
