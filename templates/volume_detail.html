@@ -2479,6 +2479,8 @@ createApp({
       this.metaSearchedOnce       = false;
       this.metaStatus             = { msg: '', type: '' };
       this.showMetadataPopup      = true;
+      // Search the title straight away; the box stays editable for another try.
+      this.searchMetadata();
       try {
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/local-metadata`));
         const data = await res.json();
