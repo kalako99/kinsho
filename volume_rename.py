@@ -25,13 +25,12 @@ import re
 
 def parse_volume_name(name: str, manga_name: str | None = None) -> tuple[int, str | None] | None:
     """Extract (volume_number, provider_or_None) from a volume folder name,
-    or None if the name is ambiguous and must be left untouched (more than
-    one number cluster, more than one bracket group, or any leftover text
-    outside the recognized number + trailing bracket). Deliberately
-    conservative -- a raw uncleaned nyaa release name like
-    "Grand Blue Dreaming v01 (2017) (Digital) (1r0n)" has THREE bracket
-    groups and correctly fails here rather than guessing which one is the
-    provider.
+    or None if the name is ambiguous and must be left untouched (zero or
+    more than one number cluster outside brackets). A name with more than
+    one bracket group (a raw release name like "Grand Blue Dreaming v01
+    (2017) (Digital) (1r0n)") can't say which group is the provider, so
+    every group is dropped and it's renamed without one (2026-10-06, user's
+    request; before, such names were left untouched).
 
     The manga's own folder name, when given, is stripped off the front
     first, so a number in the title isn't counted: "25 Years in a Dungeon
@@ -43,6 +42,13 @@ def parse_volume_name(name: str, manga_name: str | None = None) -> tuple[int, st
         s = s[len(manga_name.strip()):].strip()
     if not s:
         return None
+
+    if len(re.findall(r'\([^()]*\)', s)) > 1:
+        remainder = re.sub(r'\([^()]*\)', ' ', s)
+        if '(' in remainder or ')' in remainder:
+            return None
+        digit_runs = re.findall(r'\d+', remainder)
+        return (int(digit_runs[0]), None) if len(digit_runs) == 1 else None
 
     provider = None
     m = re.search(r'\s*\(([^()]*)\)\s*$', s)
