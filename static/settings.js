@@ -855,7 +855,9 @@ createApp({
                 if (data.running) {
                     const msg = data.phase === 'extract'
                         ? `Extracting volumes ${data.processed} / ${data.total}…`
-                        : 'Scanning...';
+                        : data.phase === 'wait'
+                            ? 'Waiting for the file transfer to finish…'
+                            : 'Scanning...';
                     if (this.scanStatus[libraryId]?.msg !== msg) {
                         this.scanStatus = { ...this.scanStatus, [libraryId]: { msg, type: 'scanning' } };
                     }

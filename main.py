@@ -402,22 +402,54 @@ _extraction_progress: dict = {}  # library_id -> {"processed", "total"} files, w
 # checks -- a library merely waiting in line still needs to read as "not
 # done yet", not silently look like nothing is happening until its turn
 # actually arrives.
-_scan_queue: "queue.Queue[int]" = queue.Queue()
+_scan_queue: "queue.Queue[tuple[int, bool]]" = queue.Queue()
 _scan_queue_lock = threading.Lock()
 _scan_queued_ids: set = set()  # library_ids waiting in line OR actively running
+# library_id -> time it started waiting for a file transfer to finish (see
+# _library_recently_written); shown as phase "wait" at 0% in Settings.
+_scan_waiting: dict = {}
 
 
-def enqueue_library_scan(library_id: int) -> bool:
+def enqueue_library_scan(library_id: int, wait_for_quiet: bool = True) -> bool:
     """Adds library_id to the shared scan queue unless it's already queued
     or running. Returns False for a no-op duplicate (several triggers for
     the same library collapse into a single run instead of queuing a
-    redundant rescan right behind the one already pending)."""
+    redundant rescan right behind the one already pending).
+
+    wait_for_quiet: hold the scan while files are still being copied into
+    the library (manual Reload, automatic rescan, Save Libraries). False only
+    for Kinsho's own follow-up scan after auto-extraction, whose fresh files
+    Kinsho wrote itself."""
     with _scan_queue_lock:
         if library_id in _scan_queued_ids:
             return False
         _scan_queued_ids.add(library_id)
-    _scan_queue.put(library_id)
+    _scan_queue.put((library_id, wait_for_quiet))
     return True
+
+
+def _scan_should_wait(library_id: int) -> str:
+    """"go" when the library is quiet, "wait" while it's being written to,
+    "skip" after AUTOSCAN_MAX_WAIT_SECONDS of waiting (never scan mid-copy).
+    Records the wait in _scan_waiting."""
+    lib = next((l for l in load_app_data_cached().get("libraries", []) if l.get("id") == library_id), None)
+    busy = _library_recently_written(lib) if lib else None
+    if not busy:
+        if _scan_waiting.pop(library_id, None) is not None:
+            print(f"[ScanQueue] Library {library_id}: file transfer finished, scanning.")
+        return "go"
+    started = _scan_waiting.get(library_id)
+    if started is None:
+        _scan_waiting[library_id] = time.time()
+        print(f"[ScanQueue] Library {library_id} is being written to ({busy}) -- "
+              f"waiting for the transfer to finish before scanning it.")
+        return "wait"
+    if time.time() - started > AUTOSCAN_MAX_WAIT_SECONDS:
+        _scan_waiting.pop(library_id, None)
+        print(f"[ScanQueue] Library {library_id} still being written to after "
+              f"{AUTOSCAN_MAX_WAIT_SECONDS // 3600} h -- not scanning it this time.")
+        return "skip"
+    return "wait"
 
 
 def _scan_worker():
@@ -428,15 +460,25 @@ def _scan_worker():
     threads -- unchanged, out of scope for this queue) before looking at
     the next queued library."""
     while True:
-        library_id = _scan_queue.get()
+        library_id, wait_for_quiet = _scan_queue.get()
         try:
-            run_scan(library_id)
+            decision = _scan_should_wait(library_id) if wait_for_quiet else "go"
+            if decision == "wait":
+                # Back of the line: other libraries scan meanwhile; when it's
+                # the only one waiting, recheck once a minute.
+                if _scan_queue.empty():
+                    time.sleep(AUTOSCAN_RECHECK_SECONDS)
+                _scan_queue.put((library_id, wait_for_quiet))
+                continue
+            if decision == "go":
+                run_scan(library_id)
         except Exception as e:
             print(f"[ScanQueue] library {library_id} raised: {e!r}")
+            _scan_waiting.pop(library_id, None)
         finally:
-            with _scan_queue_lock:
-                _scan_queued_ids.discard(library_id)
             _scan_queue.task_done()
+        with _scan_queue_lock:
+            _scan_queued_ids.discard(library_id)
 
 templates = Jinja2Templates(directory="templates")
 
@@ -3431,9 +3473,10 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
 # file always updates its folder), and, inside folders changed in the last
 # hour, a file whose content or metadata changed recently (st_ctime on Linux
 # is set when the file is created, even when its mtime is copied over).
-# Manual "Reload scan" isn't held back: the user chose that moment.
+# Applies to every scan in the queue (manual Reload included, user's request)
+# except Kinsho's own follow-up scan after auto-extraction; see _scan_worker.
 AUTOSCAN_QUIET_SECONDS  = 3 * 60
-AUTOSCAN_RECHECK_SECONDS = 5 * 60
+AUTOSCAN_RECHECK_SECONDS = 60
 AUTOSCAN_MAX_WAIT_SECONDS = 6 * 60 * 60
 
 def _library_recently_written(lib: dict) -> str | None:
@@ -3489,18 +3532,6 @@ async def periodic_library_rescan():
                 # another one here on top of it would just race the same
                 # files being converted/deleted mid-walk.
                 if lib_id is not None and lib_id not in _extraction_running:
-                    waited = 0
-                    busy = await asyncio.to_thread(_library_recently_written, lib)
-                    while busy and waited < AUTOSCAN_MAX_WAIT_SECONDS:
-                        print(f"[AutoScan] Library {lib_id} is being written to ({busy}) -- "
-                              f"waiting {AUTOSCAN_RECHECK_SECONDS // 60} min before scanning it.")
-                        await asyncio.sleep(AUTOSCAN_RECHECK_SECONDS)
-                        waited += AUTOSCAN_RECHECK_SECONDS
-                        busy = await asyncio.to_thread(_library_recently_written, lib)
-                    if busy:
-                        print(f"[AutoScan] Library {lib_id} still being written to after "
-                              f"{AUTOSCAN_MAX_WAIT_SECONDS // 3600} h -- skipping it this cycle.")
-                        continue
                     print(f"[AutoScan] Re-scanning library {lib_id}...")
                     # Enqueues onto the SAME shared scan queue a manual Reload
                     # click or Save Libraries uses (see enqueue_library_scan)
@@ -4226,7 +4257,7 @@ def run_auto_extraction(library_id: int, pending_paths: list):
         # drops: Settings shows the recheck as running until that rescan is
         # done too, with no idle moment in between (2026-09-29).
         if converted:
-            enqueue_library_scan(library_id)
+            enqueue_library_scan(library_id, wait_for_quiet=False)
         _extraction_progress.pop(library_id, None)
         _extraction_running.discard(library_id)
 
@@ -4777,6 +4808,8 @@ def _library_busy(library_id: int):
     auto-extraction and the rescan after it (phase "scan" or "extract")."""
     if library_id in _extraction_running and library_id not in _scan_running:
         return "extract", _extraction_progress.get(library_id, {"processed": 0, "total": 1})
+    if library_id in _scan_waiting and library_id not in _scan_running:
+        return "wait", {"processed": 0, "total": 1}
     if library_id in _scan_queued_ids or library_id in _extraction_running:
         return "scan", _scan_progress.get(library_id, {"processed": 0, "total": 1})
     return None

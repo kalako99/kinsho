@@ -839,8 +839,8 @@
         </div>
         <div v-for="lib in scanActivity.libraries" :key="lib.library_id" style="margin-bottom:10px;">
           <div style="display:flex; justify-content:space-between; font-size:0.78rem; margin-bottom:4px; color:var(--color-text,#f0f0f0);">
-            <span v-text="lib.library_name + (lib.phase === 'extract' ? ' · extracting volumes' : ' · scanning')"></span>
-            <span v-text="lib.processed + ' / ' + lib.total"></span>
+            <span v-text="lib.library_name + (lib.phase === 'extract' ? ' · extracting volumes' : lib.phase === 'wait' ? ' · waiting for the file transfer to finish' : ' · scanning')"></span>
+            <span v-text="lib.phase === 'wait' ? '' : lib.processed + ' / ' + lib.total"></span>
           </div>
           <div style="height:6px; background:#333; border-radius:3px; overflow:hidden;">
             <div :style="{ width: scanProgressPct(lib) + '%', height: '100%', background: 'var(--color-primary,#e94560)' }"></div>
