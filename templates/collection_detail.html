@@ -242,6 +242,21 @@
     }
 
     /* ── CHAPTERS SECTION ── */
+    /* ── READING STATISTICS ── (same look as manga_detail/volume_detail) */
+    .stats-section { max-width: 900px; margin: 0 auto; padding: 18px 20px 6px; }
+    .stats-head { display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 0; color: var(--color-text, #f0f0f0); cursor: pointer; font: inherit; }
+    .stats-arrow { transition: transform 0.2s; opacity: 0.8; }
+    .stats-arrow.open { transform: rotate(90deg); }
+    .stats-body { padding: 8px 0 0 20px; }
+    .stats-total { font-size: 0.85rem; color: var(--color-text, #f0f0f0); margin-bottom: 12px; }
+    .stats-key { color: #999; margin-right: 6px; }
+    .avg-times { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 8px; }
+    .lastread-row { display: flex; align-items: center; gap: 10px; }
+    .lastread-track { flex: 1; height: 6px; background: #333; border-radius: 3px; overflow: hidden; }
+    .lastread-bar { height: 100%; background: var(--color-primary, #e94560); border-radius: 3px; transition: width 0.3s; }
+    .lastread-label { font-size: 0.8rem; color: var(--color-text, #f0f0f0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+    .avg-time { font-size: 0.72rem; color: #888; white-space: nowrap; }
+
     .chapters-section {
       padding: 0 0 40px;
       max-width: 900px;
@@ -1005,6 +1020,9 @@
       .chapters-section {
         padding: 0 4px 30px;
       }
+      .stats-section {
+        padding: 14px 24px 4px;
+      }
     }
 
     /* ── ONESHOT OPEN CHOICE ── */
@@ -1224,6 +1242,33 @@
         </div>  <!-- /hero-head -->
       </div>    <!-- /hero-inner -->
     </div>      <!-- /hero -->
+
+    <!-- READING STATISTICS: sums over the collection's manga (2026-10-06);
+         open/closed is the same per-user choice as on the detail pages. -->
+    <div v-if="stats && (stats.reading_minutes > 0 || stats.pages_read > 0)" class="stats-section">
+      <button type="button" class="stats-head" @click="toggleReadingStats" :aria-expanded="readingStatsOpen ? 'true' : 'false'">
+        <svg class="stats-arrow" :class="{ open: readingStatsOpen }" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+        <span class="section-label" style="margin:0;">READING STATISTICS</span>
+      </button>
+      <div v-if="readingStatsOpen" class="stats-body">
+        <div v-if="stats.reading_minutes > 0" class="stats-total">
+          <span class="stats-key">Reading time</span>
+          {{ stats.reading_minutes >= 60 ? Math.floor(stats.reading_minutes / 60) + ' h ' + (stats.reading_minutes % 60) + ' m' : stats.reading_minutes + ' m' }}
+        </div>
+        <div v-if="stats.pages_read > 0">
+          <div class="section-label" style="margin-bottom:6px;">LAST READ</div>
+          <div class="lastread-row">
+            <div class="lastread-track"><div class="lastread-bar" :style="{ width: stats.percent + '%' }"></div></div>
+            <span class="lastread-label" :title="stats.pages_read + ' of ' + stats.pages_total + ' pages'">{{ stats.percent }}%<template v-if="stats.last_read_name"> · {{ stats.last_read_name }}</template></span>
+          </div>
+        </div>
+        <div v-if="stats.avg_series_seconds" class="avg-times">
+          <span class="avg-time" title="Each manga's average per chapter × the chapters you've read, added up">To where you are: {{ formatDuration(stats.avg_to_here_seconds) }}</span>
+          <span class="avg-time" title="Each manga's average per chapter × all its chapters, added up">Whole collection: {{ formatDuration(stats.avg_series_seconds) }}</span>
+          <span v-if="stats.timed_count < stats.member_count" class="avg-time" title="Only manga with timed chapters have an estimate">({{ stats.timed_count }} of {{ stats.member_count }} manga timed)</span>
+        </div>
+      </div>
+    </div>
 
     <!-- SERIES (members) -->
     <div class="chapters-section">
@@ -1485,6 +1530,10 @@ createApp({
       oneshotManga:     null,
       oneshotLastPage:  0,
 
+      // reading statistics
+      stats:                null,
+      readingStatsOpen:     true,
+
       // add member popup
       showAddMemberPopup:   false,
       libraries:            [],
@@ -1517,6 +1566,7 @@ createApp({
   async mounted() {
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
+      this.readingStatsOpen = d.reading_stats_open !== false;
     }).catch(() => {});
     await this.loadCollection();
     await Promise.all([
@@ -1541,7 +1591,33 @@ createApp({
       if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
     },
 
+    async loadReadingStats() {
+      try {
+        const res = await fetch(apiUrl(`/api/collections/${this.collectionId}/reading-stats`));
+        this.stats = res.ok ? await res.json() : null;
+      } catch (e) {
+        this.stats = null;
+      }
+    },
+
+    toggleReadingStats() {
+      this.readingStatsOpen = !this.readingStatsOpen;
+      fetch(apiUrl('/api/settings/reading-stats'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ open: this.readingStatsOpen }),
+      }).catch(() => {});
+    },
+
+    formatDuration(secs) {
+      const s = Math.round(secs || 0);
+      if (s >= 3600) return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' m';
+      if (s >= 60) return Math.floor(s / 60) + ' m ' + (s % 60) + ' s';
+      return s + ' s';
+    },
+
     async loadCollection() {
+      this.loadReadingStats();
       try {
         const res = await fetch(apiUrl(`/api/collections/${this.collectionId}`));
         if (!res.ok) { this.loading = false; this.collection = null; return; }

@@ -5266,6 +5266,79 @@ def get_collection(request: Request, collection_id: str):
         "cover_url_large": cover_url_large,
     })
 
+@app.get("/api/collections/{collection_id}/reading-stats")
+def get_collection_reading_stats(request: Request, collection_id: str):
+    """Reading statistics of a collection for this user (2026-10-06): sums
+    over the members they can see. Pages read / all pages counts a completed
+    chapter/volume whole and an unfinished one up to its resume page, for
+    chapter and volume manga alike. The time estimates add up the members'
+    own (only members with timed chapters have one); last_read names the
+    member read most recently."""
+    username = auth.get_current_user(request)
+    record, is_shared = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
+    visible = _visible_members(username, record.get("members", []))
+    if is_shared and not visible and not _can_edit_collection(username, is_shared):
+        return JSONResponse({"error": "Collection not found"}, status_code=404)
+    user_data = auth.load_user_data(username)
+    reading_history = user_data.get("reading_history", {})
+    minutes_by_name: dict = {}
+    for sess in user_data.get("reading_sessions", []):
+        name = sess.get("manga_name")
+        minutes_by_name[name] = minutes_by_name.get(name, 0) + sess.get("minutes", 0)
+
+    minutes = pages_total = pages_read = 0
+    to_here = series = 0
+    timed = 0
+    last_read_at, last_read_name = "", None
+    for m in visible:
+        manga = _lookup_manga(m["library_id"], m["manga_id"])
+        if not manga:
+            continue
+        dims = load_manga_dims_cached(m["library_id"], manga["name"])
+        is_volume = is_volume_manga_type(manga, dims)
+        buckets = dims.get("volumes" if is_volume else "chapters") or {}
+        pages_total += sum(len(b.get("pages", [])) for b in buckets.values())
+        minutes += minutes_by_name.get(manga["name"], 0)
+        entry = reading_history.get(str(m["library_id"]), {}).get(m["manga_id"])
+        if not entry:
+            continue
+        completed_ids = []
+        partial = {}
+        for uid, h in entry.get("chapters", {}).items():
+            count = len(buckets.get(uid, {}).get("pages", []))
+            if h.get("completed"):
+                completed_ids.append(uid)
+                pages_read += count
+            elif h.get("last_page", 0) > 0:
+                partial[uid] = min(h["last_page"] + 1, count)
+        # Chapter manga keep no per-chapter page, only the resume position.
+        resume_id = entry.get("last_volume_id" if is_volume else "last_chapter_id")
+        if resume_id in buckets and resume_id not in completed_ids and entry.get("last_page", 0) > 0:
+            count = len(buckets[resume_id].get("pages", []))
+            partial[resume_id] = max(partial.get(resume_id, 0), min(entry["last_page"] + 1, count))
+        pages_read += sum(partial.values())
+        timing = _reading_timing_summary(dims, entry, is_volume, completed_ids)
+        if timing["avg_unit_seconds"]:
+            timed += 1
+            to_here += timing["avg_to_here_seconds"]
+            series += timing["avg_series_seconds"]
+        if (entry.get("last_read") or "") > last_read_at:
+            last_read_at, last_read_name = entry["last_read"], manga["name"]
+
+    return JSONResponse({
+        "reading_minutes":     minutes,
+        "pages_read":          pages_read,
+        "pages_total":         pages_total,
+        "percent":             round(min(pages_read, pages_total) * 100 / pages_total, 1) if pages_total else 0,
+        "last_read_name":      last_read_name,
+        "avg_to_here_seconds": to_here if timed else None,
+        "avg_series_seconds":  series if timed else None,
+        "timed_count":         timed,
+        "member_count":        len(visible),
+    })
+
 @app.delete("/api/collections/{collection_id}")
 def delete_collection(request: Request, collection_id: str):
     username = auth.get_current_user(request)
