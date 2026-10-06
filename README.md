@@ -50,7 +50,7 @@ A ready-made image is published for `amd64` and `arm64` (e.g. Raspberry Pi 4/5):
 ```bash
 docker run -d --name kinsho --restart unless-stopped \
   --user 1000:1000 \
-  -p 8000:8000 \
+  -p 8088:8000 \
   -v /path/to/kinsho-data:/data \
   -v /path/to/your/manga:/manga \
   ghcr.io/kalako99/kinsho:latest
@@ -65,7 +65,7 @@ and run `docker compose up -d`.
   `-v /mnt/disk2/comics:/comics`); you choose which ones become libraries in Kinsho's
   Settings.
 
-Then open `http://<your-server>:8000`, log in as `admin` / `admin` (you'll be asked to
+Then open `http://<your-server>:8088`, log in as `admin` / `admin` (you'll be asked to
 change the password right away), and go to **Settings → Libraries** to add your
 folders.
 
