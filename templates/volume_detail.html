@@ -2608,6 +2608,17 @@ createApp({
         if (fields.length === 0) continue;
         entries.push({ source, candidate, fields });
       }
+      // A description written by hand is only replaced after asking; "Cancel"
+      // still applies everything else that was ticked.
+      let overwriteManualDescription = false;
+      if (this.manga && this.manga.description_manual && this.manga.description
+          && entries.some(e => e.fields.includes('description'))) {
+        overwriteManualDescription = confirm('This description was written by hand. Replace it with the fetched one?\n\nOK = replace it, Cancel = keep yours (everything else is still applied).');
+        if (!overwriteManualDescription) {
+          entries.forEach(e => { e.fields = e.fields.filter(f => f !== 'description'); });
+          for (let i = entries.length - 1; i >= 0; i--) if (entries[i].fields.length === 0) entries.splice(i, 1);
+        }
+      }
       if (entries.length === 0) return;
       this.metaApplying = true;
       this.metaStatus   = { msg: '', type: '' };
@@ -2615,7 +2626,7 @@ createApp({
         const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/apply-metadata`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ entries }),
+          body: JSON.stringify({ entries, overwrite_manual_description: overwriteManualDescription }),
         });
         const data = await res.json();
         if (data.ok) {
@@ -2705,6 +2716,7 @@ createApp({
         const data = await res.json();
         if (data.ok) {
           this.manga.description = this.descInput;
+          this.manga.description_manual = !!this.descInput.trim();
           this.editingDesc = false;
         }
       } catch (e) {

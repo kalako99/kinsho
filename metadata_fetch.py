@@ -776,8 +776,10 @@ def apply_resolved_metadata(
             the cover image itself is fetched and written by main.py, so here
             "cover" only contributes its per-field timestamp.
 
-    description is always a straight overwrite -- it's the one field with no
-    manual/fetched distinction, replaced by whichever fetch supplies it.
+    description is replaced outright; a hand-written one (dims
+    "description_manual", set by the description edit endpoint) only reaches
+    this function after the user confirmed the overwrite (main.py's
+    apply-metadata) and is never picked by the bulk fetch.
     genres/tags are merged instead of replaced: see _merge_preserving_manual.
 
     Stamps dims["metadata_mtimes"][field] for every field in `fields`,
@@ -797,6 +799,7 @@ def apply_resolved_metadata(
                 value = resolve_field_value(fallback, field, min_tag_rank)
             if field == "description":
                 dims["description"] = value or ""
+                dims["description_manual"] = False
             elif field in ("genres", "tags"):
                 dims[field] = _merge_preserving_manual(dims, field, value)
         mtimes[field] = now

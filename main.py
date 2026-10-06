@@ -4956,6 +4956,7 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     manga["tags"]        = dims.get("tags", [])
     manga["genres"]      = dims.get("genres", [])
     manga["description"] = dims.get("description", "")
+    manga["description_manual"] = bool(dims.get("description_manual"))
     return JSONResponse(manga)
 
 @app.post("/api/manga/{library_id}/{manga_id}/favourite")
@@ -5964,6 +5965,9 @@ async def save_description(library_id: int, manga_id: str, request: Request):
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
     dims["description"] = description
+    # Written by hand: a metadata fetch only replaces it after the user
+    # confirms in the Fetch Metadata popup, and the bulk fetch never does.
+    dims["description_manual"] = bool(description)
     save_manga_dims(library_id, manga["name"], dims)
     return JSONResponse({"ok": True})
 
@@ -6212,6 +6216,8 @@ def _metadata_field_done(dims: dict, field: str) -> bool:
     """
     if field in (dims.get("metadata_mtimes") or {}):
         return True
+    if field == "description" and dims.get("description_manual"):
+        return True  # written by hand: the bulk fetch leaves it alone
     if field in ("description", "genres", "tags") and dims.get("metadata_mtime"):
         return True
     return False
@@ -6373,6 +6379,7 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     body = await request.json()
     entries = body.get("entries", [])
+    overwrite_manual_description = bool(body.get("overwrite_manual_description"))
     if not entries:
         return JSONResponse({"error": "Nothing selected"}, status_code=400)
     data = load_app_data()
@@ -6392,6 +6399,11 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
             if not candidate or not fields:
                 continue
 
+            # A hand-written description is replaced only after the user
+            # confirmed it in the popup (see applyMetadata in the detail pages).
+            hand_written = load_manga_dims(library_id, manga["name"]).get("description_manual")
+            if "description" in fields and hand_written and not overwrite_manual_description:
+                fields.discard("description")
             if "description" in fields:
                 desc_fallback = None
                 if not metadata_fetch.resolve_field_value(candidate, "description"):
