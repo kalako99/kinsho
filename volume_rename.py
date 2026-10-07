@@ -132,7 +132,12 @@ def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | No
     """
     keys_in_order = [key for key, _ in ordered]
     names = dict(ordered)
-    parsed = {key: parse_volume_name(names[key], manga_name) for key in keys_in_order}
+    # A trailing "END" (the last volume of a finished series: main.py marks
+    # the manga complete when the last name's last word is END) is set aside
+    # and put back after renaming; before 2026-10-07 renaming dropped it.
+    ends = {key: names[key].split()[-1:] == ["END"] for key in keys_in_order}
+    bare = {key: names[key].rsplit("END", 1)[0].strip() if ends[key] else names[key] for key in keys_in_order}
+    parsed = {key: parse_volume_name(bare[key], manga_name) for key in keys_in_order}
 
     parseable_keys = [k for k in keys_in_order if parsed[k] is not None]
     raw_pairs = [(k, parsed[k][1]) for k in parseable_keys]
@@ -145,5 +150,5 @@ def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | No
             result[k] = None
             continue
         number, _ = parsed[k]
-        result[k] = format_volume_name(number, display[k])
+        result[k] = format_volume_name(number, display[k]) + (" END" if ends[k] else "")
     return result

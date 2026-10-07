@@ -12,6 +12,7 @@ services:
     volumes:
       # Kinsho's own data (users, progress, covers). Keep it on a backed-up drive.
       - ./kinsho-data:/data
-      # Your manga/comics. Add one line per drive or folder you want to use;
-      # read-only (:ro) is fine unless you turn on auto-extract or volume renaming.
+      # Your manga/comics. Add one line per drive or folder you want to use.
+      # Kept writable (no :ro): auto-extract, volume renaming and "Save metadata
+      # to ComicInfo.xml" write here. Add :ro only if you use none of them.
       - /path/to/your/manga:/manga
