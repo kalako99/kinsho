@@ -36,6 +36,29 @@ def parse_comicinfo_xml(raw: bytes) -> dict | None:
     }
 
 
+def find_in_folder(folder: str) -> str | None:
+    """Full path of the ComicInfo.xml (any letter case) directly in folder, or None."""
+    try:
+        match = next((f for f in os.listdir(folder) if f.lower() == "comicinfo.xml"), None)
+    except Exception:
+        return None
+    return os.path.join(folder, match) if match else None
+
+
+def build_comicinfo_xml(title: str, description: str, genres: list, tags: list) -> bytes:
+    """A series-level ComicInfo.xml (Series, Summary, Genre, Tags) as UTF-8 bytes."""
+    root = ET.Element("ComicInfo")
+    ET.SubElement(root, "Series").text = title
+    if description:
+        ET.SubElement(root, "Summary").text = description
+    if genres:
+        ET.SubElement(root, "Genre").text = ", ".join(genres)
+    if tags:
+        ET.SubElement(root, "Tags").text = ", ".join(tags)
+    ET.indent(root)
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
+
+
 def locate_and_read(source_path: str, source_type: str, open_archive_fn, read_entry_fn) -> dict | None:
     """
     source_type: "archive" (CBZ/CBR at source_path) or anything else (loose

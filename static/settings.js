@@ -248,6 +248,8 @@ createApp({
       existingLibraryIds: new Set(),
       scanStatus: {},
       metaScanStatus: {},
+      comicInfoStatus: {},
+      comicInfoPrompt: null,  // { lib, folders, existing } while the overwrite question is open
       metaScanFields: { description: true, genres: true, tags: true, cover: true },
       metadataFetchPriority: 'anilist',
       metadataPriorityStatus: { msg: '', type: '' },
@@ -841,6 +843,52 @@ createApp({
             }
         } catch (e) {
             this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Scan failed.', type: 'err' } };
+        }
+    },
+
+    // ── SAVE METADATA TO COMICINFO.XML ──
+    // Asks first when some manga folders already have one: rewrite all, or
+    // only write the missing ones.
+    async startComicInfoExport(lib) {
+        const setStatus = (msg, type) => { this.comicInfoStatus = { ...this.comicInfoStatus, [lib.id]: { msg, type } }; };
+        setStatus('Checking…', 'scanning');
+        try {
+            const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/comicinfo-status`));
+            const data = await res.json();
+            if (data.error) { setStatus(data.error, 'err'); return; }
+            if (data.folders === 0) { setStatus('No manga folders in this library.', 'err'); return; }
+            if (data.existing > 0) {
+                setStatus('', '');
+                this.comicInfoPrompt = { lib, folders: data.folders, existing: data.existing };
+                return;
+            }
+        } catch (e) {
+            setStatus('Could not reach server.', 'err');
+            return;
+        }
+        await this.runComicInfoExport(lib, false);
+    },
+
+    async runComicInfoExport(lib, overwrite) {
+        this.comicInfoPrompt = null;
+        const setStatus = (msg, type) => { this.comicInfoStatus = { ...this.comicInfoStatus, [lib.id]: { msg, type } }; };
+        setStatus('Saving…', 'scanning');
+        try {
+            const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/export-comicinfo`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ overwrite }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setStatus(data.error || 'Failed.', 'err'); return; }
+            const parts = [`✓ ${data.saved} saved`];
+            if (data.existing  > 0) parts.push(`${data.existing} already had one`);
+            if (data.empty     > 0) parts.push(`${data.empty} without metadata`);
+            if (data.no_folder > 0) parts.push(`${data.no_folder} skipped (single archive, no folder)`);
+            if (data.failed    > 0) parts.push(`${data.failed} failed: ${data.error}`);
+            setStatus(parts.join(' · '), data.failed > 0 ? 'err' : 'ok');
+        } catch (e) {
+            setStatus('Could not reach server.', 'err');
         }
     },
 

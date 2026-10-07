@@ -408,6 +408,10 @@ _scan_queued_ids: set = set()  # library_ids waiting in line OR actively running
 # library_id -> time it started waiting for a file transfer to finish (see
 # _library_recently_written); shown as phase "wait" at 0% in Settings.
 _scan_waiting: dict = {}
+# Held while run_scan() runs; "Save metadata to ComicInfo.xml" takes it too, so
+# it never writes into manga folders (and updates their saved folder dates)
+# in the middle of a scan.
+_scan_exec_lock = threading.Lock()
 
 
 def enqueue_library_scan(library_id: int, wait_for_quiet: bool = True) -> bool:
@@ -471,7 +475,8 @@ def _scan_worker():
                 _scan_queue.put((library_id, wait_for_quiet))
                 continue
             if decision == "go":
-                run_scan(library_id)
+                with _scan_exec_lock:
+                    run_scan(library_id)
         except Exception as e:
             print(f"[ScanQueue] library {library_id} raised: {e!r}")
             _scan_waiting.pop(library_id, None)
@@ -3438,10 +3443,25 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         # ── ComicInfo.xml: fill in description/genres/tags left empty by
         # everything else (manual edit, a prior fetch, or a prior run of
         # this same pass) — never overwrites a value that's already set.
-        if not dims.get("description") or not dims.get("genres") or not dims.get("tags"):
+        # A ComicInfo.xml in the manga's own folder whose date matches
+        # comicinfo_mtime (read before, or written by "Save metadata to
+        # ComicInfo.xml") isn't read again.
+        root_ci = comicinfo.find_in_folder(manga.get("path", "")) if os.path.isdir(manga.get("path", "")) else None
+        root_ci_mtime = None
+        if root_ci:
+            try:
+                root_ci_mtime = os.path.getmtime(root_ci)
+            except OSError:
+                root_ci = None
+        if root_ci and dims.get("comicinfo_mtime") == root_ci_mtime:
+            pass
+        elif not dims.get("description") or not dims.get("genres") or not dims.get("tags"):
             found = find_comicinfo_for_manga(manga.get("path", ""), dims)
+            dims_changed = False
+            if root_ci:
+                dims["comicinfo_mtime"] = root_ci_mtime
+                dims_changed = True
             if found:
-                dims_changed = False
                 if not dims.get("description") and found["description"]:
                     dims["description"] = found["description"]
                     dims_changed = True
@@ -3453,8 +3473,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     dims["tags"] = found["tags"]
                     dims_changed = True
                     comicinfo_changed = True
-                if dims_changed:
-                    save_manga_dims(library_id, manga_name, dims)
+            if dims_changed:
+                save_manga_dims(library_id, manga_name, dims)
 
     result = list(mangas.values())
     result.sort(key=lambda m: natural_sort_key(m["name"]))
@@ -6676,6 +6696,105 @@ async def scan_library_metadata(request: Request, library_id: int):
         "errors": errors,
         "total": len(mangas),
     })
+
+def _comicinfo_export_folders(library_id: int) -> list | None:
+    """The library's manga that have a folder of their own (a whole manga
+    stored as one archive has none), or None for an unknown library."""
+    manga_data = load_app_data().get("manga_data", {}).get(str(library_id))
+    if manga_data is None:
+        return None
+    return [m for m in manga_data.get("mangas", []) if os.path.isdir(m.get("path", ""))]
+
+
+def export_comicinfo_for_library(library_id: int, overwrite: bool) -> dict:
+    """Writes each manga's title/description/genres/tags as ComicInfo.xml in
+    its own folder (a backup: scans only fill empty fields from it). Records
+    the file's date in dims.json (comicinfo_mtime) so scans don't re-read it,
+    and the folder's new date in data.json so the folder doesn't look changed
+    (which would rescan it and move it to the top of Last Updated). Call with
+    _scan_exec_lock held."""
+    data = load_app_data()
+    mangas = data.get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
+    counts = {"saved": 0, "existing": 0, "no_folder": 0, "empty": 0, "failed": 0}
+    first_error = ""
+    data_changed = False
+    for manga in mangas:
+        folder = manga.get("path", "")
+        if not os.path.isdir(folder):
+            counts["no_folder"] += 1
+            continue
+        existing = comicinfo.find_in_folder(folder)
+        if existing and not overwrite:
+            counts["existing"] += 1
+            continue
+        dims = load_manga_dims(library_id, manga["name"])
+        description = dims.get("description") or ""
+        genres = dims.get("genres") or []
+        tags = dims.get("tags") or []
+        if not (description or genres or tags):
+            counts["empty"] += 1
+            continue
+        target = existing or os.path.join(folder, "ComicInfo.xml")
+        tmp = os.path.join(folder, ".ComicInfo.xml.kinsho-tmp")
+        try:
+            folder_mtime_before = os.path.getmtime(folder)
+            with open(tmp, "wb") as f:
+                f.write(comicinfo.build_comicinfo_xml(manga["name"], description, genres, tags))
+            os.replace(tmp, target)
+            dims["comicinfo_mtime"] = os.path.getmtime(target)
+            save_manga_dims(library_id, manga["name"], dims)
+            # Only when the folder was unchanged before writing: a real change
+            # since the last scan must still be picked up by the next one.
+            if manga.get("folder_mtime") == folder_mtime_before:
+                manga["folder_mtime"] = os.path.getmtime(folder)
+                data_changed = True
+            counts["saved"] += 1
+        except OSError as e:
+            counts["failed"] += 1
+            first_error = first_error or (e.strerror or str(e))
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    if data_changed:
+        save_app_data(data)
+    print(f"[ComicInfo] Library {library_id} export: {counts}" + (f" first error: {first_error}" if first_error else ""))
+    return {**counts, "error": first_error}
+
+
+@app.get("/api/libraries/{library_id}/comicinfo-status")
+def comicinfo_export_status(request: Request, library_id: int):
+    username = auth.get_current_user(request)
+    if not auth.resolve_permissions(username).get("is_admin"):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    folders = _comicinfo_export_folders(library_id)
+    if folders is None:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    existing = sum(1 for m in folders if comicinfo.find_in_folder(m["path"]))
+    return JSONResponse({"folders": len(folders), "existing": existing})
+
+
+@app.post("/api/libraries/{library_id}/export-comicinfo")
+async def export_comicinfo(request: Request, library_id: int):
+    username = auth.get_current_user(request)
+    if not auth.resolve_permissions(username).get("is_admin"):
+        return JSONResponse({"error": "Admin only"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if _comicinfo_export_folders(library_id) is None:
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if library_id in _extraction_running:
+        return JSONResponse({"error": "Volumes are being extracted in this library -- try again when that's finished."}, status_code=409)
+    if not _scan_exec_lock.acquire(blocking=False):
+        return JSONResponse({"error": "A library scan is running -- try again when it's finished."}, status_code=409)
+    try:
+        result = await asyncio.to_thread(export_comicinfo_for_library, library_id, bool(body.get("overwrite")))
+    finally:
+        _scan_exec_lock.release()
+    return JSONResponse(result)
+
 
 @app.post("/api/settings/last-tab")
 async def save_last_tab(request: Request):
