@@ -1758,6 +1758,8 @@ createApp({
           pm[u.username] = { ...u.permissions, libraries: { ...u.permissions.libraries } };
           if (!Array.isArray(pm[u.username].blocked_tags)) pm[u.username].blocked_tags = [];
         }
+        // Saved before this permission existed: allowed (the server's default too).
+        for (const p of Object.values(pm)) if (p.page_pairing === undefined) p.page_pairing = true;
         this.userPermissions = pm;
       } catch (e) {
         console.error('Failed to load user permissions:', e);

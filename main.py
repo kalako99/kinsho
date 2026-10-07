@@ -821,6 +821,14 @@ def save_manga_dims(library_id: int, manga_name: str, data: dict):
                 old_counts = _dims_page_counts(json.load(f))
         except Exception:
             old_counts = {}
+    # Two-page reading layouts (blank pages, pairing shifts) point at page
+    # numbers: one whose chapter/volume now has a different page count (or is
+    # gone) is dropped, to be set again by hand (user's rule).
+    layouts = data.get("book_layouts")
+    if layouts:
+        current = _dims_page_counts(data)
+        for unit_id in [u for u, l in layouts.items() if current.get(u) != l.get("pages")]:
+            del layouts[unit_id]
     tmp_path = path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
@@ -6833,6 +6841,46 @@ async def save_bookmarks(request: Request, library_id: int, manga_id: str):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
+@app.post("/api/manga/{library_id}/{manga_id}/book-layout")
+async def save_book_layout(request: Request, library_id: int, manga_id: str):
+    """Two-page reading layout of one chapter/volume, shared by every user:
+    {unit_id, blanks: [page index...] (a white page before that page; the page
+    count = after the last), flips: {page index: "+"|"-"} (pairing shifted
+    from that page)}. Empty lists remove it. Needs the page_pairing permission."""
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    if not auth.resolve_permissions(username).get("page_pairing"):
+        return JSONResponse({"error": "No permission to save page pairing"}, status_code=403)
+    manga = _lookup_manga(library_id, manga_id)
+    if not manga:
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    body = await request.json()
+    unit_id = str(body.get("unit_id", ""))
+    dims = load_manga_dims(library_id, manga["name"])
+    pages = _dims_page_counts(dims).get(unit_id)
+    if not pages:
+        return JSONResponse({"error": "Chapter/volume not found"}, status_code=404)
+    try:
+        blanks = sorted(int(b) for b in body.get("blanks") or [])
+        flips = {str(int(k)): v for k, v in (body.get("flips") or {}).items()}
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Bad layout"}, status_code=400)
+    if (len(blanks) > 500 or any(b < 0 or b > pages for b in blanks)
+            or any(not 0 <= int(k) < pages or v not in ("+", "-") for k, v in flips.items())):
+        return JSONResponse({"error": "Bad layout"}, status_code=400)
+    layouts = dims.setdefault("book_layouts", {})
+    if blanks or flips:
+        layouts[unit_id] = {"blanks": blanks, "flips": flips, "pages": pages}
+    else:
+        layouts.pop(unit_id, None)
+    save_manga_dims(library_id, manga["name"], dims)
+    return JSONResponse({"ok": True})
+
 @app.post("/api/settings/tab-order")
 async def save_tab_order(request: Request):
     username  = auth.get_current_user(request)
@@ -7732,7 +7780,15 @@ def get_manga_dims(request: Request, library_id: int, manga_id: str):
     # conditional request every time; a match is a bodyless 304, so a
     # reader gets exactly-fresh data on its very next normal load - no
     # arbitrary staleness window, and no manual hard-refresh needed.
-    etag = f'"{manga.get("last_updated", "")}"'
+    # Plus dims.json's own date: it also changes between scans (a two-page
+    # layout saved from the reader, tags/description edits), and a stale 304
+    # would keep the old one.
+    dims_path = get_manga_dims_file(library_id, manga["name"])
+    try:
+        dims_mtime = os.path.getmtime(dims_path) if dims_path else 0
+    except OSError:
+        dims_mtime = 0
+    etag = f'"{manga.get("last_updated", "")}-{dims_mtime}"'
     headers = {"Cache-Control": "private, no-cache", "ETag": etag}
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)

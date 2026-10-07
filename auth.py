@@ -407,6 +407,9 @@ _DEFAULT_PERMISSIONS: dict = {
     # AniList/MangaDex Fetch Metadata popup (or the reverse), rather than
     # that popup's access being an implicit side effect of the other three.
     "metadata_fetch":  True,
+    # Two-page reading: may save blank pages / pairing shifts for everyone
+    # (without it, a user's changes last only for that reader session).
+    "page_pairing":    True,
     "libraries":    {},
     "blocked_tags": [],
 }
@@ -423,14 +426,14 @@ def resolve_permissions(username: str) -> dict:
     if user and user.get("role") == "admin":
         return {
             "tags": True, "genres": True, "description": True, "metadata_fetch": True,
-            "libraries": {}, "is_admin": True,
+            "page_pairing": True, "libraries": {}, "is_admin": True,
         }
     try:
         data = load_permissions()
     except Exception:
         return {
             "tags": False, "genres": False, "description": False, "metadata_fetch": False,
-            "libraries": {}, "is_admin": False,
+            "page_pairing": False, "libraries": {}, "is_admin": False,
         }
     default    = data.get("_default", _DEFAULT_PERMISSIONS.copy())
     user_entry = data.get(username)
@@ -444,6 +447,7 @@ def resolve_permissions(username: str) -> dict:
     # unreadable-file branch above fails closed, matching how tags/genres/
     # description already behave there.
     perms.setdefault("metadata_fetch", True)
+    perms.setdefault("page_pairing", True)  # same opt-out convention as metadata_fetch
     perms["is_admin"] = False
     return perms
 
@@ -835,7 +839,7 @@ async def route_set_user_permissions(request: Request, username: str):
         return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
     body  = await request.json()
     perms = body.get("permissions", {})
-    allowed_keys = {"tags", "genres", "description", "metadata_fetch", "libraries", "blocked_tags"}
+    allowed_keys = {"tags", "genres", "description", "metadata_fetch", "page_pairing", "libraries", "blocked_tags"}
     perms = {k: v for k, v in perms.items() if k in allowed_keys}
     perms.setdefault("libraries", {})
     perms_data          = load_permissions()

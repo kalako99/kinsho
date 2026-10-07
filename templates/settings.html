@@ -1377,6 +1377,9 @@
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions['_default'].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
           </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
+            <input type="checkbox" v-model="userPermissions['_default'].page_pairing"> Page pairing (two-page reading, saved for everyone)
+          </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label
             v-for="lib in libraries"
@@ -1470,6 +1473,9 @@
           </label>
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions[user.username].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
+            <input type="checkbox" v-model="userPermissions[user.username].page_pairing"> Page pairing (two-page reading, saved for everyone)
           </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label
@@ -1690,6 +1696,6 @@
 
 </div>
 
-<script src="/static/settings.js?v=3"></script>
+<script src="/static/settings.js?v=4"></script>
 </body>
 </html>
