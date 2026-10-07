@@ -765,8 +765,26 @@
       width: min(100cqw, calc(100cqh * var(--sp-r)));
       aspect-ratio: var(--sp-r);
     }
-    .sp-slot.sp-cb-ready .sp-canvas { display: block; }
-    .sp-slot.sp-cb-ready img { display: none; }
+    /* A slot holds one cell per page (two in two-page mode). A lone cell
+       fills the slot; a pair is fitted as one block: --sp-a is the pair's
+       total aspect ratio (sum of widths / height), --sp-ai each cell's. */
+    .sp-cell {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .sp-slot.sp-pair .sp-cell {
+      flex: 0 0 auto;
+      width: min(calc(100cqw * var(--sp-ai) / var(--sp-a)), calc(100cqh * var(--sp-ai)));
+      height: min(calc(100cqw / var(--sp-a)), 100cqh);
+    }
+    .sp-slot.sp-pair .sp-cell img,
+    .sp-slot.sp-pair .sp-canvas { width: 100%; height: 100%; max-width: none; max-height: none; aspect-ratio: auto; }
+    .sp-cell.sp-blank-white { background: #fff; }
+    .sp-cell.sp-cb-ready .sp-canvas { display: block; }
+    .sp-cell.sp-cb-ready img { display: none; }
     /* The page being pinch-zoomed paints over its neighbours. */
     .sp-slot.sp-zoomed { position: relative; z-index: 1; transform-origin: 0 0; }
     /* Pages more than one away are loaded but not drawn: see spMarkFarSlots. */
@@ -1375,6 +1393,13 @@
         Right to left
       </button>
     </div>
+    <div class="settings-row">
+      <span class="settings-row-label">Two pages (book)</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsTwoPageToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
   </div>
   <!-- PDF quality (only shown for PDF sources) -->
   <div id="settingsPdfQualityWrap" style="display:none">
@@ -1764,7 +1789,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
   function idleLimitMs() {
     const avg = avgPageSecs();
-    return avg ? Math.max(ACTIVITY_TIMEOUT_MS, IDLE_PAGE_FACTOR * avg * 1000) : ACTIVITY_TIMEOUT_MS;
+    const limit = avg ? Math.max(ACTIVITY_TIMEOUT_MS, IDLE_PAGE_FACTOR * avg * 1000) : ACTIVITY_TIMEOUT_MS;
+    return limit * spScreenPageCount();  // two-page mode: doubled while two pages are shown
   }
 
   // Anchor for how long it's been since a minute was actually credited --
@@ -1934,6 +1960,43 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       body: JSON.stringify({ ...readerSettings, library_id: libraryId }),
     });
   }
+
+  // ── SCREEN ROTATION LOCK (2026-10-07) ──
+  // The reader keeps the screen in the orientation it was opened in (every
+  // mode); leaving the reader is the way to rotate. Switching two-page mode
+  // on/off frees it for ROTATION_UNLOCK_MS, then locks whatever orientation
+  // the screen is in by then. In the Kinsho app and TMTM this goes through
+  // their native bridge (window.KinshoOrientation.lock()/unlock(): lock()
+  // keeps the current orientation); a browser can only lock in fullscreen,
+  // so there it's tried and silently skipped when refused.
+  const ROTATION_UNLOCK_MS = 10000;
+  let _rotationRelockTimer = null;
+  function screenRotationLock() {
+    try {
+      if (window.KinshoOrientation) { window.KinshoOrientation.lock(); return; }
+      screen.orientation?.lock?.(screen.orientation.type).catch(() => {});
+    } catch (e) {}
+  }
+  function screenRotationUnlock() {
+    try {
+      if (window.KinshoOrientation) { window.KinshoOrientation.unlock(); return; }
+      screen.orientation?.unlock?.();
+    } catch (e) {}
+  }
+  function screenRotationUnlockFor(ms) {
+    clearTimeout(_rotationRelockTimer);
+    screenRotationUnlock();
+    _rotationRelockTimer = setTimeout(() => { _rotationRelockTimer = null; screenRotationLock(); }, ms);
+  }
+  screenRotationLock();
+  // A browser only allows the lock in fullscreen, which the reader enters on
+  // the first tap.
+  document.addEventListener('fullscreenchange', () => {
+    if (document.fullscreenElement && !_rotationRelockTimer) screenRotationLock();
+  });
+  window.addEventListener('pagehide', () => { clearTimeout(_rotationRelockTimer); screenRotationUnlock(); });
+  // Coming back to the reader from another page (back/forward cache).
+  window.addEventListener('pageshow', (e) => { if (e.persisted) screenRotationLock(); });
 
   function applyPreloadRadius(r) {
     readerSettings.preloadRadius = r;
@@ -2559,8 +2622,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         if (readerSettings.mode === 'single-page'
             && spManifest[spCurrentIdx] === entry
             && _spAnimFrame === scheduledSpFrame) {
-          const spSi = spAssignedSlot[rOf(spCurrentIdx)];
-          if (spSi !== -1) spSlotPool[spSi].img.src = url;
+          const spImg = _spImgFor(spCurrentIdx);
+          if (spImg) spImg.src = url;
         }
       };
       // entry.loaded is only set once success is confirmed -- see
@@ -4503,6 +4566,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     settingsPaddingToggle.checked = !!readerSettings.padding;
     settingsDirLTR.classList.toggle('active', readerSettings.direction === 'ltr');
     settingsDirRTL.classList.toggle('active', readerSettings.direction === 'rtl');
+    document.getElementById('settingsTwoPageToggle').checked = !!readerSettings.twoPage;
     // Preload slider: shown for every source type. Was gated to compressed
     // sources only (isCompressed) from when this setting was introduced --
     // stale since the 2026-07-28 predecode fix unified loose and compressed
@@ -4568,15 +4632,25 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     saveReaderSettings();
   });
 
-  // Direction buttons
-  settingsDirLTR.addEventListener('click', () => {
-    readerSettings.direction = 'ltr';
+  // Direction buttons. The strip's order is mirrored for right-to-left, so
+  // single-page mode lays its window out again.
+  function applyDirection(dir) {
+    if (readerSettings.direction === dir) return;
+    readerSettings.direction = dir;
     syncSettingsUI();
+    if (readerSettings.mode === 'single-page') spRelayout(spCurrentIdx);
     saveReaderSettings();
-  });
-  settingsDirRTL.addEventListener('click', () => {
-    readerSettings.direction = 'rtl';
-    syncSettingsUI();
+  }
+  settingsDirLTR.addEventListener('click', () => applyDirection('ltr'));
+  settingsDirRTL.addEventListener('click', () => applyDirection('rtl'));
+
+  // Two-page (book) mode, single-page mode only. The screen is free to
+  // rotate for a few seconds after switching it, since it's meant for the
+  // tablet held sideways (see SCREEN ROTATION LOCK).
+  document.getElementById('settingsTwoPageToggle').addEventListener('change', (e) => {
+    readerSettings.twoPage = e.target.checked;
+    if (readerSettings.mode === 'single-page') spRelayout(spCurrentIdx);
+    screenRotationUnlockFor(ROTATION_UNLOCK_MS);
     saveReaderSettings();
   });
 
@@ -4755,13 +4829,13 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       spZoomReset();
       if (spWindowHi === -1) return;
       _spSyncSpacers();
-      if (readerSettings.mode === 'single-page') spStrip.scrollLeft = rOf(spCurrentIdx) * viewW;
+      if (readerSettings.mode === 'single-page') spStrip.scrollLeft = spPosOf(spCurrentIdx) * viewW;
     }, 200);
   });
 
   // Permanent fixtures flanking the materialized slot pool -- mirrors
   // #reader-inner's topSpacer/bottomSpacer. Their widths keep spStrip's
-  // real scrollWidth equal to spManifest.length * viewW at all times,
+  // real scrollWidth equal to spPosCount() * viewW at all times,
   // regardless of how many slots are actually materialized.
   const spLeftSpacer  = document.createElement('div');
   const spRightSpacer = document.createElement('div');
@@ -4769,41 +4843,292 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   spStrip.appendChild(spLeftSpacer);
   spStrip.appendChild(spRightSpacer);
 
-  // spSlotPool[k] corresponds to reading-order position (spWindowLo + k).
-  // Window management lives entirely in reading-order space ("r"), not
+  // spSlotPool[k] corresponds to strip position (spWindowLo + k).
+  // Window management lives entirely in strip positions ("r"), not
   // manifest-index space -- r is always physically left-to-right ascending
   // regardless of reading direction, which is what lets RTL be handled in
-  // one place (rOf(), further down) instead of threaded through every
+  // one place (spPosOfView(), VIEWS below) instead of threaded through every
   // window-management formula. Because every slot is the same width,
   // spStrip.scrollLeft IS the source of truth for current position -- no
   // virtualY-style shadow variable needed, unlike #reader (which needs one
   // precisely because its page heights vary).
   const spSlotPool = [];
   let spWindowLo = 0, spWindowHi = -1; // -1 = no window materialized yet
-  let spAssignedSlot = new Int32Array(Math.max(1, spManifest.length)).fill(-1); // r -> slot pool index
+  let spAssignedSlot = new Int32Array(1).fill(-1); // strip position -> slot pool index (sized by spBuildViews)
 
-  function _spMakeSlotEl() {
+  // ── VIEWS: WHAT EACH SLOT SHOWS (2026-10-07) ──
+  // The strip moves through views, not pages. In normal single-page mode a
+  // view is one page. In two-page mode (readerSettings.twoPage) it's what a
+  // printed book shows open: two facing pages, or one spread/very tall page
+  // alone, or a cover beside a black placeholder, or a page beside a white
+  // (blank) page. spViews is in reading order; each view lists its cells in
+  // reading order, a cell being {idx} (a page) or {blank: 'white'|'black'}.
+  // A view's position on the strip (p) is its reading-order number, mirrored
+  // for right-to-left, and its "page" (spIdxAt) is its first real page in
+  // reading order: spCurrentIdx is always that page, so progress, bookmarks
+  // and chapter tracking keep working on pages.
+  let spViews = [];
+  let spViewOfIdx = new Int32Array(0);  // page index -> view number
+
+  function spIsBook() {
+    return readerSettings.mode === 'single-page' && !!readerSettings.twoPage;
+  }
+
+  // Spreads already joined into one image: at least SP_WIDE_FACTOR times the
+  // unit's most common page width (user's rule: "almost as wide as 2 other
+  // images"). Very tall pages (webtoon strips) are shown alone too.
+  const SP_WIDE_FACTOR = 1.75;
+  const SP_TALL_RATIO  = 2.2;
+  function _spPageAspect(idx) {
+    const nat = spManifest[idx] && cbNaturalDims(spManifest[idx]);
+    return nat && nat.ih > 0 ? nat.iw / nat.ih : 0.7;
+  }
+  const _spCommonWidthCache = new Map();  // "a:b" -> width, cleared by spBuildViews
+  function _spCommonWidth(a, b) {
+    const key = a + ':' + b;
+    if (!_spCommonWidthCache.has(key)) _spCommonWidthCache.set(key, _spCountCommonWidth(a, b));
+    return _spCommonWidthCache.get(key);
+  }
+  function _spCountCommonWidth(a, b) {
+    const counts = new Map();
+    for (let i = a; i < b; i++) {
+      const nat = cbNaturalDims(spManifest[i]);
+      if (!nat) continue;
+      const w = Math.round(nat.iw / 10) * 10;
+      counts.set(w, (counts.get(w) || 0) + 1);
+    }
+    let best = 0, bestN = 0;
+    for (const [w, n] of counts) if (n > bestN) { best = w; bestN = n; }
+    return best;
+  }
+  function spPageAlone(idx, commonW) {
+    const nat = cbNaturalDims(spManifest[idx]);
+    if (!nat) return false;
+    if (commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR) return true;
+    return nat.ih / nat.iw > SP_TALL_RATIO;
+  }
+
+  // Blank pages and pairing shifts saved for a chapter/volume (two-page
+  // layout editing, see SINGLE-PAGE LAYOUT EDITING): {blanks: [localIdx...]
+  // (a white page before that page), flips: {localIdx: '+'|'-'}}.
+  // Layouts edited by a user who can't save them for everyone: kept for this
+  // page load only.
+  const spSessionLayouts = {};
+  function spUnitLayout(cid) {
+    const chDims = isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid];
+    return spSessionLayouts[cid] || chDims?.book || { blanks: [], flips: {} };
+  }
+
+  // The views of one chapter/volume, pages a..b-1 of spManifest.
+  function spBookUnitViews(cid, a, b) {
+    const WHITE = 'white', BLACK = 'black';
+    const n = b - a;
+    const commonW = _spCommonWidth(a, b);
+    const alone = (i) => spPageAlone(i, commonW);
+    const head = [], tail = [];
+    let lo = a, hi = b;  // the pages paired between the covers
+    if (isVolume && n >= 1) {
+      // A volume opens on its cover alone, set where it sits in the closed
+      // book, and ends on the back cover the same way.
+      head.push(alone(a) ? [{ idx: a }] : [{ blank: BLACK }, { idx: a }]);
+      lo = a + 1;
+      if (n >= 2) {
+        tail.push(alone(b - 1) ? [{ idx: b - 1 }] : [{ idx: b - 1 }, { blank: BLACK }]);
+        hi = b - 1;
+      }
+    }
+    const layout = spUnitLayout(cid);
+    const blanksAt = new Map();
+    for (const L of layout.blanks || []) blanksAt.set(L, (blanksAt.get(L) || 0) + 1);
+    const flips = layout.flips || {};
+
+    const toks = [];
+    // Volumes with joined spreads: a white page after the cover when an odd
+    // number of pages comes before the first spread, so the pages pair up
+    // as in the printed book (only that first group; later ones are fixed
+    // by hand).
+    if (isVolume) {
+      let first = -1;
+      for (let i = lo; i < hi; i++) if (alone(i)) { first = i; break; }
+      if (first > lo && (first - lo) % 2 === 1) toks.push({ blank: WHITE, src: 'auto' });
+    }
+    for (let i = lo; i < hi; i++) {
+      const L = spManifest[i].localIdx;
+      for (let k = 0; k < (blanksAt.get(L) || 0); k++) toks.push({ blank: WHITE, src: 'manual', at: L });
+      toks.push({ idx: i });
+    }
+    const endL = hi > lo ? spManifest[hi - 1].localIdx + 1 : (lo < b ? spManifest[lo].localIdx : 0);
+    for (let k = 0; k < (blanksAt.get(endL) || 0); k++) toks.push({ blank: WHITE, src: 'manual', at: endL });
+
+    const views = [];
+    let pending = null;
+    // A page left without a partner gets a white page beside it; a white
+    // page left alone is dropped.
+    const flush = () => {
+      if (pending && pending.idx != null) views.push([pending, { blank: WHITE, src: 'auto' }]);
+      pending = null;
+    };
+    const isPlainPair = (v) => v && v.length === 2 && v[0].idx != null && v[1].idx != null;
+    for (const t of toks) {
+      if (t.blank) {
+        if (pending && pending.idx != null) { views.push([pending, t]); pending = null; }
+        else pending = t;
+        continue;
+      }
+      if (alone(t.idx)) { flush(); views.push([t]); continue; }
+      const flip = flips[spManifest[t.idx].localIdx];
+      if (flip) {
+        // A shift: this page swaps between starting a pair and ending one.
+        if (pending && pending.idx != null) { flush(); pending = t; continue; }
+        if (flip === '-' && !pending && isPlainPair(views[views.length - 1])) {
+          const [p1, p2] = views.pop();
+          views.push([p1, { blank: WHITE, src: 'shift', at: spManifest[t.idx].localIdx }]);
+          views.push([p2, t]);
+          continue;
+        }
+        views.push([{ blank: WHITE, src: 'shift', at: spManifest[t.idx].localIdx }, t]);
+        pending = null;
+        continue;
+      }
+      if (pending) { views.push([pending, t]); pending = null; }
+      else pending = t;
+    }
+    flush();
+    return [...head, ...views, ...tail];
+  }
+
+  function spBuildViews() {
+    const n = spManifest.length;
+    _spCommonWidthCache.clear();
+    spViews = [];
+    spViewOfIdx = new Int32Array(Math.max(1, n));
+    if (!spIsBook()) {
+      for (let i = 0; i < n; i++) { spViews.push([{ idx: i }]); spViewOfIdx[i] = i; }
+    } else {
+      let a = 0;
+      while (a < n) {
+        const cid = spManifest[a].chapterId;
+        let b = a;
+        while (b < n && spManifest[b].chapterId === cid) b++;
+        for (const v of spBookUnitViews(cid, a, b)) {
+          for (const c of v) if (c.idx != null) spViewOfIdx[c.idx] = spViews.length;
+          spViews.push(v);
+        }
+        a = b;
+      }
+    }
+    spAssignedSlot = new Int32Array(Math.max(1, spViews.length)).fill(-1);
+  }
+
+  // Strip position <-> view number (self-inverse, mirrors right-to-left).
+  function spPosOfView(u) { return isRTL() ? spViews.length - 1 - u : u; }
+  function spPosCount()   { return spViews.length; }
+  function spPosOf(idx)   { return spPosOfView(spViewOfIdx[idx]); }
+  function spIdxAt(p) {
+    const v = spViews[spPosOfView(p)];
+    const c = v && v.find(x => x.idx != null);
+    return c ? c.idx : 0;
+  }
+  // The view's cells left to right on screen.
+  function spCellsAt(p) {
+    const v = spViews[spPosOfView(p)] || [];
+    return isRTL() ? [...v].reverse() : v;
+  }
+  // Every page shown at strip position p.
+  function spPagesAt(p) {
+    return (spViews[spPosOfView(p)] || []).filter(c => c.idx != null).map(c => c.idx);
+  }
+
+  function _spMakeSlotEl(p) {
     const el  = document.createElement('div');
     el.className = 'sp-slot';
-    const img = document.createElement('img');
-    img.alt = 'Page';
-    img.draggable = false; // see .page-slot img's -webkit-user-drag comment
-    el.appendChild(img);
-    return { el, img };
+    const imgs = new Map();  // page index -> {cell, img}
+    const cells = spCellsAt(p);
+    if (cells.length === 2) {
+      // A blank cell takes its partner's shape.
+      const aspects = cells.map(c => c.idx != null ? _spPageAspect(c.idx) : 0);
+      for (let k = 0; k < 2; k++) if (!aspects[k]) aspects[k] = aspects[1 - k] || 0.7;
+      el.classList.add('sp-pair');
+      el.style.setProperty('--sp-a', String(aspects[0] + aspects[1]));
+      cells.forEach((c, k) => { c._aspect = aspects[k]; });
+    }
+    for (const c of cells) {
+      const cell = document.createElement('div');
+      cell.className = 'sp-cell';
+      if (c._aspect) cell.style.setProperty('--sp-ai', String(c._aspect));
+      if (c.blank) {
+        cell.classList.add('sp-blank-' + c.blank);
+        cell._spBlank = c;
+      } else {
+        const img = document.createElement('img');
+        img.alt = 'Page';
+        img.draggable = false; // see .page-slot img's -webkit-user-drag comment
+        cell.appendChild(img);
+        cell._spIdx = c.idx;
+        imgs.set(c.idx, { cell, img });
+      }
+      el.appendChild(cell);
+    }
+    el._spImgs = imgs;
+    return { el, imgs };
   }
+
+  // The <img> / cell currently showing page idx, or null.
+  function _spSlotOf(idx) {
+    if (!spViews.length || idx < 0 || idx >= spManifest.length) return null;
+    const si = spAssignedSlot[spPosOf(idx)];
+    return si == null || si === -1 || !spSlotPool[si] ? null : spSlotPool[si];
+  }
+  function _spImgFor(idx) {
+    const s = _spSlotOf(idx);
+    const c = s && s.imgs.get(idx);
+    return c ? c.img : null;
+  }
+  function _spCellFor(idx) {
+    const s = _spSlotOf(idx);
+    const c = s && s.imgs.get(idx);
+    return c ? c.cell : null;
+  }
+
+  function _spLoadPos(p) {
+    for (const i of spPagesAt(p)) _spLoadEntry(spManifest[i]);
+  }
+
+  // How many pages' worth is on screen for reading time: 2 for a pair or a
+  // joined spread in two-page mode, otherwise 1. Safe before the reader has
+  // finished setting up (the idle check can run that early).
+  function spScreenPageCount() {
+    try {
+      if (!spIsBook() || !spViews.length) return 1;
+      const pages = spPagesAt(spPosOf(spCurrentIdx));
+      if (pages.length >= 2) return 2;
+      const u = spViewOfIdx[spCurrentIdx];
+      let a = spCurrentIdx, b = spCurrentIdx + 1;
+      const cid = spManifest[spCurrentIdx].chapterId;
+      while (a > 0 && spManifest[a - 1].chapterId === cid) a--;
+      while (b < spManifest.length && spManifest[b].chapterId === cid) b++;
+      const nat = cbNaturalDims(spManifest[spCurrentIdx]);
+      const commonW = _spCommonWidth(a, b);
+      return u != null && nat && commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR ? 2 : 1;
+    } catch (e) {
+      return 1;
+    }
+  }
+
+  spBuildViews();
 
   function _spCurrentR() {
     return Math.round(spStrip.scrollLeft / viewW);
   }
 
   function _spSyncSpacers() {
-    if (spManifest.length === 0) {
+    if (spPosCount() === 0) {
       spLeftSpacer.style.width = '0px';
       spRightSpacer.style.width = '0px';
       return;
     }
     spLeftSpacer.style.width  = (spWindowLo * viewW) + 'px';
-    spRightSpacer.style.width = Math.max(0, (spManifest.length - 1 - spWindowHi) * viewW) + 'px';
+    spRightSpacer.style.width = Math.max(0, (spPosCount() - 1 - spWindowHi) * viewW) + 'px';
   }
 
   function _spClearSlotPool() {
@@ -4817,27 +5142,26 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function _spRebuildWindow(newWindowLo, targetR) {
     netRestart();
     for (let r = spWindowLo; r <= spWindowHi; r++) {
-      const entry = spManifest[rOf(r)];
-      if (entry) entry.loaded = false;
+      for (const i of spPagesAt(r)) if (spManifest[i]) spManifest[i].loaded = false;
       spAssignedSlot[r] = -1;
     }
     _spClearSlotPool();
 
-    if (spManifest.length === 0) {
+    if (spPosCount() === 0) {
       spWindowLo = 0; spWindowHi = -1;
       _spSyncSpacers();
       return;
     }
 
-    const count = Math.min(SP_SLOT_COUNT, spManifest.length);
-    spWindowLo = Math.max(0, Math.min(newWindowLo, spManifest.length - count));
+    const count = Math.min(SP_SLOT_COUNT, spPosCount());
+    spWindowLo = Math.max(0, Math.min(newWindowLo, spPosCount() - count));
     spWindowHi = spWindowLo + count - 1;
 
     const frag = document.createDocumentFragment();
     for (let r = spWindowLo; r <= spWindowHi; r++) {
-      const { el, img } = _spMakeSlotEl();
+      const { el, imgs } = _spMakeSlotEl(r);
       frag.appendChild(el);
-      spSlotPool.push({ el, img });
+      spSlotPool.push({ el, imgs });
       spAssignedSlot[r] = r - spWindowLo;
     }
     spStrip.insertBefore(frag, spRightSpacer);
@@ -4846,8 +5170,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     spStrip.scrollLeft = targetR * viewW;
     spMarkFarSlots();
 
-    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
-    _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.max(0, Math.min(spManifest.length - 1, targetR)))]));
+    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadPos(r);
+    _spSchedulePrefetch(spIdxAt(Math.max(0, Math.min(spPosCount() - 1, targetR))));
   }
 
   // Incremental add/remove at one end for ordinary flip-by-flip movement.
@@ -4864,12 +5188,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       const frag = document.createDocumentFragment();
       for (let k = 0; k < delta; k++) {
         const oldR = spWindowLo + k;
-        const oldEntry = spManifest[rOf(oldR)];
-        if (oldEntry) oldEntry.loaded = false;
+        for (const i of spPagesAt(oldR)) if (spManifest[i]) spManifest[i].loaded = false;
         spAssignedSlot[oldR] = -1;
         spSlotPool[k].el.remove();
 
-        const { el } = _spMakeSlotEl();
+        const { el } = _spMakeSlotEl(spWindowHi + 1 + k);
         frag.appendChild(el);
       }
       spStrip.insertBefore(frag, spRightSpacer);
@@ -4878,15 +5201,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     } else {
       const n = -delta;
       const frag = document.createDocumentFragment();
-      for (let k = n - 1; k >= 0; k--) {
-        const { el } = _spMakeSlotEl();
+      for (let k = 0; k < n; k++) {
+        const { el } = _spMakeSlotEl(spWindowLo - n + k);
         frag.appendChild(el);
       }
       spStrip.insertBefore(frag, spLeftSpacer.nextSibling);
       for (let k = 0; k < n; k++) {
         const oldR = spWindowHi - k;
-        const oldEntry = spManifest[rOf(oldR)];
-        if (oldEntry) oldEntry.loaded = false;
+        for (const i of spPagesAt(oldR)) if (spManifest[i]) spManifest[i].loaded = false;
         spAssignedSlot[oldR] = -1;
         spSlotPool[spSlotPool.length - 1 - k].el.remove();
       }
@@ -4901,7 +5223,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     let node = spLeftSpacer.nextSibling;
     let k = 0;
     while (node && node !== spRightSpacer) {
-      spSlotPool.push({ el: node, img: node.querySelector('img') });
+      spSlotPool.push({ el: node, imgs: node._spImgs });
       spAssignedSlot[spWindowLo + k] = k;
       node = node.nextSibling;
       k++;
@@ -4921,8 +5243,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // touch that slot again. loadEntry itself is idempotent (entry.loaded
     // guards it), so calling it for the whole window here, not just the
     // new slots, is harmless for the ones already loaded.
-    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadEntry(spManifest[rOf(r)]);
-    _spSchedulePrefetch(manifest.indexOf(spManifest[rOf(Math.floor((spWindowLo + spWindowHi) / 2))]));
+    for (let r = spWindowLo; r <= spWindowHi; r++) _spLoadPos(r);
+    _spSchedulePrefetch(spIdxAt(Math.floor((spWindowLo + spWindowHi) / 2)));
   }
 
   // The <img> of every page more than SP_DRAW_RADIUS away from the current
@@ -4935,7 +5257,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // landing. A page is drawn again as soon as it's the next one.
   const SP_DRAW_RADIUS = 1;
   function spMarkFarSlots() {
-    const curR = rOf(spCurrentIdx);
+    const curR = spPosOf(spCurrentIdx);
     for (let r = spWindowLo; r <= spWindowHi; r++) {
       const si = spAssignedSlot[r];
       if (si == null || si === -1 || !spSlotPool[si]) continue;
@@ -4944,10 +5266,10 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function spRecenterWindow() {
-    if (spManifest.length === 0) return;
-    const currentR = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
-    const count  = Math.min(SP_SLOT_COUNT, spManifest.length);
-    const target = Math.max(0, Math.min(currentR - Math.floor(count / 2), spManifest.length - count));
+    if (spPosCount() === 0) return;
+    const currentR = Math.max(0, Math.min(spPosCount() - 1, _spCurrentR()));
+    const count  = Math.min(SP_SLOT_COUNT, spPosCount());
+    const target = Math.max(0, Math.min(currentR - Math.floor(count / 2), spPosCount() - count));
     const delta  = target - spWindowLo;
     if (delta === 0) return;
     if (Math.abs(delta) >= count) _spRebuildWindow(target, currentR);
@@ -4990,11 +5312,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   }
 
   function _spSettleCurrentIdx() {
-    if (spManifest.length === 0) return;
+    if (spPosCount() === 0) return;
     if (_spUserDragging) {
       _spUserDragging = false;
-      const r = Math.max(0, Math.min(spManifest.length - 1, _spCurrentR()));
-      const idx = rOf(r); // self-inverse
+      const r = Math.max(0, Math.min(spPosCount() - 1, _spCurrentR()));
+      const idx = spIdxAt(r);
       if (idx !== spCurrentIdx) spGotoIdx(idx);
       return;
     }
@@ -5007,7 +5329,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // above correctly does) would silently snap spCurrentIdx backward to
     // wherever the animation happened to still be. spCurrentIdx is already
     // correct; just make sure the visible position actually reaches it.
-    const r = rOf(spCurrentIdx);
+    const r = spPosOf(spCurrentIdx);
     if (Math.round(spStrip.scrollLeft / viewW) !== r) spStrip.scrollLeft = r * viewW;
   }
 
@@ -5066,16 +5388,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }, { passive: true });
   }
 
-  // Reading-order <-> manifest-index conversion, self-inverse
-  // (rOf(rOf(x)) === x) -- the one place RTL is handled; every window-
-  // management function above operates purely in r-space and needs no
-  // direction branch of its own. The 4 existing physical-direction
-  // ternaries (tap zones, keyboard) don't need this at all -- they already
-  // only ever call spForward/spBackward in index-space.
+  // Right-to-left is handled in one place, spPosOfView (VIEWS above): every
+  // window-management function works in strip positions and needs no
+  // direction branch of its own. The physical-direction ternaries (tap
+  // zones, keyboard) only call spForward/spBackward.
   const isRTL = () => readerSettings.direction === 'rtl';
-  function rOf(idx) {
-    return isRTL() ? (spManifest.length - 1 - idx) : idx;
-  }
 
   // Assign a URL to a spManifest entry and paint it into whichever slot (if
   // any) is currently assigned to it -- parallel to loadEntry/
@@ -5109,9 +5426,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (!entry.url) return;
     const idx = spManifest.indexOf(entry);
     if (idx === -1) return;
-    const si = spAssignedSlot[rOf(idx)];
-    if (si === -1) return;
-    const imgEl = spSlotPool[si].img;
+    const imgEl = _spImgFor(idx);
+    if (!imgEl) return;
     if (imgEl.dataset.spUrl === entry.url) return; // already painted with this exact image
     imgEl.dataset.spUrl = entry.url;
     netEnqueue({
@@ -5119,8 +5435,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       alive: () => {
         const i = spManifest.indexOf(entry);
         if (i === -1) return false;  // stale entry from before a manifest rebuild
-        const s = spAssignedSlot[rOf(i)];
-        return s !== -1 && spSlotPool[s].img === imgEl && imgEl.dataset.spUrl === entry.url;
+        return _spImgFor(i) === imgEl && imgEl.dataset.spUrl === entry.url;
       },
       onDrop: () => { if (imgEl.dataset.spUrl === entry.url) imgEl.dataset.spUrl = ''; },
       start: (done) => _spStartSlotLoad(entry, imgEl, retriesLeft, done),
@@ -5149,9 +5464,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // still in flight. A stale detached element's late onload firing
       // must not be mistaken for the current one having finished.
       const curIdx = spManifest.indexOf(entry);
-      const curSi  = curIdx === -1 ? -1 : spAssignedSlot[rOf(curIdx)];
-      if (curSi !== -1 && spSlotPool[curSi].img === imgEl) entry.loaded = true;
-      dbg(`[sp] ${dbgPage(curIdx)} loaded into slot ${curSi}${curSi !== -1 && spSlotPool[curSi].img === imgEl ? '' : ' (stale element)'}`);
+      const current = curIdx !== -1 && _spImgFor(curIdx) === imgEl;
+      if (current) entry.loaded = true;
+      dbg(`[sp] ${dbgPage(curIdx)} loaded into slot ${curIdx === -1 ? -1 : spAssignedSlot[spPosOf(curIdx)]}${current ? '' : ' (stale element)'}`);
     };
     imgEl.onerror = () => {
       clearTimeout(timeoutId);
@@ -5357,8 +5672,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function spZoomed() { return _spZoom.s > 1.01; }
 
   function _spCurrentSlotEl() {
-    const k = spAssignedSlot[rOf(spCurrentIdx)];
-    return k >= 0 && spSlotPool[k] ? spSlotPool[k].el : null;
+    const s = _spSlotOf(spCurrentIdx);
+    return s ? s.el : null;
   }
 
   function _spApplyZoom() {
@@ -5392,7 +5707,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _spPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (_spPointers.size === 2) {
       // A swipe the first finger already started springs back to the page.
-      if (_spSwipe && _spSwipe.moved) _spAnimateScrollTo(rOf(spCurrentIdx) * viewW, 0);
+      if (_spSwipe && _spSwipe.moved) _spAnimateScrollTo(spPosOf(spCurrentIdx) * viewW, 0);
       _spSwipe = null;
       _spSuppressClick = true;
       _spPinchStart();
@@ -5499,17 +5814,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const drag = s.lastX - s.x0;
     const recentMove = e.timeStamp - s.lastT < 100;  // a finger that stopped before lifting isn't a flick
     const flick = recentMove && Math.abs(s.v) >= SP_SWIPE_MIN_VELOCITY;
-    let dir = 0;  // +1 = one page further right in reading-order (r) space
+    let dir = 0;  // +1 = one view further right on the strip
     if (drag <= -viewW * SP_SWIPE_MIN_FRACTION || (flick && s.v < 0)) dir = 1;
     else if (drag >= viewW * SP_SWIPE_MIN_FRACTION || (flick && s.v > 0)) dir = -1;
     const startR = Math.round(s.left0 / viewW);
-    const idx = rOf(startR + dir);
+    const target = startR + dir;
     const stripVelocity = recentMove ? -s.v : 0;  // the strip moves opposite to the finger
-    if (idx >= 0 && idx < spManifest.length) {
-      spGotoIdx(idx, stripVelocity);
+    if (target >= 0 && target < spPosCount()) {
+      spGotoIdx(spIdxAt(target), stripVelocity);
     } else {
       _spAnimateScrollTo(startR * viewW, stripVelocity);  // past the true start/end: spring back
-      if (idx >= spManifest.length) showLastPagePopup();
+      if (spPosOfView(target) >= spPosCount()) showLastPagePopup();  // past the end in reading order
     }
   }
   spStrip.addEventListener('pointerup', _spEndSwipe);
@@ -5523,6 +5838,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // the normal path below like any other page turn.
     if (idx < 0) return;
     if (idx >= spManifest.length) { showLastPagePopup(); return; }
+    idx = spIdxAt(spPosOf(idx));  // two-page mode: the first page of its view
     spZoomReset();
 
     dbg(`[sp] go to ${dbgPage(idx)} from ${dbgPage(spCurrentIdx)}, strip at ${Math.round(spStrip.scrollLeft)}px`);
@@ -5537,8 +5853,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // Materialize/scroll to the target -- the strip's own CSS scroll-snap
     // drives the actual page-turn animation natively; this only has to
     // make sure the right slot is ready and scrolled to.
-    const targetR = rOf(idx);
-    const spCount = Math.min(SP_SLOT_COUNT, spManifest.length);
+    const targetR = spPosOf(idx);
+    const spCount = Math.min(SP_SLOT_COUNT, spPosCount());
     // Big-jump-vs-shift is decided against the LOGICAL window bounds
     // (spWindowLo/spWindowHi), never against _spCurrentR() -- the actual
     // scroll position can lag arbitrarily far behind spCurrentIdx during
@@ -5555,7 +5871,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (spWindowHi === -1 || Math.abs(targetR - windowCenter) > spCount) {
       // spWindowHi === -1 explicitly covers "window never materialized
       // yet" (the very first call, from activateSinglePageMode).
-      const windowLo = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spManifest.length - spCount));
+      const windowLo = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spPosCount() - spCount));
       _spRebuildWindow(windowLo, targetR);
     } else {
       if (targetR < spWindowLo || targetR > spWindowHi) {
@@ -5564,7 +5880,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       _spAnimateScrollTo(targetR * viewW, startVelocity);
     }
     spMarkFarSlots();
-    _spLoadEntry(entry);
+    _spLoadPos(targetR);
 
     const globalIdx = manifest.indexOf(entry);
     if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
@@ -5585,8 +5901,20 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     }, 800);
   }
 
-  function spForward()  { spGotoIdx(spCurrentIdx + 1); }
-  function spBackward() { spGotoIdx(spCurrentIdx - 1); }
+  // One view on in reading order (one page, or one pair in two-page mode).
+  function _spViewFirstIdx(u) {
+    const c = spViews[u] && spViews[u].find(x => x.idx != null);
+    return c ? c.idx : null;
+  }
+  function spForward() {
+    const u = spViewOfIdx[spCurrentIdx] + 1;
+    if (u >= spViews.length) { showLastPagePopup(); return; }
+    spGotoIdx(_spViewFirstIdx(u));
+  }
+  function spBackward() {
+    const u = spViewOfIdx[spCurrentIdx] - 1;
+    if (u >= 0) spGotoIdx(_spViewFirstIdx(u));
+  }
   function spNext() { readerSettings.direction === 'ltr' ? spForward()  : spBackward(); }
   function spPrev() { readerSettings.direction === 'ltr' ? spBackward() : spForward();  }
 
@@ -5747,20 +6075,24 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     });
   }
 
-  // Gives the pages within SP_CB_RADIUS of the current one a canvas and
-  // frees every other (including those of slots no longer in the window).
+  // Gives the pages within SP_CB_RADIUS views of the current one a canvas
+  // (1 view in two-page mode, whose views hold up to two pages) and frees
+  // every other (including those of slots no longer in the window).
   // Safe to call any time; in long-strip mode it frees everything.
   function spCbUpdate() {
     const on = readerSettings.mode === 'single-page';
-    const wanted = new Map();  // slot element -> page index
+    const wanted = new Map();  // page cell element -> page index
     if (on) {
       const maxTex = cbMaxTextureSize();
+      const radius = spIsBook() ? 1 : SP_CB_RADIUS;
+      const curR = spPosOf(spCurrentIdx);
       for (let k = 0; k < spSlotPool.length; k++) {
-        const idx = rOf(spWindowLo + k);
-        if (Math.abs(idx - spCurrentIdx) > SP_CB_RADIUS) continue;
-        const nat = spManifest[idx] && cbNaturalDims(spManifest[idx]);
-        if (!nat || nat.iw > maxTex || nat.ih > maxTex) continue;  // <img> only
-        wanted.set(spSlotPool[k].el, idx);
+        if (Math.abs(spWindowLo + k - curR) > radius) continue;
+        for (const [idx, { cell }] of spSlotPool[k].imgs) {
+          const nat = spManifest[idx] && cbNaturalDims(spManifest[idx]);
+          if (!nat || nat.iw > maxTex || nat.ih > maxTex) continue;  // <img> only
+          wanted.set(cell, idx);
+        }
       }
     }
     for (const [id, c] of spCbCanvases) {
@@ -5780,7 +6112,19 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (spManifest[i].globalY <= virtualY) startIdx = i;
       else break;
     }
-    spGotoIdx(startIdx);
+    spRelayout(startIdx);
+  }
+
+  // Rebuilds the views (two-page mode or direction changed, or entering
+  // single-page mode) and the whole slot window, landing on page idx's view.
+  function spRelayout(idx) {
+    spZoomReset();
+    _spClearSlotPool();
+    spWindowLo = 0;
+    spWindowHi = -1;
+    spBuildViews();
+    _spSyncSpacers();
+    if (spManifest.length) spGotoIdx(Math.max(0, Math.min(spManifest.length - 1, idx)));
   }
 
   function activateLongStripMode() {
@@ -5865,10 +6209,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // _spRebuildWindow tears down and reloads every slot in the
         // window unconditionally, which is what an explicit refresh
         // actually needs.
-        if (spManifest.length > 0) {
-          const targetR   = rOf(spCurrentIdx);
-          const spCount   = Math.min(SP_SLOT_COUNT, spManifest.length);
-          const newWinLo  = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spManifest.length - spCount));
+        _spClearSlotPool();
+        spWindowLo = 0;
+        spWindowHi = -1;
+        spBuildViews();  // the page count may have changed
+        spCurrentIdx = spIdxAt(spPosOf(spCurrentIdx));
+        if (spPosCount() > 0) {
+          const targetR   = spPosOf(spCurrentIdx);
+          const spCount   = Math.min(SP_SLOT_COUNT, spPosCount());
+          const newWinLo  = Math.max(0, Math.min(targetR - Math.floor(spCount / 2), spPosCount() - spCount));
           _spRebuildWindow(newWinLo, targetR);
         }
       } else {
@@ -6451,6 +6800,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const e = manifest[idx], next = manifest[idx + 1];
     return !!e && (!next || next.chapterId !== e.chapterId);
   }
+  // The pages on screen with page idx and each one's share of the time: in
+  // two-page mode a pair's time is split between its two pages, and a page
+  // shown beside a blank or black placeholder gets all of it.
+  function ptViewShares(idx) {
+    let pages = [idx];
+    try { if (spIsBook() && spViews.length) pages = spPagesAt(spPosOf(idx)); } catch (e) {}
+    return pages.map(i => [i, 1 / pages.length]);
+  }
   function ptReport(cid) {
     const c = ptTimes[cid];
     if (!c) return;
@@ -6479,11 +6836,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (idx == null || !manifest[idx]) return;
     if (ptIdx == null || !manifest[ptIdx]) { ptIdx = idx; return; }
     // Timers are throttled while hidden, so a long gap also means "paused".
+    const shares = ptViewShares(ptIdx);
     if (document.hidden || dt > 5 || Date.now() - _lastActivityTs > idleLimitMs()) {
-      ptPause(ptIdx);
+      for (const [i] of shares) ptPause(i);
       ptVisitPaused = true;
     } else {
-      ptAdd(ptIdx, dt);
+      for (const [i, share] of shares) ptAdd(i, dt * share);
       ptVisitSecs += dt;
     }
     if (idx === ptIdx) return;
@@ -6491,7 +6849,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     ptIdx = idx;
     // This session's page average (for idleLimitMs): pages actually stayed
     // on, not passed while scrolling (under 1s) or paused on.
-    if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages++; }
+    if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages += shares.length; }
     ptVisitSecs = 0;
     ptVisitPaused = false;
     if (idx > from && idx - from <= PT_JUMP) {
@@ -6512,7 +6870,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // back, or the manga's last page) finishes that chapter too.
   window.addEventListener('pagehide', () => {
     ptTick();
-    if (ptIdx != null && ptIsLastOfChapter(ptIdx)) ptReport(manifest[ptIdx].chapterId);
+    if (ptIdx != null && ptViewShares(ptIdx).some(([i]) => ptIsLastOfChapter(i))) ptReport(manifest[ptIdx].chapterId);
     ptSave();
   });
 
@@ -6731,8 +7089,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (readerSettings.mode === 'single-page') {
       out.push(`single-page: window=${spWindowLo}-${spWindowHi} strip scrollLeft=${Math.round(spStrip.scrollLeft)} width=${spStrip.clientWidth}`);
       for (let i = Math.max(0, spCurrentIdx - 3); i <= Math.min(manifest.length - 1, spCurrentIdx + 3); i++) {
-        const si = spAssignedSlot[rOf(i)];
-        out.push(`${i === spCurrentIdx ? '>' : ' '} ${dbgPage(i)} slot=${si} ${dbgEntry(i)}${si === -1 ? '' : ' ' + dbgImg(spSlotPool[si].img, manifest[i].url)}`);
+        const si = spAssignedSlot[spPosOf(i)];
+        const img = _spImgFor(i);
+        out.push(`${i === spCurrentIdx ? '>' : ' '} ${dbgPage(i)} slot=${si} ${dbgEntry(i)}${img ? ' ' + dbgImg(img, manifest[i].url) : ''}`);
       }
     } else if (cbActive) {
       for (const slot of cbPages) {
@@ -7287,6 +7646,15 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _origSpGotoIdxE2E(...args);
     checkChapterCompletion();
     if (bmEndToEndActive) checkEndToEnd();
+    // The manga's last page on screen (alone or in a pair): its last chapter
+    // is finished, as long strip does on reaching the bottom.
+    const lastIdx = spManifest.length - 1;
+    if (!finalChapterCompletionSaved && lastIdx >= 0 && chapterList.length
+        && spManifest[lastIdx].chapterId === chapterList[chapterList.length - 1].id
+        && spPagesAt(spPosOf(spCurrentIdx)).includes(lastIdx)) {
+      finalChapterCompletionSaved = true;
+      saveReadingProgress(chapterList[chapterList.length - 1].id);
+    }
   };
 
 
