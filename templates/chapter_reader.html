@@ -713,6 +713,34 @@
     }
     #singlePageView.active { display: block; }
 
+    /* Two-page mode's page turn (see TWO-PAGE FLIP): drawn over the strip
+       while a page turns, then removed. Every part is absolutely placed in
+       screen coordinates. */
+    .sp-flip {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      perspective: 2200px;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .sp-flip-part, .sp-flip-face {
+      position: absolute;
+      overflow: hidden;
+    }
+    .sp-flip-part img, .sp-flip-face img { position: absolute; top: 0; height: 100%; display: block; }
+    .sp-flip-white { background: #fff; }
+    .sp-flip-leaf {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      transform-style: preserve-3d;
+    }
+    .sp-flip-face { inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+    .sp-flip-face.back { transform: rotateY(180deg); }
+    /* The turning page darkens as it rises (a little light, not a curl). */
+    .sp-flip-shade { position: absolute; inset: 0; pointer-events: none; background: #000; opacity: 0; }
+
     /*
      * #spStrip is single-page mode's own horizontal conveyor -- same
      * pattern as #reader's vertical one (spacer-flanked sliding window of
@@ -5407,7 +5435,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // frame by frame on the tablet 2026-09-24, BLE arrows and swipes alike).
   // The final write of the animation settles as usual.
   function _spScriptMoving() {
-    return _spFlipAnimId !== null || _spSwipe !== null;
+    return _spFlipAnimId !== null || _spSwipe !== null || _spFlip !== null || _spFlipDrag !== null;
   }
 
   function _spSettleCurrentIdx() {
@@ -5808,6 +5836,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       // A swipe the first finger already started springs back to the page.
       if (_spSwipe && _spSwipe.moved) _spAnimateScrollTo(spPosOf(spCurrentIdx) * viewW, 0);
       _spSwipe = null;
+      _spFlipDragCancel();
       _spSuppressClick = true;
       _spPinchStart();
     } else if (_spPointers.size === 1 && spZoomed()) {
@@ -5878,11 +5907,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     _spSuppressClick = false;
     if (readerSettings.mode !== 'single-page' || e.pointerType === 'mouse' || !e.isPrimary) return;
     if (spZoomed()) return;  // one finger pans the zoomed page instead (see PINCH ZOOM)
+    if (spIsBook()) {  // two-page mode turns the page over (see TWO-PAGE FLIP)
+      if (!spPicking()) _spFlipDrag = { id: e.pointerId, x0: e.clientX, lastX: e.clientX, lastT: e.timeStamp, v: 0, f: null };
+      return;
+    }
     _spSwipe = { id: e.pointerId, x0: e.clientX, left0: spStrip.scrollLeft,
                  lastX: e.clientX, lastT: e.timeStamp, v: 0, moved: false };
   });
 
   spStrip.addEventListener('pointermove', (e) => {
+    if (_spFlipDrag && e.pointerId === _spFlipDrag.id) { _spFlipDragMove(e); return; }
     const s = _spSwipe;
     if (!s || e.pointerId !== s.id) return;
     const dx = e.clientX - s.x0;
@@ -5905,6 +5939,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   });
 
   function _spEndSwipe(e) {
+    if (_spFlipDrag && e.pointerId === _spFlipDrag.id) { _spFlipDragEnd(e); return; }
     const s = _spSwipe;
     if (!s || e.pointerId !== s.id) return;
     _spSwipe = null;
@@ -5929,8 +5964,220 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   spStrip.addEventListener('pointerup', _spEndSwipe);
   spStrip.addEventListener('pointercancel', _spEndSwipe);
 
+  // ── TWO-PAGE FLIP (2026-10-07) ──
+  // In two-page mode a turn is a page turning over, not a slide: a stiff
+  // page (the "leaf") rotates in 3D around the spine, its back showing the
+  // next pair's facing page, while the page it uncovers is the next pair's
+  // other one. Drawn on an overlay (.sp-flip) built from the two views'
+  // slots, measured on screen; at the end the strip jumps to the new view
+  // without sliding and the overlay goes. A finger drag holds the leaf's
+  // edge under the finger; taps, keys and the BLE scroller play the turn
+  // in SP_FLIP_MS. (User's call: this stiff turn first; a real curl only if
+  // it's not good enough.)
+  const SP_FLIP_MS = 420;
+  let _spFlip = null;      // the turn on screen: see _spFlipStart
+  let _spFlipDrag = null;  // a finger turning the page
+
+  // The view at strip position p split at its spine, in coordinates of
+  // #singlePageView: {left, right, spine}, each part {x, y, w, h} plus what
+  // it shows (url, or white; nothing = black). A pair splits between its
+  // pages; a lone page (spread) down its middle.
+  function _spViewParts(p) {
+    const si = spAssignedSlot[p];
+    const slot = si == null || si === -1 ? null : spSlotPool[si];
+    if (!slot) return null;
+    const sr = slot.el.getBoundingClientRect();
+    const vr = singlePageView.getBoundingClientRect();
+    const box = (el) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.left - sr.left, y: r.top - vr.top, w: r.width, h: r.height };
+    };
+    const look = (cell) => cell._spIdx != null
+      ? { url: spManifest[cell._spIdx].url || '' }
+      : { white: cell.classList.contains('sp-blank-white') };
+    const cells = [...slot.el.children];
+    if (cells.length === 2) {
+      const a = box(cells[0]), b = box(cells[1]);
+      return { left: { ...a, ...look(cells[0]) }, right: { ...b, ...look(cells[1]) }, spine: a.x + a.w };
+    }
+    const cell = cells[0];
+    if (!cell) return null;
+    const shown = cell.classList.contains('sp-cb-ready') ? cell.querySelector('.sp-canvas') : cell.querySelector('img');
+    const b = box(shown || cell), half = b.w / 2, l = look(cell);
+    return {
+      left:  { x: b.x, y: b.y, w: half, h: b.h, ...l, crop: 'left', fullW: b.w },
+      right: { x: b.x + half, y: b.y, w: half, h: b.h, ...l, crop: 'right', fullW: b.w },
+      spine: b.x + half,
+    };
+  }
+
+  // One part as an element, placed x0 px left of its screen position.
+  function _spFlipPartEl(part, x0 = 0) {
+    const el = document.createElement('div');
+    el.className = 'sp-flip-part';
+    el.style.left = (part.x - x0) + 'px';
+    el.style.top = part.y + 'px';
+    el.style.width = part.w + 'px';
+    el.style.height = part.h + 'px';
+    if (part.white) el.classList.add('sp-flip-white');
+    else if (part.url) {
+      const img = document.createElement('img');
+      img.src = part.url;
+      img.draggable = false;
+      img.style.width = part.crop ? part.fullW + 'px' : '100%';
+      img.style.left = part.crop === 'right' ? -part.w + 'px' : '0';
+      el.appendChild(img);
+    }
+    return el;
+  }
+
+  // Builds the turn from the view on screen to page idx's view (the next or
+  // previous one on the strip), leaf flat. null when a view isn't in the
+  // slot window.
+  function _spFlipStart(idx) {
+    const curP = spPosOf(spCurrentIdx), tgtP = spPosOf(idx);
+    const cur = _spViewParts(curP), tgt = _spViewParts(tgtP);
+    if (!cur || !tgt || curP === tgtP) return null;
+    const toLeft = tgtP > curP;  // the right-hand page turns over to the left
+    const spine = cur.spine;
+    const front = toLeft ? cur.right : cur.left;
+    const back  = toLeft ? tgt.left : tgt.right;
+    // The leaf reaches as far as either of its faces does from the spine.
+    const W = Math.max(1, toLeft
+      ? Math.max(front.x + front.w - spine, spine - back.x)
+      : Math.max(spine - front.x, back.x + back.w - spine));
+    const leafLeft = toLeft ? spine : spine - W;
+    const el = document.createElement('div');
+    el.className = 'sp-flip';
+    el.style.background = '#000';
+    // Underneath: the page that stays, and the one the leaf uncovers.
+    el.appendChild(_spFlipPartEl(toLeft ? cur.left : tgt.left));
+    el.appendChild(_spFlipPartEl(toLeft ? tgt.right : cur.right));
+    const leaf = document.createElement('div');
+    leaf.className = 'sp-flip-leaf';
+    leaf.style.left = leafLeft + 'px';
+    leaf.style.width = W + 'px';
+    leaf.style.transformOrigin = toLeft ? 'left center' : 'right center';
+    const faceF = document.createElement('div');
+    faceF.className = 'sp-flip-face';
+    faceF.appendChild(_spFlipPartEl(front, leafLeft));
+    const faceB = document.createElement('div');
+    faceB.className = 'sp-flip-face back';
+    // Turned over, the back face's x runs from spine - W (or spine) on screen.
+    faceB.appendChild(_spFlipPartEl(back, toLeft ? spine - W : spine));
+    const shades = [faceF, faceB].map(face => {
+      const s = document.createElement('div');
+      s.className = 'sp-flip-shade';
+      face.appendChild(s);
+      return s;
+    });
+    leaf.appendChild(faceF);
+    leaf.appendChild(faceB);
+    el.appendChild(leaf);
+    singlePageView.appendChild(el);
+    const f = { el, leaf, shades, toLeft, idx, angle: 0, edge: toLeft ? front.x + front.w - spine : spine - front.x, anim: null };
+    _spFlipSet(f, 0);
+    return f;
+  }
+
+  function _spFlipSet(f, angle) {
+    f.angle = Math.max(0, Math.min(180, angle));
+    f.leaf.style.transform = `rotateY(${f.toLeft ? -f.angle : f.angle}deg)`;
+    const shade = 0.35 * Math.sin(f.angle * Math.PI / 180);
+    for (const s of f.shades) s.style.opacity = String(shade);
+  }
+
+  // Eases the leaf to endAngle (180 = turned, 0 = back where it was).
+  function _spFlipAnimate(f, endAngle, ms, done) {
+    if (f.anim) cancelAnimationFrame(f.anim);
+    const a0 = f.angle, t0 = performance.now();
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / ms);
+      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;  // ease in-out
+      _spFlipSet(f, a0 + (endAngle - a0) * e);
+      if (t < 1) f.anim = requestAnimationFrame(step);
+      else { f.anim = null; done(); }
+    };
+    f.anim = requestAnimationFrame(step);
+  }
+
+  // Ends a turn: turned = land on the new view (the strip jumps there under
+  // the overlay, which goes two frames later, once the strip is drawn).
+  function _spFlipFinish(f, turned) {
+    if (f.anim) { cancelAnimationFrame(f.anim); f.anim = null; }
+    if (_spFlip === f) _spFlip = null;
+    if (turned) spGotoIdx(f.idx, null, { instant: true });
+    requestAnimationFrame(() => requestAnimationFrame(() => f.el.remove()));
+  }
+
+  // A tap/key/BLE turn to page idx's view.
+  function spFlipTurn(idx) {
+    if (_spFlipDrag) return;  // a finger is turning a page
+    if (_spFlip) _spFlipFinish(_spFlip, true);  // a quick second turn: land the first now
+    spZoomReset();
+    const f = _spFlipStart(idx);
+    if (!f) { spGotoIdx(idx); return; }
+    _spFlip = f;
+    _spFlipAnimate(f, 180, SP_FLIP_MS, () => _spFlipFinish(f, true));
+  }
+
+  // Finger turns (from the swipe handlers in two-page mode).
+  function _spFlipDragMove(e) {
+    const d = _spFlipDrag;
+    const dx = e.clientX - d.x0;
+    if (!d.f) {
+      if (Math.abs(dx) <= SP_DRAG_MOVE_THRESHOLD || d.none) return;
+      const curP = spPosOf(spCurrentIdx);
+      const tgtP = curP + (dx < 0 ? 1 : -1);  // dragging left turns the right-hand page
+      if (tgtP < 0 || tgtP >= spPosCount()) { d.none = true; return; }
+      if (_spFlip) _spFlipFinish(_spFlip, true);
+      d.f = _spFlipStart(spIdxAt(tgtP));
+      if (!d.f) { d.none = true; return; }
+      _spFlip = d.f;
+      d.x0 = e.clientX;
+      try { spStrip.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+    // The leaf's free edge stays under the finger: cos(angle) = where the
+    // edge is now / where it started, measured from the spine.
+    const moved = d.f.toLeft ? -(e.clientX - d.x0) : (e.clientX - d.x0);
+    const cos = Math.max(-1, Math.min(1, (d.f.edge - moved) / d.f.edge));
+    _spFlipSet(d.f, Math.acos(cos) * 180 / Math.PI);
+    const dt = e.timeStamp - d.lastT;
+    if (dt > 0) d.v = 0.6 * ((e.clientX - d.lastX) / dt) + 0.4 * d.v;
+    d.lastX = e.clientX;
+    d.lastT = e.timeStamp;
+  }
+
+  function _spFlipDragEnd(e) {
+    const d = _spFlipDrag;
+    _spFlipDrag = null;
+    if (!d.f) {
+      if (d.none) {
+        _spSuppressClick = true;
+        if (spPosOfView(spPosOf(spCurrentIdx) + (e.clientX < d.x0 ? 1 : -1)) >= spPosCount()) showLastPagePopup();
+      }
+      return;
+    }
+    _spSuppressClick = true;
+    const f = d.f;
+    // A flick in the turning direction finishes the turn even if short.
+    const towards = f.toLeft ? -d.v : d.v;
+    const flick = e.timeStamp - d.lastT < 100 && towards >= SP_SWIPE_MIN_VELOCITY;
+    const turned = f.angle > 90 || flick;
+    const left = turned ? 180 - f.angle : f.angle;
+    _spFlipAnimate(f, turned ? 180 : 0, Math.max(120, SP_FLIP_MS * left / 180), () => _spFlipFinish(f, turned));
+  }
+
+  // A second finger (pinch) during a finger turn puts the page back.
+  function _spFlipDragCancel() {
+    const d = _spFlipDrag;
+    _spFlipDrag = null;
+    if (d && d.f) _spFlipAnimate(d.f, 0, 120, () => _spFlipFinish(d.f, false));
+  }
+
   // startVelocity: the strip's speed at the end of a finger swipe, see _spAnimateScrollTo.
-  function spGotoIdx(idx, startVelocity = null) {
+  // opts.instant: jump straight there (the end of a two-page flip).
+  function spGotoIdx(idx, startVelocity = null, opts = null) {
     // spManifest is the whole manga now (see its own declaration comment),
     // so these are only the true start/end of the manga, never a chapter
     // seam -- an ordinary chapter-to-chapter flip falls straight through to
@@ -5976,7 +6223,18 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       if (targetR < spWindowLo || targetR > spWindowHi) {
         _spShiftWindow(targetR - Math.floor((spWindowLo + spWindowHi) / 2));
       }
-      _spAnimateScrollTo(targetR * viewW, startVelocity);
+      if (opts && opts.instant) {
+        if (_spFlipAnimId !== null) { cancelAnimationFrame(_spFlipAnimId); _spFlipAnimId = null; }
+        spStrip.style.scrollSnapType = '';
+        spStrip.scrollLeft = targetR * viewW;
+        setTimeout(() => {
+          if (_spScriptMoving()) return;
+          spRecenterWindow();
+          _spRunAfterTurn();
+        }, 0);
+      } else {
+        _spAnimateScrollTo(targetR * viewW, startVelocity);
+      }
     }
     spMarkFarSlots();
     _spLoadPos(targetR);
@@ -6005,14 +6263,18 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const c = spViews[u] && spViews[u].find(x => x.idx != null);
     return c ? c.idx : null;
   }
+  // A turn while a page is still turning (quick taps/keys) counts from where
+  // that one lands, so it's landed first.
   function spForward() {
+    if (_spFlip && !_spFlipDrag) _spFlipFinish(_spFlip, true);
     const u = spViewOfIdx[spCurrentIdx] + 1;
     if (u >= spViews.length) { showLastPagePopup(); return; }
-    spGotoIdx(_spViewFirstIdx(u));
+    spIsBook() ? spFlipTurn(_spViewFirstIdx(u)) : spGotoIdx(_spViewFirstIdx(u));
   }
   function spBackward() {
+    if (_spFlip && !_spFlipDrag) _spFlipFinish(_spFlip, true);
     const u = spViewOfIdx[spCurrentIdx] - 1;
-    if (u >= 0) spGotoIdx(_spViewFirstIdx(u));
+    if (u >= 0) spIsBook() ? spFlipTurn(_spViewFirstIdx(u)) : spGotoIdx(_spViewFirstIdx(u));
   }
   function spNext() { readerSettings.direction === 'ltr' ? spForward()  : spBackward(); }
   function spPrev() { readerSettings.direction === 'ltr' ? spBackward() : spForward();  }
