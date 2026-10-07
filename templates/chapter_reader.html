@@ -722,7 +722,7 @@
       overscroll-behavior-x: contain;
       /* Horizontal finger drags are driven by the script (see "SINGLE-PAGE
          SWIPE" in the JS), never by the browser's own compositor scroll. */
-      touch-action: pan-y pinch-zoom;
+      touch-action: none;  /* pinch zoom too: see SINGLE-PAGE PINCH ZOOM */
       -webkit-overflow-scrolling: touch;
       overflow-anchor: none;
       scrollbar-width: none;
@@ -767,6 +767,8 @@
     }
     .sp-slot.sp-cb-ready .sp-canvas { display: block; }
     .sp-slot.sp-cb-ready img { display: none; }
+    /* The page being pinch-zoomed paints over its neighbours. */
+    .sp-slot.sp-zoomed { position: relative; z-index: 1; transform-origin: 0 0; }
     /* Pages more than one away are loaded but not drawn: see spMarkFarSlots. */
     .sp-slot.sp-far img { visibility: hidden; }
 
@@ -1851,7 +1853,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // All geometry is derived from dims.json which the server already has —
   // zero extra network requests needed to position anything.
 
-  const viewW        = window.innerWidth;
+  let   viewW        = window.innerWidth;  // follows the window: see SINGLE-PAGE RESIZE
   const manifest     = [];
   const chapterStart = {};
   let   cursorY      = 0;
@@ -4738,6 +4740,25 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   spStrip.style.setProperty('--sp-slot-w', viewW + 'px');
   spStrip.style.setProperty('--sp-gap', SP_GAP + 'px');
 
+  // ── SINGLE-PAGE RESIZE (2026-10-07) ──
+  // Slots are exactly one viewport wide, so a rotation (or window resize)
+  // resizes them, the spacers, and puts the strip back on the current page.
+  // Before this a rotation in single-page mode left every slot at the old
+  // width. Debounced like the long-strip listener.
+  let _spResizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(_spResizeTimer);
+    _spResizeTimer = setTimeout(() => {
+      if (window.innerWidth === viewW) return;
+      viewW = window.innerWidth;
+      spStrip.style.setProperty('--sp-slot-w', viewW + 'px');
+      spZoomReset();
+      if (spWindowHi === -1) return;
+      _spSyncSpacers();
+      if (readerSettings.mode === 'single-page') spStrip.scrollLeft = rOf(spCurrentIdx) * viewW;
+    }, 200);
+  });
+
   // Permanent fixtures flanking the materialized slot pool -- mirrors
   // #reader-inner's topSpacer/bottomSpacer. Their widths keep spStrip's
   // real scrollWidth equal to spManifest.length * viewW at all times,
@@ -5320,6 +5341,105 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     else _spFlipAnimId = requestAnimationFrame(step);
   }
 
+  // ── SINGLE-PAGE PINCH ZOOM (2026-10-07) ──
+  // Done here, not by the browser: an app WebView usually has its own zoom
+  // switched off, and the browser's page zoom fought the swipe code. Two
+  // fingers zoom the current page around their midpoint, one finger pans
+  // while zoomed, a double tap resets. While zoomed, swipes and tap zones
+  // don't turn pages; keys/BLE do, and any page turn resets the zoom.
+  const SP_ZOOM_MAX = 5;
+  const _spPointers = new Map();  // touch/pen pointerId -> {x, y}
+  const _spZoom = { s: 1, tx: 0, ty: 0, el: null };
+  let _spPinch = null;
+  let _spPan = null;
+  let _spLastTap = { t: 0, x: 0, y: 0 };
+
+  function spZoomed() { return _spZoom.s > 1.01; }
+
+  function _spCurrentSlotEl() {
+    const k = spAssignedSlot[rOf(spCurrentIdx)];
+    return k >= 0 && spSlotPool[k] ? spSlotPool[k].el : null;
+  }
+
+  function _spApplyZoom() {
+    const z = _spZoom;
+    if (!z.el) return;
+    const w = viewW, h = spStrip.clientHeight;
+    z.tx = Math.min(0, Math.max(w - w * z.s, z.tx));
+    z.ty = Math.min(0, Math.max(h - h * z.s, z.ty));
+    z.el.style.transform = `translate(${z.tx}px, ${z.ty}px) scale(${z.s})`;
+    z.el.classList.add('sp-zoomed');
+  }
+
+  function spZoomReset() {
+    const z = _spZoom;
+    if (z.el) { z.el.style.transform = ''; z.el.classList.remove('sp-zoomed'); }
+    z.s = 1; z.tx = 0; z.ty = 0; z.el = null;
+    _spPinch = null; _spPan = null;
+  }
+
+  function _spPinchStart() {
+    const [a, b] = [..._spPointers.values()];
+    if (!_spZoom.el) _spZoom.el = _spCurrentSlotEl();
+    if (!_spZoom.el) return;
+    _spPan = null;
+    _spPinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, s0: _spZoom.s,
+                 mx0: (a.x + b.x) / 2, my0: (a.y + b.y) / 2, tx0: _spZoom.tx, ty0: _spZoom.ty };
+  }
+
+  spStrip.addEventListener('pointerdown', (e) => {
+    if (readerSettings.mode !== 'single-page' || e.pointerType === 'mouse') return;
+    _spPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (_spPointers.size === 2) {
+      // A swipe the first finger already started springs back to the page.
+      if (_spSwipe && _spSwipe.moved) _spAnimateScrollTo(rOf(spCurrentIdx) * viewW, 0);
+      _spSwipe = null;
+      _spSuppressClick = true;
+      _spPinchStart();
+    } else if (_spPointers.size === 1 && spZoomed()) {
+      _spPan = { id: e.pointerId, x0: e.clientX, y0: e.clientY, tx0: _spZoom.tx, ty0: _spZoom.ty, moved: false };
+    }
+  });
+
+  spStrip.addEventListener('pointermove', (e) => {
+    if (!_spPointers.has(e.pointerId)) return;
+    _spPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (_spPinch && _spPointers.size >= 2) {
+      const [a, b] = [..._spPointers.values()];
+      const p = _spPinch;
+      const s = Math.max(1, Math.min(SP_ZOOM_MAX, p.s0 * Math.hypot(a.x - b.x, a.y - b.y) / p.d0));
+      // Keep the page point that was under the fingers' midpoint under it.
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      _spZoom.tx = mx - (p.mx0 - p.tx0) / p.s0 * s;
+      _spZoom.ty = my - (p.my0 - p.ty0) / p.s0 * s;
+      _spZoom.s = s;
+      _spApplyZoom();
+    } else if (_spPan && e.pointerId === _spPan.id) {
+      const dx = e.clientX - _spPan.x0, dy = e.clientY - _spPan.y0;
+      if (!_spPan.moved && Math.hypot(dx, dy) > SP_DRAG_MOVE_THRESHOLD) _spPan.moved = true;
+      if (_spPan.moved) {
+        _spSuppressClick = true;
+        _spZoom.tx = _spPan.tx0 + dx;
+        _spZoom.ty = _spPan.ty0 + dy;
+        _spApplyZoom();
+      }
+    }
+  });
+
+  function _spZoomPointerEnd(e) {
+    if (!_spPointers.delete(e.pointerId)) return;
+    if (_spPinch && _spPointers.size < 2) {
+      _spPinch = null;
+      if (_spZoom.s < 1.05) { spZoomReset(); return; }
+      // The finger still down carries on as a pan.
+      const [rest] = [..._spPointers.entries()];
+      if (rest) _spPan = { id: rest[0], x0: rest[1].x, y0: rest[1].y, tx0: _spZoom.tx, ty0: _spZoom.ty, moved: true };
+    }
+    if (_spPan && e.pointerId === _spPan.id) _spPan = null;
+  }
+  spStrip.addEventListener('pointerup', _spZoomPointerEnd);
+  spStrip.addEventListener('pointercancel', _spZoomPointerEnd);
+
   // ── SINGLE-PAGE SWIPE, DRIVEN BY THIS SCRIPT (2026-09-23) ──
   // A native finger swipe is scrolled by the browser's compositor, which
   // never waits for a page's tiles to be painted -- whatever isn't ready is
@@ -5343,6 +5463,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // leftover flag swallowed the next real tap).
     _spSuppressClick = false;
     if (readerSettings.mode !== 'single-page' || e.pointerType === 'mouse' || !e.isPrimary) return;
+    if (spZoomed()) return;  // one finger pans the zoomed page instead (see PINCH ZOOM)
     _spSwipe = { id: e.pointerId, x0: e.clientX, left0: spStrip.scrollLeft,
                  lastX: e.clientX, lastT: e.timeStamp, v: 0, moved: false };
   });
@@ -5402,6 +5523,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // the normal path below like any other page turn.
     if (idx < 0) return;
     if (idx >= spManifest.length) { showLastPagePopup(); return; }
+    spZoomReset();
 
     dbg(`[sp] go to ${dbgPage(idx)} from ${dbgPage(spCurrentIdx)}, strip at ${Math.round(spStrip.scrollLeft)}px`);
     _spMeasureVelocity(idx);
@@ -5487,6 +5609,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (_spSuppressClick) {  // the end of a script-driven swipe, not a tap
       _spSuppressClick = false;
       e.stopPropagation();
+      return;
+    }
+    if (spZoomed()) {  // zoomed: taps don't turn pages; a double tap resets the zoom
+      e.stopPropagation();
+      const t = e.timeStamp;
+      if (t - _spLastTap.t < 350 && Math.hypot(e.clientX - _spLastTap.x, e.clientY - _spLastTap.y) < 40) {
+        spZoomReset();
+        _spLastTap.t = 0;
+      } else {
+        _spLastTap = { t, x: e.clientX, y: e.clientY };
+      }
       return;
     }
     // There's a generic document-level click handler (search barVisible)
@@ -5652,6 +5785,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   function activateLongStripMode() {
     spCbUpdate();  // not in single-page mode anymore: frees every canvas page
+    spZoomReset();
     reader.style.display = '';
     singlePageView.classList.remove('active');
     // Restore virtualY to the current single page position
