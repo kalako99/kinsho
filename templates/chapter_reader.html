@@ -2086,6 +2086,12 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     if (document.fullscreenElement && !_rotationRelockTimer) screenRotationLock();
   });
   window.addEventListener('pagehide', () => { clearTimeout(_rotationRelockTimer); screenRotationUnlock(); });
+  // Hidden (the app in the background, another TMTM tab): the rest of the app
+  // rotates freely; back in the reader, it locks again.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearTimeout(_rotationRelockTimer); _rotationRelockTimer = null; screenRotationUnlock(); }
+    else screenRotationLock();
+  });
   // Coming back to the reader from another page (back/forward cache).
   window.addEventListener('pageshow', (e) => { if (e.persisted) screenRotationLock(); });
 
@@ -5224,19 +5230,18 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   // How many pages' worth is on screen for reading time: 2 for a pair or a
   // joined spread in two-page mode, otherwise 1. Safe before the reader has
   // finished setting up (the idle check can run that early).
-  function spScreenPageCount() {
+  function spScreenPageCount(idx = spCurrentIdx) {
     try {
       if (!spIsBook() || !spViews.length) return 1;
-      const pages = spPagesAt(spPosOf(spCurrentIdx));
+      const pages = spPagesAt(spPosOf(idx));
       if (pages.length >= 2) return 2;
-      const u = spViewOfIdx[spCurrentIdx];
-      let a = spCurrentIdx, b = spCurrentIdx + 1;
-      const cid = spManifest[spCurrentIdx].chapterId;
+      let a = idx, b = idx + 1;
+      const cid = spManifest[idx].chapterId;
       while (a > 0 && spManifest[a - 1].chapterId === cid) a--;
       while (b < spManifest.length && spManifest[b].chapterId === cid) b++;
-      const nat = cbNaturalDims(spManifest[spCurrentIdx]);
+      const nat = cbNaturalDims(spManifest[idx]);
       const commonW = _spCommonWidth(a, b);
-      return u != null && nat && commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR ? 2 : 1;
+      return nat && commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR ? 2 : 1;
     } catch (e) {
       return 1;
     }
@@ -7385,7 +7390,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     ptIdx = idx;
     // This session's page average (for idleLimitMs): pages actually stayed
     // on, not passed while scrolling (under 1s) or paused on.
-    if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages += shares.length; }
+    if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages += spScreenPageCount(from); }
     ptVisitSecs = 0;
     ptVisitPaused = false;
     if (idx > from && idx - from <= PT_JUMP) {

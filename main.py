@@ -7387,6 +7387,20 @@ READ_TIME_MIN_COVERAGE   = 0.9
 READ_TIME_WARMUP_PAGES   = 50
 READ_TIME_FAST_FRACTION  = 0.5
 READ_TIME_MAX_FAST_SHARE = 0.3
+# A two-page spread joined into one image counts as two pages (user's rule,
+# 2026-10-07): same test as the reader's two-page mode, at least this many
+# times the chapter/volume's most common page width.
+SPREAD_WIDTH_FACTOR      = 1.75
+
+def _page_weights(pages: list) -> list:
+    """1 per page, 2 for a joined spread."""
+    widths = [round((p.get("w") or 0) / 10) * 10 for p in pages]
+    counts = {}
+    for w in widths:
+        if w:
+            counts[w] = counts.get(w, 0) + 1
+    common = max(counts, key=counts.get) if counts else 0
+    return [2 if common and (p.get("w") or 0) >= common * SPREAD_WIDTH_FACTOR else 1 for p in pages]
 
 def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, completed_ids: list) -> dict:
     """Extra fields for the detail pages: the average reading time of a
@@ -7467,19 +7481,21 @@ async def post_chapter_time(request: Request):
     page_avg = page_time["total"] / page_time["pages"] if page_time["pages"] else None
     judged = [i for i in timed if i not in paused]
     judged_times = [max(0.0, float(times[i])) for i in judged]
+    weights = _page_weights(unit.get("pages") or [])  # a joined spread = 2 pages
+    judged_weight = sum(weights[i] for i in judged)
     if page_time["pages"] >= READ_TIME_WARMUP_PAGES and page_avg and judged:
-        fast = sum(1 for t in judged_times if t < READ_TIME_FAST_FRACTION * page_avg)
+        fast = sum(1 for i, t in zip(judged, judged_times) if t < READ_TIME_FAST_FRACTION * page_avg * weights[i])
         if fast > READ_TIME_MAX_FAST_SHARE * len(judged):
             return JSONResponse({"ok": False, "reason": "skimmed", "fast": fast, "judged": len(judged)})
     # Paused and untimed pages count as the page average (this chapter's own
     # mean during the warm-up, when there isn't one yet).
-    fill = page_avg if page_avg else (sum(judged_times) / len(judged_times) if judged_times else 0.0)
-    chapter_secs = sum(judged_times) + (n - len(judged)) * fill
+    fill = page_avg if page_avg else (sum(judged_times) / judged_weight if judged_weight else 0.0)
+    chapter_secs = sum(judged_times) + sum(weights[i] for i in range(n) if i not in judged) * fill
     avg_times = entry.setdefault("avg_times", {})
     prev = avg_times.get(unit_id)
     avg_times[unit_id] = chapter_secs if prev is None else (prev + chapter_secs) / 2
     page_time["total"] += sum(judged_times)
-    page_time["pages"] += len(judged)
+    page_time["pages"] += judged_weight
     if report_id:
         entry["time_reports"] = (entry.get("time_reports", []) + [report_id])[-50:]
     auth.save_user_data(username, user_data)
