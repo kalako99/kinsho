@@ -1031,6 +1031,34 @@
       transition: opacity 0.3s;
     }
     .bm-toast.show { opacity: 1; }
+    /* Two-page mode: "tap the page where the bookmark starts/ends". */
+    .bm-pick-banner {
+      position: fixed;
+      top: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 500;
+      display: none;
+      align-items: center;
+      gap: 14px;
+      background: rgba(18,18,18,0.95);
+      border: 1px solid var(--theme-primary, #e94560);
+      border-radius: 10px;
+      padding: 10px 14px 10px 18px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.85rem;
+      color: #f0f0f0;
+    }
+    .bm-pick-banner.show { display: flex; }
+    .bm-pick-banner button {
+      background: none;
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 7px;
+      color: #ddd;
+      padding: 4px 10px;
+      cursor: pointer;
+      font: inherit;
+    }
 
     /* ── LAST PAGE POPUP ── */
     .last-page-popup {
@@ -1479,6 +1507,7 @@
 
 <!-- Bookmark toast -->
 <div class="bm-toast" id="bmToast"></div>
+<div class="bm-pick-banner" id="bmPickBanner"><span id="bmPickText"></span><button type="button" id="bmPickCancel">Cancel</button></div>
 
 <div class="last-page-popup" id="lastPagePopup">This is the last page</div>
 
@@ -5043,6 +5072,28 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return [...head, ...views, ...tail];
   }
 
+  // The bookmark being read end to end, as [first page, last page] indexes
+  // (see NAVIGATE TO BOOKMARK). A pair reaching across either end is split,
+  // the page outside the bookmark getting a white page beside it, so the
+  // bookmark starts and ends on its own pages and every other pair stays.
+  let spBmRange = null;
+  function _spSplitAtBookmark(views) {
+    if (!spBmRange) return views;
+    const [s, e] = spBmRange;
+    const out = [];
+    for (const v of views) {
+      const real = v.filter(c => c.idx != null);
+      const a = real[0], b = real[1];
+      if (v.length === 2 && b && ((a.idx < s && s <= b.idx) || (a.idx <= e && e < b.idx))) {
+        out.push([a, { blank: 'white', src: 'bookmark' }]);
+        out.push([{ blank: 'white', src: 'bookmark' }, b]);
+      } else {
+        out.push(v);
+      }
+    }
+    return out;
+  }
+
   function spBuildViews() {
     const n = spManifest.length;
     _spCommonWidthCache.clear();
@@ -5056,7 +5107,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         const cid = spManifest[a].chapterId;
         let b = a;
         while (b < n && spManifest[b].chapterId === cid) b++;
-        for (const v of spBookUnitViews(cid, a, b)) {
+        for (const v of _spSplitAtBookmark(spBookUnitViews(cid, a, b))) {
           for (const c of v) if (c.idx != null) spViewOfIdx[c.idx] = spViews.length;
           spViews.push(v);
         }
@@ -6053,6 +6104,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       spSelectStep(e.key === 'ArrowRight' ? 1 : -1);
       return;
     }
+    if (bmPicking && (e.key === 'Enter' || e.key === 'Escape')) {
+      e.preventDefault();
+      e.key === 'Enter' ? bmPickChosen() : bmEndPick();
+      return;
+    }
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
       e.preventDefault();
       readerSettings.direction === 'ltr' ? spNext() : spPrev();
@@ -6135,11 +6191,11 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     pairShiftValue.textContent = shift > 0 ? `+${shift}` : shift < 0 ? `−${-shift}` : '0';
     document.getElementById('pairBlankBefore').disabled = !(spSel && spSel.idx != null);
     document.getElementById('pairBlankAfter').disabled  = !(spSel && spSel.idx != null);
-    document.getElementById('pairBlankRemove').disabled = !(spSel && spSel.blank && spSel.blank.src !== 'auto');
+    document.getElementById('pairBlankRemove').disabled = !(spSel && spSel.blank && (spSel.blank.src === 'manual' || spSel.blank.src === 'shift'));
     const saving = _spCanSavePairing === false
       ? 'Changes last until you close the reader (no permission to save them for everyone).'
       : 'Changes are saved for everyone.';
-    const auto = spSel && spSel.blank && spSel.blank.src === 'auto'
+    const auto = spSel && spSel.blank && (spSel.blank.src === 'auto' || spSel.blank.src === 'bookmark')
       ? ' This blank page is placed automatically: use the shift buttons to move it.' : '';
     pairNote.textContent = `Tap a page to choose it. ${saving}${auto}`;
   }
@@ -7422,10 +7478,14 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   bmAddBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     closeBookmarkPanel();
+    if (spIsBook()) { bmStartPick('add'); return; }
+    openAddBookmarkModal(getCurrentPosition());
+  });
+
+  function openAddBookmarkModal(pos) {
     openModal('Add Bookmark', (body) => {
       const hint = document.createElement('div');
       hint.className = 'bm-modal-hint';
-      const pos = getCurrentPosition();
       hint.textContent = `Position: ${bmPositionLabel(pos)}`;
       body.appendChild(hint);
 
@@ -7447,7 +7507,6 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       saveBtn.addEventListener('click', () => {
         const input = bmModalBody.querySelector('.bm-modal-input');
         let name = input ? input.value.trim() : '';
-        const pos = getCurrentPosition();
 
         if (!name) {
           // Auto-name: "Bookmark N"
@@ -7473,18 +7532,53 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       actions.appendChild(cancelBtn);
       actions.appendChild(saveBtn);
     });
-  });
+  }
 
   // ── CLOSE BOOKMARK ──
   bmCloseBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     closeBookmarkPanel();
-    showCloseBookmarkModal();
+    if (spIsBook()) { bmStartPick('close'); return; }
+    showCloseBookmarkModal(getCurrentPosition());
   });
 
-  function showCloseBookmarkModal() {
+  // ── CHOOSING THE BOOKMARK'S PAGE (two-page mode, 2026-10-07) ──
+  // Two pages are on screen, so Add/Close Bookmark first asks which one: a
+  // tap on it (or the arrow keys + Enter) chooses it, then the usual
+  // popup opens for that page.
+  const bmPickBanner = document.getElementById('bmPickBanner');
+  function bmStartPick(kind) {
+    bmPicking = { kind };
+    document.getElementById('bmPickText').textContent = kind === 'add'
+      ? 'Tap the page where the bookmark starts' : 'Tap the page where the bookmark ends';
+    bmPickBanner.classList.add('show');
+    spSelectCell(null);
+    spSelectDefault();
+  }
+  function bmEndPick() {
+    bmPicking = null;
+    bmPickBanner.classList.remove('show');
+    if (!settingsPanel.classList.contains('open')) spSelectCell(null);
+  }
+  function bmPickChosen() {
+    if (!bmPicking || !spSel || spSel.idx == null) return;  // a blank page: keep choosing
+    const kind = bmPicking.kind;
+    const pos = bmPositionOfIdx(spSel.idx);
+    bmEndPick();
+    if (kind === 'add') openAddBookmarkModal(pos);
+    else showCloseBookmarkModal(pos);
+  }
+  document.getElementById('bmPickCancel').addEventListener('click', (e) => {
+    e.stopPropagation();
+    bmEndPick();
+  });
+  function bmPositionOfIdx(idx) {
+    const e = spManifest[idx];
+    return { chapterId: e.chapterId, chapterIdx: chapterList.findIndex(c => c.id === e.chapterId), pageIdx: e.localIdx };
+  }
+
+  function showCloseBookmarkModal(pos) {
     openModal('Close Bookmark', (body) => {
-      const pos = getCurrentPosition();
       const hint = document.createElement('div');
       hint.className = 'bm-modal-hint';
       hint.textContent = `Close at: ${bmPositionLabel(pos)}`;
@@ -7755,7 +7849,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     } else {
       bmEndToEndActive = false;
     }
+    bmSetReadRange(bmEndToEndActive ? bm : null);
     jumpToPosition(bm.start);
+  }
+
+  // Two-page mode: the bookmark read end to end starts/ends on its own pages
+  // (spBmRange); takes effect at the next jumpToPosition/relayout.
+  function bmSetReadRange(bm) {
+    const find = (p) => spManifest.findIndex(e => e.chapterId === p.chapterId && e.localIdx === p.pageIdx);
+    const range = bm && bm.end ? [find(bm.start), find(bm.end)] : null;
+    spBmRange = range && range[0] !== -1 && range[1] !== -1 ? range : null;
   }
 
   function jumpToPosition(pos) {
@@ -7767,7 +7870,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
         // slice) could land on some other chapter's page sharing the same
         // number, landing earlier in the flat array.
         const idx = spManifest.findIndex(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
-        if (idx !== -1) spGotoIdx(idx);
+        if (idx !== -1) spIsBook() ? spRelayout(idx) : spGotoIdx(idx);  // relayout: spBmRange may have changed
       } else {
         const entry = manifest.find(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
         if (entry) setVirtualY(entry.globalY);
@@ -7804,6 +7907,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const group = bookmarks.filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup);
     if (bmCurrentGroupIdx + 1 < group.length) {
       bmCurrentGroupIdx++;
+      bmSetReadRange(group[bmCurrentGroupIdx]);
       jumpToPosition(group[bmCurrentGroupIdx].start);
       return;
     }
@@ -7834,6 +7938,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
     if (remaining.length === 0) {
       bmEndToEndActive = false;
+      bmSetReadRange(null);
+      if (spIsBook()) spRelayout(spCurrentIdx);
       showToast('Bookmarks ended');
       return;
     }
@@ -7842,6 +7948,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     const next = remaining[0];
     bmCurrentGroup    = next.base;
     bmCurrentGroupIdx = 0;
+    bmSetReadRange(next.firstBm);
     jumpToPosition(next.firstBm.start);
   }
 
