@@ -1165,8 +1165,8 @@
             </div>
             <div v-if="!editingDesc">
               <p v-if="collection.description" class="desc-text" ref="descText" :class="{ 'desc-cut': descMaxH && !descOpen }" :style="descMaxH && !descOpen ? { maxHeight: descMaxH + 'px' } : null">{{ collection.description }}</p>
-              <button v-if="collection.description && descMaxH" ref="descMore" class="desc-more" @click="descOpen = !descOpen">{{ descOpen ? 'View less' : 'View more' }}</button>
               <p v-else class="desc-empty">No description yet.</p>
+              <button v-if="collection.description && descMaxH" ref="descMore" class="desc-more" @click="descOpen = !descOpen">{{ descOpen ? 'View less' : 'View more' }}</button>
             </div>
             <div v-else>
               <textarea class="desc-textarea" v-model="descInput" placeholder="Write a description…"></textarea>
