@@ -16,6 +16,7 @@ save_manga_dims as callable arguments so it stays independently testable
 without needing the full FastAPI app to be running.
 """
 
+import asyncio
 import httpx
 import re
 
@@ -391,6 +392,169 @@ async def download_cover_image(url: str) -> bytes:
         return response.content
 
 
+# ── MangaUpdates, Google Books, Open Library (2026-10-08) ──
+# More sources for the Fetch Metadata popup, normalized to the same
+# candidate shape as AniList/MangaDex (title_english, subtitle, synonyms,
+# description, genres, tags as plain names, status, format, cover_url).
+# MangaUpdates is for manga libraries; Google Books and Open Library for
+# libraries marked as book libraries. None of them needs a key (Google
+# Books takes an optional one: its shared keyless quota runs out).
+
+MANGAUPDATES_API_URL = "https://api.mangaupdates.com/v1"
+GOOGLE_BOOKS_API_URL = "https://www.googleapis.com/books/v1/volumes"
+OPENLIBRARY_URL = "https://openlibrary.org"
+_UA = {"User-Agent": "Kinsho (self-hosted manga reader; https://github.com/kalako99/kinsho)"}
+
+
+def _markdown_to_text(text: str | None) -> str:
+    """MangaUpdates descriptions are Markdown: links become their label,
+    bold/italic marks go."""
+    if not text:
+        return ""
+    text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', text)
+    text = re.sub(r'(\*\*|__)(.*?)\1', r'\2', text)
+    return clean_description(text.replace("  \n", "\n"))
+
+
+def _mangaupdates_status(series: dict) -> dict:
+    """Status + final volume count from MangaUpdates' status text, e.g.
+    "12 Volumes + 1 Extra Volume (Complete)" (first line = the original)."""
+    text = (series.get("status") or "").split("\n")[0]
+    low = text.lower()
+    if "(complete" in low or str(series.get("completed")).lower() == "true":
+        status = "completed"
+    elif "hiatus" in low:
+        status = "hiatus"
+    elif "cancel" in low or "discontinued" in low or "axed" in low:
+        status = "cancelled"
+    elif "ongoing" in low:
+        status = "ongoing"
+    else:
+        status = None
+    m = re.search(r'(\d+)\s+Volumes?', text, re.I)
+    volumes = float(m.group(1)) if m else None
+    chapters = _count(series.get("latest_chapter")) if status == "completed" else None
+    return {"status": status, "volumes": volumes, "chapters": chapters}
+
+
+async def _mangaupdates_series(client: httpx.AsyncClient, series_id) -> dict | None:
+    try:
+        r = await client.get(f"{MANGAUPDATES_API_URL}/series/{series_id}")
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+async def search_mangaupdates(title: str, per_page: int = 8) -> list[dict]:
+    async with httpx.AsyncClient(timeout=20.0, headers=_UA) as client:
+        r = await client.post(f"{MANGAUPDATES_API_URL}/series/search", json={"search": title, "perpage": per_page})
+        r.raise_for_status()
+        records = [x.get("record") or {} for x in r.json().get("results") or []]
+        details = await asyncio.gather(*(_mangaupdates_series(client, rec.get("series_id")) for rec in records))
+    results = []
+    for rec, s in zip(records, details):
+        s = s or rec
+        categories = sorted(s.get("categories") or [], key=lambda c: -(c.get("votes") or 0))
+        image = ((s.get("image") or {}).get("url") or {})
+        results.append({
+            "provider":        "mangaupdates",
+            "mangaupdates_id": str(s.get("series_id") or rec.get("series_id")),
+            "title_english":   s.get("title"),
+            "subtitle":        " · ".join(x for x in (s.get("type"), s.get("year")) if x),
+            "synonyms":        [a.get("title") for a in s.get("associated") or [] if a.get("title")],
+            "description":     _markdown_to_text(s.get("description")),
+            "genres":          [g.get("genre") for g in s.get("genres") or [] if g.get("genre")],
+            "tags":            [c.get("category") for c in categories[:15] if c.get("category")],
+            "status":          (_mangaupdates_status(s)["status"] or "").upper() or None,
+            "format":          s.get("type"),
+            "cover_url":       image.get("original"),
+            "site_url":        s.get("url"),
+        })
+    return results
+
+
+async def search_google_books(title: str, api_key: str | None = None, per_page: int = 8) -> list[dict]:
+    params = {"q": f"intitle:{title}", "maxResults": per_page, "printType": "books"}
+    if api_key:
+        params["key"] = api_key
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(GOOGLE_BOOKS_API_URL, params=params)
+        if r.status_code == 429:
+            raise RuntimeError("Google Books' shared free quota is used up for today: add a free Google Books API key in Settings -> Libraries.")
+        r.raise_for_status()
+        items = r.json().get("items") or []
+    results = []
+    for it in items:
+        v = it.get("volumeInfo") or {}
+        links = v.get("imageLinks") or {}
+        cover = (links.get("extraLarge") or links.get("large") or links.get("medium")
+                 or links.get("thumbnail") or links.get("smallThumbnail"))
+        if cover:
+            cover = cover.replace("http://", "https://").replace("&edge=curl", "")
+        title_full = v.get("title") or ""
+        if v.get("subtitle"):
+            title_full += f": {v['subtitle']}"
+        results.append({
+            "provider":       "googlebooks",
+            "googlebooks_id": it.get("id"),
+            "title_english":  title_full,
+            "subtitle":       " · ".join(x for x in (", ".join(v.get("authors") or []), (v.get("publishedDate") or "")[:4], (v.get("language") or "").upper()) if x),
+            "synonyms":       [v.get("title")] if v.get("subtitle") else [],
+            "description":    clean_description(v.get("description")),
+            "genres":         v.get("categories") or [],
+            "tags":           [],
+            "status":         None,
+            "format":         "BOOK",
+            "cover_url":      cover,
+            "site_url":       v.get("infoLink"),
+        })
+    return results
+
+
+async def _openlibrary_work(client: httpx.AsyncClient, key: str) -> dict:
+    try:
+        r = await client.get(f"{OPENLIBRARY_URL}{key}.json")
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return {}
+
+
+async def search_openlibrary(title: str, per_page: int = 8) -> list[dict]:
+    async with httpx.AsyncClient(timeout=20.0, headers=_UA, follow_redirects=True) as client:
+        r = await client.get(f"{OPENLIBRARY_URL}/search.json", params={
+            "title": title, "limit": per_page,
+            "fields": "key,title,subtitle,author_name,first_publish_year,subject,cover_i",
+        })
+        r.raise_for_status()
+        docs = r.json().get("docs") or []
+        works = await asyncio.gather(*(_openlibrary_work(client, d.get("key", "")) for d in docs))
+    results = []
+    for d, w in zip(docs, works):
+        desc = w.get("description")
+        if isinstance(desc, dict):
+            desc = desc.get("value")
+        title_full = d.get("title") or ""
+        if d.get("subtitle"):
+            title_full += f": {d['subtitle']}"
+        results.append({
+            "provider":        "openlibrary",
+            "openlibrary_id":  d.get("key"),
+            "title_english":   title_full,
+            "subtitle":        " · ".join(x for x in (", ".join(d.get("author_name") or []), str(d.get("first_publish_year") or "")) if x),
+            "synonyms":        [],
+            "description":     _markdown_to_text(desc) if isinstance(desc, str) else "",
+            "genres":          [],
+            "tags":            (d.get("subject") or [])[:12],
+            "status":          None,
+            "format":          "BOOK",
+            "cover_url":       f"https://covers.openlibrary.org/b/id/{d['cover_i']}-L.jpg" if d.get("cover_i") else None,
+            "site_url":        f"{OPENLIBRARY_URL}{d.get('key', '')}",
+        })
+    return results
+
+
 # ── Series status (2026-10-08) ──
 # A manga linked to its AniList/MangaDex entry by a manual fetch follows the
 # series' publication status, for the detail page's status tag and the END
@@ -444,6 +608,17 @@ async def fetch_series_status(link: dict) -> dict | None:
                 result["chapters"] = _count(attrs.get("lastChapter"))
         except Exception as e:
             print(f"[SeriesStatus] MangaDex {link['mangadex']} failed: {e}")
+    if link.get("mangaupdates") and (not result["status"] or result["volumes"] is None or result["chapters"] is None):
+        async with httpx.AsyncClient(timeout=15.0, headers=_UA) as client:
+            series = await _mangaupdates_series(client, link["mangaupdates"])
+        if series:
+            mu = _mangaupdates_status(series)
+            result["status"] = result["status"] or mu["status"]
+            for k in ("volumes", "chapters"):
+                if result[k] is None:
+                    result[k] = mu[k]
+        else:
+            print(f"[SeriesStatus] MangaUpdates {link['mangaupdates']} failed")
     return result if result["status"] else None
 
 

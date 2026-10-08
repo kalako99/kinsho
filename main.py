@@ -2422,6 +2422,11 @@ async def fetch_and_set_cover(
         stem_parts.append(f"anilist_{anilist_candidate['anilist_id']}")
     if mangadex_candidate and mangadex_candidate.get("mangadex_id"):
         stem_parts.append(f"mangadex_{mangadex_candidate['mangadex_id']}")
+    provider = (mangadex_candidate or {}).get("provider")
+    if provider in ("mangaupdates", "googlebooks", "openlibrary"):
+        source_id = re.sub(r'[^A-Za-z0-9_-]', '', str(mangadex_candidate.get(f"{provider}_id") or "").replace("/works/", ""))
+        if source_id:
+            stem_parts.append(f"{provider}_{source_id}")
     stem = "_".join(stem_parts) if stem_parts else f"metadata_cover_{int(time.time())}"
     filename = f"{stem}{url_ext}"
     # The full-size image is saved in the manga's own folder too (user's
@@ -4637,8 +4642,27 @@ def get_settings(request: Request):
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
         "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
+        "google_books_key_set":     bool(data.get("google_books_api_key")),
         "local_assets_available":   local_assets_available(),
     })
+
+@app.post("/api/admin/settings/google-books-key")
+async def set_google_books_key(request: Request):
+    """Optional Google Books API key for book libraries' Fetch Metadata
+    (the keyless shared quota often runs out). An empty key removes it.
+    Never sent back to the browser, only whether one is set."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    data = load_app_data()
+    key = (body.get("key") or "").strip()
+    if key:
+        data["google_books_api_key"] = key
+    else:
+        data.pop("google_books_api_key", None)
+    save_app_data(data)
+    return JSONResponse({"ok": True})
 
 @app.post("/api/admin/settings/auto-rescan")
 async def set_auto_rescan(request: Request):
@@ -5267,6 +5291,9 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     manga["genres"]      = dims.get("genres", [])
     manga["description"] = dims.get("description", "")
     manga["description_manual"] = bool(dims.get("description_manual"))
+    # Which Fetch Metadata sources the popup offers (Settings -> Libraries).
+    library = next((l for l in load_app_data_cached().get("libraries", []) if l.get("id") == library_id), {})
+    manga["book_library"] = bool(library.get("book_library"))
     # The series' publication status, for linked manga only (SERIES STATUS).
     manga["series_status"] = (dims.get("series_status") or {}).get("status") if dims.get("series_link") else None
     return JSONResponse(manga)
@@ -6608,6 +6635,23 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     query = q.strip() or manga_id
 
+    if provider in ("mangaupdates", "googlebooks", "openlibrary"):
+        # The other sources (2026-10-08): MangaUpdates in manga libraries,
+        # Google Books and Open Library in book libraries.
+        try:
+            if provider == "mangaupdates":
+                results = await metadata_fetch.search_mangaupdates(query, per_page=8)
+            elif provider == "googlebooks":
+                results = await metadata_fetch.search_google_books(query, load_app_data_cached().get("google_books_api_key"))
+            else:
+                results = await metadata_fetch.search_openlibrary(query)
+            scored = metadata_fetch.score_all_candidates(query, results)
+            for c in scored:
+                c["preview_cover_url"] = c.get("cover_url")
+            return JSONResponse({"candidates": scored})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     if provider == "mangadex":
         # A real, independent MangaDex candidate list for the popup's own
         # MangaDex section -- distinct from the AniList branch below, where
@@ -6765,8 +6809,10 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
                 # instead of its usual "compare two sources, pick the bigger
                 # image" role, since mutual exclusion already guarantees at
                 # most one source ever has "cover" checked.
+                # Every source but AniList carries a plain cover_url, read
+                # from the MangaDex slot.
                 anilist_candidate  = candidate if source == "anilist"  else None
-                mangadex_candidate = candidate if source == "mangadex" else None
+                mangadex_candidate = candidate if source != "anilist" else None
                 if await fetch_and_set_cover(library_id, manga, anilist_candidate, mangadex_candidate):
                     save_app_data(data)
 
@@ -6781,6 +6827,8 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
                 link["mangadex"] = cand["mangadex_id"]
                 if cand.get("anilist_id_link"):
                     link.setdefault("anilist", cand["anilist_id_link"])
+            elif entry.get("source") == "mangaupdates" and cand.get("mangaupdates_id"):
+                link["mangaupdates"] = cand["mangaupdates_id"]
         if link:
             info = await metadata_fetch.fetch_series_status(link)
             dims = load_manga_dims(library_id, manga["name"])

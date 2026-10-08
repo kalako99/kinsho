@@ -261,6 +261,9 @@ createApp({
       // ── AUTO-RESCAN + SCAN ACTIVITY (admin) ──
       autoRescanEnabled: true,
       autoRescanStatus:  { msg: '', type: '' },
+      googleBooksKey:    '',
+      googleBooksKeySet: false,
+      googleBooksStatus: { msg: '', type: '' },
       scanActivity:      { scanning: false, libraries: [] },
 
       // ── LOCAL ASSETS (admin) ──
@@ -626,6 +629,7 @@ createApp({
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
         this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
+        this.googleBooksKeySet      = !!data.google_books_key_set;
         this.localAssetsAvailable   = !!data.local_assets_available;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
         this.activeCustomThemeName  = data.active_custom_theme_name || '';
@@ -1124,6 +1128,27 @@ createApp({
     },
 
     // ── METADATA FETCH PRIORITY (admin, affects only the bulk/automatic scan) ──
+    async saveGoogleBooksKey() {
+      try {
+        const res  = await fetch(apiUrl('/api/admin/settings/google-books-key'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ key: this.googleBooksKey.trim() }),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          this.googleBooksKeySet = !!this.googleBooksKey.trim();
+          this.googleBooksKey = '';
+          this.googleBooksStatus = { msg: this.googleBooksKeySet ? '✓ Saved.' : '✓ Removed.', type: 'ok' };
+        } else {
+          this.googleBooksStatus = { msg: data.error || 'Something went wrong.', type: 'err' };
+        }
+      } catch (e) {
+        this.googleBooksStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.googleBooksStatus = { msg: '', type: '' }; }, 3000);
+    },
+
     async saveMetadataPriority() {
       try {
         const res  = await fetch(apiUrl('/api/settings/metadata-priority'), {

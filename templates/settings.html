@@ -892,6 +892,20 @@
       <div class="status-msg" :class="metadataPriorityStatus.type" v-text="metadataPriorityStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
 
+    <div class="card" style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">
+      <div class="field-label">Google Books API key (optional)</div>
+      <div class="section-hint" style="margin:0;">
+        Book libraries search Google Books and Open Library. Google Books works without a key only while its shared
+        free quota lasts, which often runs out: a free key from the Google Cloud console (enable "Books API", no
+        billing needed) avoids that. <span v-if="googleBooksKeySet">A key is saved.</span>
+      </div>
+      <div class="field-row">
+        <input type="password" v-model="googleBooksKey" :placeholder="googleBooksKeySet ? 'Saved -- type a new one to replace it' : 'Paste the key'" autocomplete="off" />
+        <button class="btn btn-primary" @click="saveGoogleBooksKey" v-text="googleBooksKey ? 'Save' : (googleBooksKeySet ? 'Remove' : 'Save')"></button>
+      </div>
+      <div class="status-msg" :class="googleBooksStatus.type" v-text="googleBooksStatus.msg" style="min-height:0; margin:0;"></div>
+    </div>
+
     <div class="section-hint">
       Each library is a folder on your system containing manga, webtoons, books, etc.
       Give each one a name — this will become the tab label on the main page.
@@ -971,6 +985,17 @@
           style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
         >
         Rename volumes (shorten to "Volume NN", keep provider)
+      </label>
+      <label
+        style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-text,#f0f0f0); margin:2px 0 4px; cursor:pointer;"
+        title="Fetch Metadata in this library searches Google Books and Open Library instead of AniList, MangaDex and MangaUpdates."
+      >
+        <input
+          type="checkbox"
+          v-model="lib.book_library"
+          style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
+        >
+        Book library (metadata from Google Books &amp; Open Library)
       </label>
       <div class="section-hint" style="margin:0 0 10px;">
         Renames on the very next scan or rescan, including for volumes already in the library. Only volume-type (case2)

@@ -1678,7 +1678,7 @@
           {{ metaSearching ? 'Searching…' : 'Search' }}
         </button>
       </div>
-      <div class="meta-candidates" v-if="hasAnyMetaCandidates || metaLoadingAnilist || metaLoadingMangadex">
+      <div class="meta-candidates" v-if="hasAnyMetaCandidates || metaSearching">
         <div class="meta-section" v-if="localMetaCandidate">
           <div class="meta-section-heading">
             Local File
@@ -1706,29 +1706,30 @@
           </div>
         </div>
 
-        <div class="meta-section">
+        <div class="meta-section" v-for="src in metaSources" :key="src">
           <div class="meta-section-heading">
-            AniList
-            <span v-if="metaLoadingAnilist" class="meta-section-loading">loading…</span>
-            <span class="meta-fields-inline" v-if="metaSelected.anilist" @click.stop>
-              <label><input type="checkbox" :checked="metaFields.anilist.description" @change="toggleMetaField('anilist','description')"> Desc</label>
-              <label><input type="checkbox" :checked="metaFields.anilist.genres" @change="toggleMetaField('anilist','genres')"> Genres</label>
-              <label><input type="checkbox" :checked="metaFields.anilist.tags" @change="toggleMetaField('anilist','tags')"> Tags</label>
-              <label><input type="checkbox" :checked="metaFields.anilist.cover" @change="toggleMetaField('anilist','cover')"> Cover</label>
+            {{ metaSourceNames[src] }}
+            <span v-if="metaLoading[src]" class="meta-section-loading">loading…</span>
+            <span class="meta-fields-inline" v-if="metaSelected[src]" @click.stop>
+              <label><input type="checkbox" :checked="metaFields[src].description" @change="toggleMetaField(src,'description')"> Desc</label>
+              <label><input type="checkbox" :checked="metaFields[src].genres" @change="toggleMetaField(src,'genres')"> Genres</label>
+              <label><input type="checkbox" :checked="metaFields[src].tags" @change="toggleMetaField(src,'tags')"> Tags</label>
+              <label><input type="checkbox" :checked="metaFields[src].cover" @change="toggleMetaField(src,'cover')"> Cover</label>
             </span>
           </div>
           <div
-            v-for="c in metaCandidatesAnilist"
-            :key="'al:' + c.anilist_id"
+            v-for="(c, ci) in metaCandidates[src]"
+            :key="src + ':' + ci"
             class="meta-candidate"
-            :class="{ selected: metaSelected.anilist === c }"
-            @click="selectMetaCandidate('anilist', c)"
+            :class="{ selected: metaSelected[src] === c }"
+            @click="selectMetaCandidate(src, c)"
           >
             <img v-if="c.preview_cover_url || c.cover_url_medium" :src="c.preview_cover_url || c.cover_url_medium" referrerpolicy="no-referrer" class="meta-cover">
             <div v-else class="meta-cover-ph"></div>
             <div class="meta-info">
               <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
-              <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
+              <div class="meta-subtitle" v-if="c.subtitle">{{ c.subtitle }}</div>
+              <div class="meta-subtitle" v-else-if="c.title_english && c.title_romaji && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
               <div class="meta-badges">
                 <span class="meta-badge-sm" v-if="c.format">{{ c.format }}</span>
                 <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
@@ -1741,44 +1742,7 @@
               </div>
             </div>
           </div>
-          <div class="meta-section-empty" v-if="!metaLoadingAnilist && metaCandidatesAnilist.length === 0 && metaSearchedOnce">No AniList matches.</div>
-        </div>
-
-        <div class="meta-section">
-          <div class="meta-section-heading">
-            MangaDex
-            <span v-if="metaLoadingMangadex" class="meta-section-loading">loading…</span>
-            <span class="meta-fields-inline" v-if="metaSelected.mangadex" @click.stop>
-              <label><input type="checkbox" :checked="metaFields.mangadex.description" @change="toggleMetaField('mangadex','description')"> Desc</label>
-              <label><input type="checkbox" :checked="metaFields.mangadex.genres" @change="toggleMetaField('mangadex','genres')"> Genres</label>
-              <label><input type="checkbox" :checked="metaFields.mangadex.tags" @change="toggleMetaField('mangadex','tags')"> Tags</label>
-              <label><input type="checkbox" :checked="metaFields.mangadex.cover" @change="toggleMetaField('mangadex','cover')"> Cover</label>
-            </span>
-          </div>
-          <div
-            v-for="c in metaCandidatesMangadex"
-            :key="'md:' + c.mangadex_id"
-            class="meta-candidate"
-            :class="{ selected: metaSelected.mangadex === c }"
-            @click="selectMetaCandidate('mangadex', c)"
-          >
-            <img v-if="c.preview_cover_url" :src="c.preview_cover_url" referrerpolicy="no-referrer" class="meta-cover">
-            <div v-else class="meta-cover-ph"></div>
-            <div class="meta-info">
-              <div class="meta-title">{{ c.title_english || c.title_romaji }}</div>
-              <div class="meta-subtitle" v-if="c.title_english && c.title_romaji !== c.title_english">{{ c.title_romaji }}</div>
-              <div class="meta-badges">
-                <span class="meta-badge-sm" v-if="c.status">{{ c.status }}</span>
-                <span class="meta-score-badge" :style="{ background: scoreColor(c.match_score) }">
-                  {{ Math.round(c.match_score * 100) }}% match
-                </span>
-              </div>
-              <div class="meta-genres-preview" v-if="(c.genres || []).length">
-                {{ (c.genres || []).slice(0, 5).join(' · ') }}
-              </div>
-            </div>
-          </div>
-          <div class="meta-section-empty" v-if="!metaLoadingMangadex && metaCandidatesMangadex.length === 0 && metaSearchedOnce">No MangaDex matches.</div>
+          <div class="meta-section-empty" v-if="!metaLoading[src] && metaCandidates[src].length === 0 && metaSearchedOnce">{{ metaErrors[src] || ('No ' + metaSourceNames[src] + ' matches.') }}</div>
         </div>
       </div>
       <div class="meta-empty" v-else>{{ metaStatus.msg || 'Search for a title above.' }}</div>
@@ -1921,24 +1885,30 @@ createApp({
       // fetch metadata popup
       showMetadataPopup:      false,
       metaSearch:             '',
-      metaCandidatesAnilist:  [],
-      metaCandidatesMangadex: [],
-      metaLoadingAnilist:     false,
-      metaLoadingMangadex:    false,
+      // Per source: manga libraries search AniList, MangaDex and
+      // MangaUpdates, book libraries Google Books and Open Library (see
+      // metaSources).
+      metaCandidates: { anilist: [], mangadex: [], mangaupdates: [], googlebooks: [], openlibrary: [] },
+      metaLoading:    { anilist: false, mangadex: false, mangaupdates: false, googlebooks: false, openlibrary: false },
+      metaErrors:     {},
+      metaSourceNames: { anilist: 'AniList', mangadex: 'MangaDex', mangaupdates: 'MangaUpdates', googlebooks: 'Google Books', openlibrary: 'Open Library' },
       localMetaCandidate:     null,
       // One independent selection per source -- unlike the old single
       // metaSelected, a candidate can be picked from more than one source
       // at once (e.g. cover from AniList, description from MangaDex).
-      metaSelected: { local: null, anilist: null, mangadex: null },
+      metaSelected: { local: null, anilist: null, mangadex: null, mangaupdates: null, googlebooks: null, openlibrary: null },
       metaSearchedOnce:       false,
       // Per-source field checkboxes. Mutually exclusive across sources for
       // the same field (see toggleMetaField) -- checking "cover" under
       // anilist auto-unchecks it under mangadex/local, since a field can
       // only ever be imported from one place at a time.
       metaFields: {
-        local:    { description: false, genres: false, tags: false, cover: false },
-        anilist:  { description: false, genres: false, tags: false, cover: false },
-        mangadex: { description: false, genres: false, tags: false, cover: false },
+        local:        { description: false, genres: false, tags: false, cover: false },
+        anilist:      { description: false, genres: false, tags: false, cover: false },
+        mangadex:     { description: false, genres: false, tags: false, cover: false },
+        mangaupdates: { description: false, genres: false, tags: false, cover: false },
+        googlebooks:  { description: false, genres: false, tags: false, cover: false },
+        openlibrary:  { description: false, genres: false, tags: false, cover: false },
       },
       metaApplying:           false,
       metaStatus:             { msg: '', type: '' },
@@ -1974,20 +1944,28 @@ createApp({
       return this.allCollections.some(c => c.has_manga);
     },
 
+    // The Fetch Metadata popup's sources for this library (Settings ->
+    // Libraries, "Book library").
+    metaSources() {
+      return this.manga && this.manga.book_library
+        ? ['googlebooks', 'openlibrary']
+        : ['anilist', 'mangadex', 'mangaupdates'];
+    },
+
     metaSearching() {
-      return this.metaLoadingAnilist || this.metaLoadingMangadex;
+      return Object.values(this.metaLoading).some(v => v);
     },
 
     hasAnyMetaCandidates() {
-      return !!this.localMetaCandidate || this.metaCandidatesAnilist.length > 0 || this.metaCandidatesMangadex.length > 0;
+      return !!this.localMetaCandidate || this.metaSources.some(src => this.metaCandidates[src].length > 0);
     },
 
     hasAnyMetaSelection() {
-      return !!(this.metaSelected.local || this.metaSelected.anilist || this.metaSelected.mangadex);
+      return ['local', ...this.metaSources].some(src => this.metaSelected[src]);
     },
 
     hasAnyCheckedMetaField() {
-      return ['local', 'anilist', 'mangadex'].some(src =>
+      return ['local', ...this.metaSources].some(src =>
         this.metaSelected[src] && Object.values(this.metaFields[src]).some(v => v)
       );
     },
@@ -2849,15 +2827,11 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
 
     async openMetadataSearch() {
       this.metaSearch             = this.manga ? this.manga.name : '';
-      this.metaCandidatesAnilist  = [];
-      this.metaCandidatesMangadex = [];
       this.localMetaCandidate     = null;
-      this.metaSelected           = { local: null, anilist: null, mangadex: null };
-      this.metaFields = {
-        local:    { description: false, genres: false, tags: false, cover: false },
-        anilist:  { description: false, genres: false, tags: false, cover: false },
-        mangadex: { description: false, genres: false, tags: false, cover: false },
-      };
+      for (const src of ['local', ...this.metaSources]) {
+        this.metaSelected[src] = null;
+        this.metaFields[src] = { description: false, genres: false, tags: false, cover: false };
+      }
       this.metaSearchedOnce       = false;
       this.metaStatus             = { msg: '', type: '' };
       this.showMetadataPopup      = true;
@@ -2877,52 +2851,39 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
     // loading in the background — not one blocking call for both.
     async searchMetadata() {
       if (!this.metaSearch.trim()) return;
-      this.metaCandidatesAnilist  = [];
-      this.metaCandidatesMangadex = [];
-      // A new search only resets the two provider sections -- Local File
-      // isn't affected by the search box at all, so an already-configured
-      // Local File selection survives searching for something else.
-      this.metaSelected.anilist  = null;
-      this.metaSelected.mangadex = null;
-      this.metaFields.anilist    = { description: false, genres: false, tags: false, cover: false };
-      this.metaFields.mangadex   = { description: false, genres: false, tags: false, cover: false };
+      // A new search only resets the provider sections -- Local File isn't
+      // affected by the search box at all, so an already-configured Local
+      // File selection survives searching for something else.
+      for (const src of this.metaSources) {
+        this.metaCandidates[src] = [];
+        this.metaSelected[src] = null;
+        this.metaFields[src] = { description: false, genres: false, tags: false, cover: false };
+      }
+      this.metaErrors       = {};
       this.metaSearchedOnce = true;
       this.metaStatus       = { msg: '', type: '' };
       // Plain (non-reactive) instance counter, not declared in data() on
-      // purpose — guards against a slow MangaDex response from a previous
-      // search landing after a newer one has already started.
+      // purpose -- guards against a slow response from a previous search
+      // landing after a newer one has already started.
       this._metaSearchToken = (this._metaSearchToken || 0) + 1;
       const token = this._metaSearchToken;
-      this._searchAnilistMetadata(token);
-      this._searchMangadexMetadata(token);
+      // Independent, unawaited searches: each section is browsable as soon
+      // as its own source answers.
+      for (const src of this.metaSources) this._searchMetaSource(src, token);
     },
 
-    async _searchAnilistMetadata(token) {
-      this.metaLoadingAnilist = true;
+    async _searchMetaSource(src, token) {
+      this.metaLoading[src] = true;
       try {
-        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}&provider=anilist`));
+        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}&provider=${src}`));
         const data = await res.json();
         if (token !== this._metaSearchToken) return;
-        this.metaCandidatesAnilist = data.candidates || [];
+        this.metaCandidates[src] = data.candidates || [];
+        if (data.error) this.metaErrors[src] = data.error;
       } catch (e) {
-        if (token === this._metaSearchToken) this.metaStatus = { msg: 'AniList search failed.', type: 'err' };
+        if (token === this._metaSearchToken) this.metaErrors[src] = `${this.metaSourceNames[src]} search failed.`;
       }
-      if (token === this._metaSearchToken) this.metaLoadingAnilist = false;
-    },
-
-    async _searchMangadexMetadata(token) {
-      this.metaLoadingMangadex = true;
-      try {
-        const res  = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/search-metadata?q=${encodeURIComponent(this.metaSearch)}&provider=mangadex`));
-        const data = await res.json();
-        if (token !== this._metaSearchToken) return;
-        this.metaCandidatesMangadex = data.candidates || [];
-      } catch (e) {
-        // AniList's own status message (if any) already covers the popup's
-        // one status line — a MangaDex-specific failure just leaves that
-        // section empty rather than overwriting it.
-      }
-      if (token === this._metaSearchToken) this.metaLoadingMangadex = false;
+      if (token === this._metaSearchToken) this.metaLoading[src] = false;
     },
 
     // Clicking a card selects it for that source; clicking the
@@ -2959,7 +2920,7 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
     // pick sensible non-conflicting defaults when a new source is selected.
     claimedMetaFields(excludeSource) {
       const claimed = new Set();
-      for (const src of ['local', 'anilist', 'mangadex']) {
+      for (const src of ['local', ...this.metaSources]) {
         if (src === excludeSource || !this.metaSelected[src]) continue;
         for (const [field, checked] of Object.entries(this.metaFields[src])) {
           if (checked) claimed.add(field);
@@ -2975,7 +2936,7 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
       const newVal = !this.metaFields[source][field];
       this.metaFields[source][field] = newVal;
       if (newVal) {
-        for (const src of ['local', 'anilist', 'mangadex']) {
+        for (const src of ['local', ...this.metaSources]) {
           if (src !== source) this.metaFields[src][field] = false;
         }
       }
@@ -2983,7 +2944,7 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
 
     async applyMetadata() {
       const entries = [];
-      for (const source of ['local', 'anilist', 'mangadex']) {
+      for (const source of ['local', ...this.metaSources]) {
         const candidate = this.metaSelected[source];
         if (!candidate) continue;
         const fields = Object.entries(this.metaFields[source]).filter(([, v]) => v).map(([k]) => k);
