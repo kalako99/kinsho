@@ -1627,6 +1627,16 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
            (bmo && bmo.style.display === 'flex');
   }
 
+  // The reader's popups are mutually exclusive (user's request 2026-10-08):
+  // opening one closes the others first. Each button stops its click from
+  // reaching the "click outside closes it" handlers, so they never did.
+  function closeReaderPopups() {
+    closeBbMenu();
+    closeSettingsPanel();
+    closeBookmarkPanel();
+    document.getElementById('scrollerPanel')?.classList.remove('open');
+  }
+
   function hideAll() {
     // Don't hide anything (bars, cursor) while a popup is still open --
     // keep re-checking on the same cadence instead, so it hides normally
@@ -4457,6 +4467,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   // Scroll the active item into view when menu opens
   function openBbMenu() {
+      closeReaderPopups();
       bbChapMenu.classList.add('open');
       bbChapBtn.classList.add('open');
       bbChapBtn.setAttribute('aria-expanded', 'true');
@@ -4646,6 +4657,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   const settingsCanvasBufferToggle = document.getElementById('settingsCanvasBufferToggle');
 
   function openSettingsPanel() {
+    closeReaderPopups();
     settingsPanel.classList.add('open');
     bbSettingsBtn.classList.add('active');
     if (spIsBook()) { spSelectDefault(); syncPairingUI(); }
@@ -6946,7 +6958,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
       scrollerBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        scrollerPanel.classList.toggle('open');
+        if (scrollerPanel.classList.contains('open')) scrollerPanel.classList.remove('open');
+        else { closeReaderPopups(); scrollerPanel.classList.add('open'); }
       });
       scrollerPanel.addEventListener('click', (e) => e.stopPropagation());
       document.addEventListener('click', (e) => {
@@ -7707,9 +7720,9 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   const bmListBtn      = document.getElementById('bmListBtn');
 
   function openBookmarkPanel() {
+    closeReaderPopups();
     bookmarkPanel.classList.add('open');
     bbBookmarkBtn.classList.add('active');
-    closeSettingsPanel();
   }
   function closeBookmarkPanel() {
     bookmarkPanel.classList.remove('open');
