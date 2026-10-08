@@ -7389,18 +7389,22 @@ READ_TIME_FAST_FRACTION  = 0.5
 READ_TIME_MAX_FAST_SHARE = 0.3
 # A two-page spread joined into one image counts as two pages (user's rule,
 # 2026-10-07): same test as the reader's two-page mode, at least this many
-# times the chapter/volume's most common page width.
+# times as wide for its height as the chapter/volume's most common page
+# shape (shapes, not pixel widths: a high-resolution cover is one page).
 SPREAD_WIDTH_FACTOR      = 1.75
 
 def _page_weights(pages: list) -> list:
     """1 per page, 2 for a joined spread."""
-    widths = [round((p.get("w") or 0) / 10) * 10 for p in pages]
+    def shape(p):
+        w, h = p.get("w") or 0, p.get("h") or 0
+        return w / h if w and h else 0
     counts = {}
-    for w in widths:
-        if w:
-            counts[w] = counts.get(w, 0) + 1
+    for p in pages:
+        r = round(shape(p) * 50) / 50
+        if r:
+            counts[r] = counts.get(r, 0) + 1
     common = max(counts, key=counts.get) if counts else 0
-    return [2 if common and (p.get("w") or 0) >= common * SPREAD_WIDTH_FACTOR else 1 for p in pages]
+    return [2 if common and shape(p) >= common * SPREAD_WIDTH_FACTOR else 1 for p in pages]
 
 def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, completed_ids: list) -> dict:
     """Extra fields for the detail pages: the average reading time of a

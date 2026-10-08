@@ -4978,37 +4978,39 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return readerSettings.mode === 'single-page' && !!readerSettings.twoPage;
   }
 
-  // Spreads already joined into one image: at least SP_WIDE_FACTOR times the
-  // unit's most common page width (user's rule: "almost as wide as 2 other
-  // images"). Very tall pages (webtoon strips) are shown alone too.
+  // Spreads already joined into one image: at least SP_WIDE_FACTOR times as
+  // wide for their height as the unit's most common page shape (user's rule:
+  // "almost as wide as 2 other images"). Shapes, not pixel widths: a cover
+  // scanned at 3x the resolution of the pages is still one page. Very tall
+  // pages (webtoon strips) are shown alone too.
   const SP_WIDE_FACTOR = 1.75;
   const SP_TALL_RATIO  = 2.2;
   function _spPageAspect(idx) {
     const nat = spManifest[idx] && cbNaturalDims(spManifest[idx]);
     return nat && nat.ih > 0 ? nat.iw / nat.ih : 0.7;
   }
-  const _spCommonWidthCache = new Map();  // "a:b" -> width, cleared by spBuildViews
-  function _spCommonWidth(a, b) {
+  const _spCommonShapeCache = new Map();  // "a:b" -> width/height, cleared by spBuildViews
+  function _spCommonShape(a, b) {
     const key = a + ':' + b;
-    if (!_spCommonWidthCache.has(key)) _spCommonWidthCache.set(key, _spCountCommonWidth(a, b));
-    return _spCommonWidthCache.get(key);
+    if (!_spCommonShapeCache.has(key)) _spCommonShapeCache.set(key, _spCountCommonShape(a, b));
+    return _spCommonShapeCache.get(key);
   }
-  function _spCountCommonWidth(a, b) {
+  function _spCountCommonShape(a, b) {
     const counts = new Map();
     for (let i = a; i < b; i++) {
       const nat = cbNaturalDims(spManifest[i]);
-      if (!nat) continue;
-      const w = Math.round(nat.iw / 10) * 10;
-      counts.set(w, (counts.get(w) || 0) + 1);
+      if (!nat || !nat.ih) continue;
+      const r = Math.round(nat.iw / nat.ih * 50) / 50;
+      counts.set(r, (counts.get(r) || 0) + 1);
     }
     let best = 0, bestN = 0;
-    for (const [w, n] of counts) if (n > bestN) { best = w; bestN = n; }
+    for (const [r, n] of counts) if (n > bestN) { best = r; bestN = n; }
     return best;
   }
-  function spPageAlone(idx, commonW) {
+  function spPageAlone(idx, commonShape) {
     const nat = cbNaturalDims(spManifest[idx]);
-    if (!nat) return false;
-    if (commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR) return true;
+    if (!nat || !nat.ih) return false;
+    if (commonShape > 0 && nat.iw / nat.ih >= commonShape * SP_WIDE_FACTOR) return true;
     return nat.ih / nat.iw > SP_TALL_RATIO;
   }
 
@@ -5026,8 +5028,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
   function spBookUnitViews(cid, a, b) {
     const WHITE = 'white', BLACK = 'black';
     const n = b - a;
-    const commonW = _spCommonWidth(a, b);
-    const alone = (i) => spPageAlone(i, commonW);
+    const commonShape = _spCommonShape(a, b);
+    const alone = (i) => spPageAlone(i, commonShape);
     const head = [], tail = [];
     let lo = a, hi = b;  // the pages paired between the covers
     if (isVolume && n >= 1) {
@@ -5130,7 +5132,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
 
   function spBuildViews() {
     const n = spManifest.length;
-    _spCommonWidthCache.clear();
+    _spCommonShapeCache.clear();
     spViews = [];
     spViewOfIdx = new Int32Array(Math.max(1, n));
     if (!spIsBook()) {
@@ -5240,8 +5242,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
       while (a > 0 && spManifest[a - 1].chapterId === cid) a--;
       while (b < spManifest.length && spManifest[b].chapterId === cid) b++;
       const nat = cbNaturalDims(spManifest[idx]);
-      const commonW = _spCommonWidth(a, b);
-      return nat && commonW > 0 && nat.iw >= commonW * SP_WIDE_FACTOR ? 2 : 1;
+      const commonShape = _spCommonShape(a, b);
+      return nat && nat.ih && commonShape > 0 && nat.iw / nat.ih >= commonShape * SP_WIDE_FACTOR ? 2 : 1;
     } catch (e) {
       return 1;
     }
