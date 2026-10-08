@@ -2218,6 +2218,37 @@ async def resolve_best_cover(
     return chosen_url, chosen_bytes
 
 
+def _cover_source_folder(manga: dict) -> str | None:
+    """The folder whose own image files scans turn into covers: the manga's
+    folder, except a oneshot's (its images are its pages) and a manga that is
+    a single archive (no folder of its own)."""
+    folder = manga.get("path") or ""
+    if manga.get("manga_type") == "oneshot" or not os.path.isdir(folder):
+        return None
+    return folder
+
+
+def _keep_folder_unchanged(manga: dict, folder: str, folder_mtime_before: float):
+    """After Kinsho itself wrote or deleted a file in the manga's folder: moves
+    the saved folder date along, so the next scan doesn't rescan the manga and
+    move it to the top of Last Updated. Only when the folder was unchanged
+    before, so a real change since the last scan is still picked up."""
+    if manga.get("folder_mtime") == folder_mtime_before:
+        manga["folder_mtime"] = os.path.getmtime(folder)
+
+
+def _cover_sources_in_folder(manga: dict, cover_filename: str) -> list:
+    """The image files in the manga's folder that cover_filename (a cover in
+    the covers directory, always .jpg) was made from: the scan's tracked
+    cover images with the same name."""
+    folder = _cover_source_folder(manga)
+    if not folder:
+        return []
+    stem = os.path.splitext(cover_filename)[0]
+    return [src for src in (manga.get("cover_mtimes") or {})
+            if os.path.splitext(src)[0] == stem and os.path.isfile(os.path.join(folder, src))]
+
+
 async def fetch_and_set_cover(
     library_id: int,
     manga: dict,
@@ -2267,6 +2298,29 @@ async def fetch_and_set_cover(
         stem_parts.append(f"mangadex_{mangadex_candidate['mangadex_id']}")
     stem = "_".join(stem_parts) if stem_parts else f"metadata_cover_{int(time.time())}"
     filename = f"{stem}{url_ext}"
+    # The full-size image is saved in the manga's own folder too (user's
+    # request 2026-10-08, like Save metadata to ComicInfo.xml): scans treat
+    # it like any other cover image there. Recorded in cover_mtimes with its
+    # date so the next scan skips it as unchanged.
+    source_mtime = 0.0
+    folder = _cover_source_folder(manga)
+    if folder:
+        tmp = os.path.join(folder, f".{filename}.kinsho-tmp")
+        try:
+            folder_mtime_before = os.path.getmtime(folder)
+            target = os.path.join(folder, filename)
+            with open(tmp, "wb") as f:
+                f.write(chosen_bytes)
+            os.replace(tmp, target)
+            source_mtime = os.path.getmtime(target)
+            manga.setdefault("cover_mtimes", {})[filename] = source_mtime
+            _keep_folder_unchanged(manga, folder, folder_mtime_before)
+        except OSError as e:
+            print(f"[Covers] Could not save the fetched cover in {folder}: {e}")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
     # Pass empty stored_mtimes so a re-fetch always re-processes the image
     # rather than skipping it as unchanged.
     result_fname, _ = process_cover_from_bytes(
@@ -2275,7 +2329,7 @@ async def fetch_and_set_cover(
         library_id=library_id,
         manga_name=manga["name"],
         stored_mtimes={},
-        source_mtime=0.0,
+        source_mtime=source_mtime,
         large_size=FETCHED_COVER_LARGE_SIZE,
     )
     if not result_fname:
@@ -5793,6 +5847,8 @@ def get_manga_covers(request: Request, library_id: int, manga_id: str):
             "url_large":   f"/covers/{library_id}/{quote(manga['name'])}/{quote(filename)}",
             "url_small":   f"/covers/{library_id}/{quote(manga['name'])}/{quote(small_name)}",
             "is_selected": small_name == selected or (selected is None and small_name == manga.get("cover")),
+            # The image in the manga folder that deleting it also deletes.
+            "folder_files": _cover_sources_in_folder(manga, small_name),
         })
     return JSONResponse({"covers": covers, "selected": selected or manga.get("cover")})
 
@@ -5849,6 +5905,27 @@ async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
     large_path = os.path.join(manga_covers_dir, f"{name}+{ext}")
     if not os.path.exists(small_path) and not os.path.exists(large_path):
         return JSONResponse({"ok": False, "error": "Cover not found"}, status_code=404)
+
+    # The image in the manga's folder it was made from (a fetched cover or
+    # any cover image there) goes too, or the next scan would bring it back.
+    # Admins only: it deletes a file from the library itself.
+    data_changed = False
+    sources = _cover_sources_in_folder(manga, filename)
+    if sources:
+        if not perms.get("is_admin"):
+            return JSONResponse({"ok": False, "error": "Only an admin can delete a cover saved in the manga folder."}, status_code=403)
+        folder = _cover_source_folder(manga)
+        folder_mtime_before = os.path.getmtime(folder)
+        for src in sources:
+            try:
+                os.remove(os.path.join(folder, src))
+            except OSError as e:
+                save_app_data(data)  # any source already deleted stays recorded as gone
+                return JSONResponse({"ok": False, "error": f"Couldn't delete {src} from the manga folder: {e.strerror or e}"}, status_code=500)
+            manga.get("cover_mtimes", {}).pop(src, None)
+        _keep_folder_unchanged(manga, folder, folder_mtime_before)
+        data_changed = True
+
     for p in (small_path, large_path):
         try:
             os.remove(p)
@@ -5857,6 +5934,7 @@ async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
 
     # Default cover pointed here → fall back to the first remaining cover.
     if manga.get("cover") == filename:
+        data_changed = True
         extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
         remaining_large = sorted(
             (f for f in os.listdir(manga_covers_dir)
@@ -5869,6 +5947,7 @@ async def delete_manga_cover(request: Request, library_id: int, manga_id: str):
             manga["cover"] = rname[:-1] + rext
         else:
             manga["cover"] = None
+    if data_changed:
         save_app_data(data)
 
     # Per-user overrides pointing at the deleted file → remove, falling back

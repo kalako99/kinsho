@@ -3013,7 +3013,11 @@ createApp({
     // Admin or metadata-fetch-permitted: delete a cover FILE (e.g. a wrong metadata-fetched one) —
     // global, unlike selectCover's per-user preference.
     async deleteCover(cover) {
-      if (!confirm('Delete this cover file? This removes it for every user.')) return;
+      const inFolder = (cover.folder_files || []).length
+        ? `
+
+This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '';
+      if (!confirm('Delete this cover file? This removes it for every user.' + inFolder)) return;
       try {
         const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/covers/delete`), {
           method:  'POST',
@@ -3021,7 +3025,7 @@ createApp({
           body:    JSON.stringify({ filename: cover.filename }),
         });
         const data = await res.json();
-        if (!data.ok) return;
+        if (!data.ok) { if (data.error) alert(data.error); return; }
         await this.openCoverPicker();   // reload the list; server recomputed the selection
         const sel = this.availableCovers.find(c => c.is_selected);
         if (sel) {
