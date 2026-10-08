@@ -8369,6 +8369,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // multi-chapter-catch-up crediting long-strip already relies on (a big
   // jump correctly credits every chapter skipped over, not just the
   // adjacent one), for both ordinary flips and jumpToPosition() jumps.
+  const _spEndCredited = new Set();  // chapters/volumes finished this page load
   const _origSpGotoIdxE2E = spGotoIdx;
   spGotoIdx = function(...args) {
     _origSpGotoIdxE2E(...args);
@@ -8379,14 +8380,17 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       spSelectCell(null);
       spSelectDefault();
     }
-    // The manga's last page on screen (alone or in a pair): its last chapter
-    // is finished, as long strip does on reaching the bottom.
-    const lastIdx = spManifest.length - 1;
-    if (!finalChapterCompletionSaved && lastIdx >= 0 && chapterList.length
-        && spManifest[lastIdx].chapterId === chapterList[chapterList.length - 1].id
-        && spPagesAt(spPosOf(spCurrentIdx)).includes(lastIdx)) {
-      finalChapterCompletionSaved = true;
-      saveReadingProgress(chapterList[chapterList.length - 1].id);
+    // A chapter/volume's last page on screen (alone or in a pair): it's
+    // finished. Until 2026-10-08 only the manga's last one was; the others
+    // only once reading went on two pages into the next, so closing the
+    // reader on a volume's last spread, or opening the next volume from the
+    // dropdown, left it unread.
+    for (const i of spPagesAt(spPosOf(spCurrentIdx))) {
+      const e = spManifest[i], next = spManifest[i + 1];
+      if (!e || (next && next.chapterId === e.chapterId) || _spEndCredited.has(e.chapterId)) continue;
+      _spEndCredited.add(e.chapterId);
+      if (chapterList.length && e.chapterId === chapterList[chapterList.length - 1].id) finalChapterCompletionSaved = true;
+      saveReadingProgress(e.chapterId);
     }
   };
 

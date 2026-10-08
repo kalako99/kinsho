@@ -7654,11 +7654,18 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
     timing = _reading_timing_summary(dims_for_check, entry, is_volume_manga, completed_ids)
 
     if is_volume_manga:
-        volume_pages = {
-            cid: ch.get("last_page", 0)
-            for cid, ch in entry.get("chapters", {}).items()
-            if ch.get("last_page", 0) > 0
-        }
+        # Pages read per volume for the detail page's bars: a finished volume
+        # whole, an unfinished one up to its saved page (last_page counts from
+        # 0, so the last page of 199 is 198: it used to show "198/199", and a
+        # volume finished but saved at page 0 showed no bar at all).
+        vol_dims = dims_for_check.get("volumes") or {}
+        volume_pages = {}
+        for cid, ch in entry.get("chapters", {}).items():
+            total = len((vol_dims.get(cid) or {}).get("pages") or [])
+            if ch.get("completed") and total:
+                volume_pages[cid] = total
+            elif ch.get("last_page", 0) > 0:
+                volume_pages[cid] = min(ch["last_page"] + 1, total) if total else ch["last_page"] + 1
         return JSONResponse({
             "completed_volume_ids": completed_ids,
             "last_volume_id":       entry.get("last_volume_id"),
