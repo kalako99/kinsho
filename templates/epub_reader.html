@@ -210,7 +210,10 @@
     .bb-iconbtn:hover { background: rgba(255,255,255,0.1); color: #f0f0f0; }
     .bb-iconbtn.active { color: var(--theme-primary, #e94560); }
 
-    /* ── SETTINGS PANEL (font size only, per v1 scope) ── */
+    /* Dark pages: see buildSrcdoc. */
+    body.dark-pages #epubFrame { background: #000; }
+
+    /* ── SETTINGS PANEL (font size + dark pages) ── */
     .settings-panel {
       position: fixed;
       bottom: 70px;
@@ -502,6 +505,50 @@
       transition: opacity 0.3s;
     }
     .bm-toast.show { opacity: 1; }
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 14px;
+    }
+    .settings-row-label {
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 0.82rem;
+      color: #ccc;
+    }
+    .settings-toggle {
+      position: relative;
+      width: 36px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .settings-toggle input { opacity: 0; width: 0; height: 0; }
+    .settings-toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: rgba(255,255,255,0.15);
+      border-radius: 20px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .settings-toggle-slider::before {
+      content: '';
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #f0f0f0;
+      transition: transform 0.2s;
+    }
+    .settings-toggle input:checked + .settings-toggle-slider {
+      background: var(--theme-primary, #e94560);
+    }
+    .settings-toggle input:checked + .settings-toggle-slider::before {
+      transform: translateX(16px);
+    }
   </style>
 </head>
 <body class="cursor-hidden"><!-- UI starts hidden, matching chapter_reader.html's convention -->
@@ -552,6 +599,13 @@
     <input class="settings-fontsize-range" type="range" min="70" max="200" step="5" value="100" id="fontSizeRange">
     <span class="settings-fontsize-value" id="fontSizeValue">100%</span>
   </div>
+  <div class="settings-row">
+    <span class="settings-row-label">Dark pages</span>
+    <label class="settings-toggle">
+      <input type="checkbox" id="darkPagesToggle">
+      <span class="settings-toggle-slider"></span>
+    </label>
+  </div>
 </div>
 
 <!-- Bookmark panel (mini popup) -->
@@ -585,6 +639,11 @@
 <script>
   // Opening a reader resets the search screen's remembered filters (search_page.html).
   try { sessionStorage.removeItem('kinsho_search_state'); } catch (e) {}
+  // Dark pages: light text on black (one per-user switch, shared with the
+  // image reader's PDF/EPUB volumes). The book's own colours are overridden;
+  // pictures keep theirs, on white so transparent line art stays visible.
+  let darkPages = {{ dark_pages | default(false) | tojson }};
+  document.body.classList.toggle('dark-pages', darkPages);
   const backBtn       = document.getElementById('backBtn');
   const topbar        = document.getElementById('topbar');
   const topbarTitle    = document.getElementById('topbarTitle');
@@ -722,8 +781,14 @@
       }
       #pg-outer * { -webkit-user-select: none; user-select: none; }
     `;
+    const darkCss = !darkPages ? '' : `
+      html, body, #pg-outer { background: #000 !important; color: #d8d8d8 !important; }
+      #pg-outer * { color: inherit !important; background-color: transparent !important; border-color: #444 !important; }
+      #pg-outer a { color: #8ab4f8 !important; }
+      #pg-outer img, #pg-outer svg { background-color: #fff !important; }
+    `;
     return `<!doctype html><html><head><meta charset="utf-8">` +
-      `<style>${rewrittenCss}</style><style>${fontSizeCss}</style><style>${layoutCss}</style>` +
+      `<style>${rewrittenCss}</style><style>${fontSizeCss}</style><style>${layoutCss}</style><style>${darkCss}</style>` +
       `</head><body><div id="pg-outer">${rewrittenHtml}</div></body></html>`;
   }
 
@@ -1105,6 +1170,19 @@
     fontSizeDebounce = setTimeout(() => {
       if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clampFraction' });
     }, 200);
+  });
+
+  const darkPagesToggle = document.getElementById('darkPagesToggle');
+  darkPagesToggle.checked = darkPages;
+  darkPagesToggle.addEventListener('change', () => {
+    darkPages = darkPagesToggle.checked;
+    document.body.classList.toggle('dark-pages', darkPages);
+    if (lastHtml) renderChapterContent(lastHtml, lastCss, { land: 'clampFraction' });
+    fetch(apiUrl('/api/settings/dark-pages'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: darkPages }),
+    }).catch(() => {});
   });
 
   bbSettingsBtn.addEventListener('click', (e) => {

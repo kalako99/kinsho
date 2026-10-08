@@ -4804,6 +4804,19 @@ async def save_reading_stats_open(request: Request):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
+@app.post("/api/settings/dark-pages")
+async def save_dark_pages(request: Request):
+    """Dark pages (PDF and EPUB volumes): one per-user switch shared by the
+    image reader and the EPUB text reader."""
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    user_data = auth.load_user_data(username)
+    user_data["dark_pages"] = bool(body.get("on"))
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
 @app.post("/api/settings/backdrop")
 async def save_backdrop(request: Request):
     username  = auth.get_current_user(request)
@@ -7824,6 +7837,7 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
         "chapter_id": chapter_id,
         "theme_css": get_theme_css(username),
         "is_oneshot": is_oneshot,
+        "dark_pages": bool(auth.load_user_data(username).get("dark_pages")),
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapters")
@@ -7947,6 +7961,7 @@ def volume_reader(request: Request, library_id: int, manga_id: str, volume_id: s
         "manga_id":   manga_id,
         "volume_id":  volume_id,
         "theme_css":  get_theme_css(username),
+        "dark_pages": bool(auth.load_user_data(username).get("dark_pages")),
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/pages")

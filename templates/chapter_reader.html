@@ -829,6 +829,14 @@
     .sp-cell.sp-blank-white { background: #fff; }
     .sp-cell.sp-cb-ready .sp-canvas { display: block; }
     .sp-cell.sp-cb-ready img { display: none; }
+    /* Dark pages (PDF and EPUB volumes): see DARK PAGES. */
+    body.dark-pages .page-slot img:not(.dp-skip),
+    body.dark-pages .canvas-page canvas,
+    body.dark-pages .sp-cell:not(.dp-skip) img,
+    body.dark-pages .sp-cell:not(.dp-skip) .sp-canvas,
+    body.dark-pages .sp-flip-part:not(.dp-skip) img { filter: var(--dp-filter); }
+    body.dark-pages .sp-cell.sp-blank-white,
+    body.dark-pages .sp-flip-white { background: #000; }
     /* The page being pinch-zoomed paints over its neighbours. */
     .sp-slot.sp-zoomed { position: relative; z-index: 1; transform-origin: 0 0; }
     /* Pages more than one away are loaded but not drawn: see spMarkFarSlots. */
@@ -1491,6 +1499,17 @@
       <div class="pair-note" id="pairNote"></div>
     </div>
   </div>
+  <!-- Dark pages (only shown for PDF and EPUB volumes) -->
+  <div id="settingsDarkPagesWrap" style="display:none">
+    <div class="settings-section-title">Colours</div>
+    <div class="settings-row">
+      <span class="settings-row-label">Dark pages</span>
+      <label class="settings-toggle">
+        <input type="checkbox" id="settingsDarkPagesToggle">
+        <span class="settings-toggle-slider"></span>
+      </label>
+    </div>
+  </div>
   <!-- PDF quality (only shown for PDF sources) -->
   <div id="settingsPdfQualityWrap" style="display:none">
     <div class="settings-section-title">Page quality</div>
@@ -1548,6 +1567,7 @@
 // Opening a reader resets the search screen's remembered filters (search_page.html).
 try { sessionStorage.removeItem('kinsho_search_state'); } catch (e) {}
 window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
+window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 (async () => {
 
   // Debug log line (see static/debug_log.js); a no-op if that didn't load.
@@ -2253,6 +2273,93 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     return chDims?.source === 'pdf';
   }
   const isPdf = sourceIsPdf();
+
+  // ── DARK PAGES (2026-10-08) ──
+  // PDF and EPUB volumes can be read light on black ("Dark pages", one
+  // per-user switch shared with the EPUB text reader). Every page is
+  // inverted and hue-rotated by 180 degrees (colours keep their hue), then
+  // levelled so the document's paper colour comes out pure black: paper
+  // isn't always white, so it's sampled from the pages (median of the light
+  // pages seen so far). A page that is mostly dark already (a full-page
+  // picture) is left as it is (.dp-skip). CSS filters only, drawn by the GPU.
+  // Long-strip canvas pages are always filtered (they have no <img> to sample).
+  const isDocSource = (() => {
+    const ch = chapterList[0];
+    const d = ch && (isVolume ? dims.volumes?.[ch.id] : dims.chapters?.[ch.id]);
+    return d?.source === 'pdf' || d?.source === 'epub';
+  })();
+  let darkPages = !!window.__DARK_PAGES__;
+  const dpPaper = new Map();  // page URL -> [r, g, b] paper colour (0-1), or null: a dark page
+  const dpLightPapers = [];   // paper colours of the light pages, for the median
+  const _dpCanvas = document.createElement('canvas');
+  _dpCanvas.width = _dpCanvas.height = 32;
+  // hue-rotate(180deg) as a matrix (Filter Effects spec): where the paper ends up.
+  const DP_HUE180 = [[-0.574, 1.430, 0.144], [0.426, 0.430, 0.144], [0.426, 1.430, -0.856]];
+
+  // The page's most common colour, or null when it's dark (luminance < 0.5).
+  function dpSample(img) {
+    try {
+      const ctx = _dpCanvas.getContext('2d', { willReadFrequently: true });
+      ctx.clearRect(0, 0, 32, 32);
+      ctx.drawImage(img, 0, 0, 32, 32);
+      const px = ctx.getImageData(0, 0, 32, 32).data;
+      const buckets = new Map();
+      for (let i = 0; i < px.length; i += 4) {
+        const key = (px[i] >> 4) << 8 | (px[i + 1] >> 4) << 4 | (px[i + 2] >> 4);
+        const b = buckets.get(key) || [0, 0, 0, 0];
+        b[0] += px[i]; b[1] += px[i + 1]; b[2] += px[i + 2]; b[3]++;
+        buckets.set(key, b);
+      }
+      let best = null;
+      for (const b of buckets.values()) if (!best || b[3] > best[3]) best = b;
+      const c = [best[0] / best[3] / 255, best[1] / best[3] / 255, best[2] / best[3] / 255];
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] < 0.5 ? null : c;
+    } catch (e) {
+      return [1, 1, 1];  // unreadable: taken as white paper
+    }
+  }
+
+  function dpFilter() {
+    let paper = [1, 1, 1];
+    if (dpLightPapers.length) {
+      const med = (k) => dpLightPapers.map(p => p[k]).sort((a, b) => a - b)[dpLightPapers.length >> 1];
+      paper = [med(0), med(1), med(2)];
+    }
+    // The paper's brightest channel after invert + hue-rotate becomes black:
+    // brightness(b) then contrast(c) maps v to 0 and 1 to 1.
+    let v = 0;
+    for (const row of DP_HUE180) v = Math.max(v, 1 - (row[0] * paper[0] + row[1] * paper[1] + row[2] * paper[2]));
+    v = Math.min(0.45, v + 0.02);
+    const c = (1 + v) / (1 - v), b = 1 / (1 + v);
+    return `invert(1) hue-rotate(180deg) brightness(${b.toFixed(4)}) contrast(${c.toFixed(4)})`;
+  }
+
+  function dpApply() {
+    document.body.classList.toggle('dark-pages', darkPages && isDocSource);
+    const f = dpFilter();
+    if (document.body.style.getPropertyValue('--dp-filter') !== f) document.body.style.setProperty('--dp-filter', f);
+  }
+
+  function dpOnImage(img) {
+    if (!darkPages || !isDocSource || !img.complete || !img.naturalWidth) return;
+    let paper = dpPaper.get(img.src);
+    if (paper === undefined) {
+      paper = dpSample(img);
+      dpPaper.set(img.src, paper);
+      if (paper) {
+        dpLightPapers.push(paper);
+        if (dpLightPapers.length > 60) dpLightPapers.shift();
+        dpApply();
+      }
+    }
+    img.classList.toggle('dp-skip', paper === null);
+    img.closest('.sp-cell')?.classList.toggle('dp-skip', paper === null);
+  }
+  // load doesn't bubble, but a capturing listener still sees every page's.
+  document.addEventListener('load', (e) => {
+    if (e.target.tagName === 'IMG' && e.target.closest('#reader, #singlePageView')) dpOnImage(e.target);
+  }, true);
+  dpApply();
 
   const PDF_SCALES = [1.0, 1.5, 2.0];
   function pdfScaleParam() {
@@ -4704,6 +4811,8 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     // PDF quality: only show for PDF sources
     const pdfQualityWrap = document.getElementById('settingsPdfQualityWrap');
     if (pdfQualityWrap) pdfQualityWrap.style.display = isPdf ? '' : 'none';
+    document.getElementById('settingsDarkPagesWrap').style.display = isDocSource ? '' : 'none';
+    document.getElementById('settingsDarkPagesToggle').checked = darkPages;
     syncPdfQualityUI(readerSettings.pdfScale ?? 1);
   }
 
@@ -4768,6 +4877,17 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     syncPairingUI();
     screenRotationUnlockFor(ROTATION_UNLOCK_MS);
     saveReaderSettings();
+  });
+
+  document.getElementById('settingsDarkPagesToggle').addEventListener('change', (e) => {
+    darkPages = e.target.checked;
+    dpApply();
+    for (const img of document.querySelectorAll('#reader img, #singlePageView img')) dpOnImage(img);
+    fetch(apiUrl('/api/settings/dark-pages'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: darkPages }),
+    }).catch(() => {});
   });
 
   document.getElementById('settingsPreloadRange').addEventListener('input', (e) => {
@@ -6040,6 +6160,7 @@ window.__IS_ONESHOT__ = {{ is_oneshot | default(false) | tojson }};
     el.style.height = part.h + 'px';
     if (part.white) el.classList.add('sp-flip-white');
     else if (part.url) {
+      if (dpPaper.get(new URL(part.url, location.href).href) === null) el.classList.add('dp-skip');
       const img = document.createElement('img');
       img.src = part.url;
       img.draggable = false;
