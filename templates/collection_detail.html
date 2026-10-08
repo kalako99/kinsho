@@ -7,6 +7,7 @@
   <title>Collection — KINSHO</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <script src="/static/api.js"></script>
+  <script src="/static/desc_fit.js"></script>
   <script src="{{ vue_src }}"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -736,6 +737,20 @@
       line-height: 1.6;
       white-space: pre-wrap;
     }
+    /* Cut to whole lines by fitDesc (see static/desc_fit.js). */
+    .desc-text.desc-cut { overflow: hidden; }
+    .desc-more {
+      display: block;
+      margin-top: 4px;
+      padding: 0;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      font-weight: 600;
+      color: var(--color-primary, #e94560);
+    }
     .desc-empty {
       font-size: 0.78rem;
       color: #444;
@@ -1149,7 +1164,8 @@
               </button>
             </div>
             <div v-if="!editingDesc">
-              <p v-if="collection.description" class="desc-text">{{ collection.description }}</p>
+              <p v-if="collection.description" class="desc-text" ref="descText" :class="{ 'desc-cut': descMaxH && !descOpen }" :style="descMaxH && !descOpen ? { maxHeight: descMaxH + 'px' } : null">{{ collection.description }}</p>
+              <button v-if="collection.description && descMaxH" ref="descMore" class="desc-more" @click="descOpen = !descOpen">{{ descOpen ? 'View less' : 'View more' }}</button>
               <p v-else class="desc-empty">No description yet.</p>
             </div>
             <div v-else>
@@ -1497,6 +1513,8 @@ createApp({
 
       // description
       editingDesc:          false,
+      descMaxH:             null,   // px the description is cut to, see fitDesc
+      descOpen:             false,
       descInput:            '',
 
       // tags
@@ -1563,7 +1581,19 @@ createApp({
     },
   },
 
+  // The hero only exists once the data has loaded (and again after it's
+  // re-rendered): watch whichever cover and column are on screen.
+  updated() {
+    if (!this._descObserver) return;
+    for (const el of document.querySelectorAll('.hero-head, .poster')) {
+      if (!this._descWatched.has(el)) { this._descWatched.add(el); this._descObserver.observe(el); }
+    }
+  },
   async mounted() {
+    // Re-fits the description whenever the cover or the column beside it
+    // changes size (data loading, edits, window resizes).
+    this._descObserver = new ResizeObserver(() => this.fitDesc());
+    this._descWatched = new Set();
     fetch(apiUrl('/api/settings')).then(r => r.json()).then(d => {
       this.showBackdrop = d.backdrop_detail !== false;
       this.readingStatsOpen = d.reading_stats_open !== false;
@@ -1577,6 +1607,16 @@ createApp({
   },
 
   methods: {
+    // Cuts the description so the column beside the cover ends near the
+    // cover's bottom (static/desc_fit.js).
+    fitDesc() {
+      if (this.editingDesc || !this.collection || !this.collection.description) { this.descMaxH = null; return; }
+      const h = descFitHeight(
+        document.querySelector('.hero-head'),
+        document.querySelector('.poster img, .poster .poster-placeholder'),
+        this.$refs.descText, this.$refs.descMore);
+      this.descMaxH = h == null ? null : Math.round(h);
+    },
     // Popup overlays close on click-outside, but only if the SAME
     // mousedown also started on the overlay itself — otherwise selecting
     // text inside a popup and releasing the mouse past its border closes
