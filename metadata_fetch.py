@@ -391,6 +391,62 @@ async def download_cover_image(url: str) -> bytes:
         return response.content
 
 
+# ── Series status (2026-10-08) ──
+# A manga linked to its AniList/MangaDex entry by a manual fetch follows the
+# series' publication status, for the detail page's status tag and the END
+# rename (see main.py's SERIES STATUS).
+
+ANILIST_STATUS_QUERY = """
+query ($id: Int) {
+  Media(id: $id, type: MANGA) { status volumes chapters }
+}
+"""
+_ANILIST_STATUS = {"FINISHED": "completed", "RELEASING": "ongoing", "HIATUS": "hiatus",
+                   "CANCELLED": "cancelled", "NOT_YET_RELEASED": "upcoming"}
+
+
+def _count(value) -> float | None:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+async def fetch_series_status(link: dict) -> dict | None:
+    """The series' status ("ongoing", "completed", "hiatus", "cancelled",
+    "upcoming") and final volume/chapter counts (None when the site doesn't
+    say) from the linked entries: AniList's status first, a count missing
+    there taken from MangaDex. None when neither answered."""
+    result = {"status": None, "volumes": None, "chapters": None}
+    if link.get("anilist"):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.post(ANILIST_API_URL, json={"query": ANILIST_STATUS_QUERY,
+                                                             "variables": {"id": int(link["anilist"])}})
+                r.raise_for_status()
+                media = (r.json().get("data") or {}).get("Media") or {}
+            result["status"] = _ANILIST_STATUS.get(media.get("status"))
+            result["volumes"] = _count(media.get("volumes"))
+            result["chapters"] = _count(media.get("chapters"))
+        except Exception as e:
+            print(f"[SeriesStatus] AniList {link['anilist']} failed: {e}")
+    if link.get("mangadex") and (not result["status"] or result["volumes"] is None or result["chapters"] is None):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.get(f"{MANGADEX_API_URL}/manga/{link['mangadex']}")
+                r.raise_for_status()
+                attrs = (r.json().get("data") or {}).get("attributes") or {}
+            result["status"] = result["status"] or attrs.get("status")
+            if result["volumes"] is None:
+                result["volumes"] = _count(attrs.get("lastVolume"))
+            if result["chapters"] is None:
+                result["chapters"] = _count(attrs.get("lastChapter"))
+        except Exception as e:
+            print(f"[SeriesStatus] MangaDex {link['mangadex']} failed: {e}")
+    return result if result["status"] else None
+
+
 # ── SUBSTEP 2: matching / confidence scoring ──────────────────────────
 #
 # Pure logic, no network calls. Takes a query title and one AniList

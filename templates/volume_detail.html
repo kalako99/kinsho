@@ -236,6 +236,18 @@
       background: transparent;
       border-radius: 8px;
     }
+    .status-badge.hiatus {
+      color: #fbbf24;
+      border-color: #fbbf24;
+      background: transparent;
+      border-radius: 8px;
+    }
+    .status-badge.cancelled {
+      color: #9ca3af;
+      border-color: #9ca3af;
+      background: transparent;
+      border-radius: 8px;
+    }
     .status-badge.complete {
       color: var(--color-primary, #e94560);
       border-color: var(--color-primary, #e94560);
@@ -1421,8 +1433,8 @@
 
           <!-- STATUS / LAST UPDATED -->
           <div class="status-row">
-            <span class="status-badge" :class="manga.is_complete ? 'complete' : 'ongoing'">
-              {{ manga.is_complete ? 'Complete' : 'Ongoing' }}
+            <span v-if="statusBadge()" class="status-badge" :class="statusBadge().cls" :title="statusBadge().title">
+              {{ statusBadge().label }}
             </span>
             <span v-if="manga.last_updated" class="status-badge updated">
               Last updated: {{ formatLastUpdated(manga.last_updated) }}
@@ -2088,6 +2100,19 @@ createApp({
   },
 
   methods: {
+    // The status tag: Complete when the last chapter/volume is marked END;
+    // otherwise the series' own status, only for a manga linked to its
+    // AniList/MangaDex entry by a fetch (an unlinked one has no real status).
+    statusBadge() {
+      const m = this.manga;
+      if (!m) return null;
+      const linked = m.series_status ? 'Status from AniList/MangaDex' : '';
+      if (m.is_complete) return { cls: 'complete', label: 'Complete', title: linked };
+      if (!m.series_status) return null;
+      if (m.series_status === 'hiatus') return { cls: 'hiatus', label: 'Hiatus', title: linked };
+      if (m.series_status === 'cancelled') return { cls: 'cancelled', label: 'Cancelled', title: linked };
+      return { cls: 'ongoing', label: 'Ongoing', title: linked + (m.series_status === 'completed' ? ' (finished, not all of it in the library yet)' : '') };
+    },
     // Cuts the description so the column beside the cover ends near the
     // cover's bottom (static/desc_fit.js).
     fitDesc() {

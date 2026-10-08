@@ -1072,6 +1072,15 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
                 if new_id in new_names:
                     entry["furthest_volume_name"] = new_names[new_id]
                 changed = True
+            # Chapters too (the END rename, see SERIES STATUS).
+            for id_key, name_key in (("last_chapter_id", "last_chapter_name"),
+                                     ("furthest_chapter", "furthest_chapter_name")):
+                if entry.get(id_key) in id_map:
+                    new_id = id_map[entry[id_key]]
+                    entry[id_key] = new_id
+                    if new_id in new_names:
+                        entry[name_key] = new_names[new_id]
+                    changed = True
 
         bookmarks = user_data.get("bookmarks", {}).get(bm_key)
         if bookmarks:
@@ -1216,6 +1225,123 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
         save_manga_dims(library_id, manga_name, dims)
     if id_map:
         _remap_renamed_volume_ids(library_id, manga_id, id_map, new_names)
+
+# ── SERIES STATUS (2026-10-08) ──
+# A manual Fetch Metadata apply with an AniList/MangaDex match links the
+# manga to that entry (dims["series_link"] = {"anilist": id, "mangadex": id}).
+# Its publication status is read then, and again whenever a scan finds the
+# number of chapters/volumes changed (dims["series_status"], see
+# metadata_fetch.fetch_series_status). The detail page shows it as a tag,
+# for linked manga only. When the series is finished and the library has
+# up to its final volume (chapter), the last one's name gets " END" (the
+# COMPLETE flag), moved off an older one when a later one arrives; never
+# for a cancelled series. Needs the manga's own folder and write access,
+# like Rename volumes.
+
+def _series_units(dims: dict) -> tuple[bool, dict]:
+    """(volume manga?, its volumes or chapters by id)."""
+    if dims.get("volumes"):
+        return True, dims["volumes"]
+    return False, dims.get("chapters") or {}
+
+
+def _ends_with_end(name: str) -> bool:
+    return name.split()[-1:] == ["END"]
+
+
+def _unit_number(name: str, manga_name: str, volumes: bool) -> float | None:
+    """The volume/chapter number in a folder or file name, or None."""
+    bare = name.rsplit("END", 1)[0].strip() if _ends_with_end(name) else name
+    if volumes:
+        parsed = volume_rename.parse_volume_name(bare, manga_name)
+        if parsed:
+            return float(parsed[0])
+    s = bare[len(manga_name):] if bare.lower().startswith(manga_name.lower()) else bare
+    s = re.sub(r'\[[^\]]*\]|\([^)]*\)', ' ', s)
+    m = (re.search(r'(?:chapter|ch\.?|volume|vol\.?|v)\s*(\d+(?:\.\d+)?)', s, re.I)
+         or re.search(r'(\d+(?:\.\d+)?)', s))
+    return float(m.group(1)) if m else None
+
+
+def _rename_unit(library_id: int, manga: dict, dims: dict, volumes: bool, unit_id: str, new_stem: str) -> bool:
+    """Renames one chapter/volume (folder, or file keeping its extension)
+    and carries everything keyed by its id over to the new id: its dims
+    entry, a two-page layout, and every user's reading history and
+    bookmarks (_remap_renamed_volume_ids). Caller saves dims."""
+    bucket = dims["volumes" if volumes else "chapters"]
+    entry = bucket.get(unit_id) or {}
+    old_path = entry.get("path") or ""
+    if not os.path.exists(old_path):
+        return False
+    parent = os.path.dirname(old_path)
+    new_path = os.path.join(parent, new_stem if os.path.isdir(old_path) else new_stem + os.path.splitext(old_path)[1])
+    if os.path.exists(new_path):
+        print(f"[SeriesStatus] Not renaming '{old_path}': '{new_path}' already exists")
+        return False
+    try:
+        os.rename(old_path, new_path)
+    except OSError as e:
+        print(f"[SeriesStatus] Could not rename '{old_path}': {e}")
+        return False
+    print(f"[SeriesStatus] Renamed '{os.path.basename(old_path)}' -> '{os.path.basename(new_path)}'")
+    new_id = make_id(manga["name"] + (":vol:" if volumes else ":") + new_stem)
+    entry = bucket.pop(unit_id)
+    entry["name"] = new_stem
+    entry["path"] = new_path
+    bucket[new_id] = entry
+    layouts = dims.get("book_layouts") or {}
+    if unit_id in layouts:
+        layouts[new_id] = layouts.pop(unit_id)
+    _remap_renamed_volume_ids(library_id, manga["id"], {unit_id: new_id}, {new_id: new_stem})
+    return True
+
+
+def _store_series_status(dims: dict, info: dict) -> None:
+    _, units = _series_units(dims)
+    dims["series_status"] = {**info, "checked": datetime.now().isoformat(), "units": len(units)}
+
+
+def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
+    """Puts END on the last chapter/volume of a finished series the library
+    has completely (see SERIES STATUS). True when something was renamed;
+    dims is saved then. Call with _scan_exec_lock held."""
+    st = dims.get("series_status") or {}
+    folder = manga.get("path") or ""
+    if st.get("status") != "completed" or manga.get("manga_type") == "oneshot" or not os.path.isdir(folder):
+        return False
+    volumes, units = _series_units(dims)
+    final = st.get("volumes" if volumes else "chapters")
+    if not units or not final:
+        return False
+    numbers = [n for n in (_unit_number(u.get("name", ""), manga["name"], volumes) for u in units.values()) if n is not None]
+    if not numbers or max(numbers) < final:
+        return False
+    ordered = sorted(units.items(), key=lambda kv: natural_sort_key(kv[1].get("name", "")))
+    last_id = ordered[-1][0]
+    folder_mtime_before = os.path.getmtime(folder)
+    renamed = False
+    for uid, u in ordered[:-1]:
+        name = u.get("name", "")
+        if _ends_with_end(name):
+            renamed |= _rename_unit(library_id, manga, dims, volumes, uid, name.rsplit("END", 1)[0].strip())
+    last_name = units[last_id].get("name", "") if last_id in units else ""
+    if last_name and not _ends_with_end(last_name):
+        renamed |= _rename_unit(library_id, manga, dims, volumes, last_id, last_name + " END")
+    if renamed:
+        save_manga_dims(library_id, manga["name"], dims)
+        _keep_folder_unchanged(manga, folder, folder_mtime_before)
+        manga["is_complete"] = _is_complete(dims)
+    return renamed
+
+
+def _is_complete(dims: dict) -> bool:
+    """COMPLETE: the last chapter/volume's name ends with the word END."""
+    _, units = _series_units(dims)
+    if not units:
+        return False
+    last = sorted(units.values(), key=lambda u: natural_sort_key(u.get("name", "")))[-1]
+    return _ends_with_end(last.get("name", ""))
+
 
 def completed_chapter_count(history_entry: dict) -> int:
     """How many chapters/volumes this user has actually marked completed
@@ -3483,24 +3609,29 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     except Exception as e:
                         print(f"[ScanLib] Failed to delete covers folder: {e}")
 
+    # ── SERIES STATUS: linked manga whose chapter/volume count changed get
+    # their status read again; a finished one gets END on its last item ──
+    for manga in mangas.values():
+        dims = _safe_load_manga_dims(library_id, manga.get("name", ""))
+        if not dims.get("series_link"):
+            continue
+        try:
+            _, units = _series_units(dims)
+            if (dims.get("series_status") or {}).get("units") != len(units):
+                info = asyncio.run(metadata_fetch.fetch_series_status(dims["series_link"]))
+                if info:
+                    _store_series_status(dims, info)
+                    save_manga_dims(library_id, manga["name"], dims)
+            _apply_series_end(library_id, manga, dims)
+        except Exception as e:
+            print(f"[SeriesStatus] {manga.get('name')}: {e}")
+
     # ── COMPLETE flag: check if last chapter/volume name ends with word "END" ──
     comicinfo_changed = False
     for manga in mangas.values():
         manga_name = manga.get("name", "")
         dims = _safe_load_manga_dims(library_id, manga_name)
-        last_name = None
-        volumes = dims.get("volumes", {})
-        chapters = dims.get("chapters", {})
-        if volumes:
-            sorted_vols = sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", "")))
-            last_name = sorted_vols[-1].get("name", "")
-        elif chapters:
-            sorted_chs = sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", "")))
-            last_name = sorted_chs[-1].get("name", "")
-        if last_name and last_name.split()[-1] == "END":
-            manga["is_complete"] = True
-        else:
-            manga["is_complete"] = False
+        manga["is_complete"] = _is_complete(dims)
 
         # ── ComicInfo.xml: fill in description/genres/tags left empty by
         # everything else (manual edit, a prior fetch, or a prior run of
@@ -5136,6 +5267,8 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     manga["genres"]      = dims.get("genres", [])
     manga["description"] = dims.get("description", "")
     manga["description_manual"] = bool(dims.get("description_manual"))
+    # The series' publication status, for linked manga only (SERIES STATUS).
+    manga["series_status"] = (dims.get("series_status") or {}).get("status") if dims.get("series_link") else None
     return JSONResponse(manga)
 
 @app.post("/api/manga/{library_id}/{manga_id}/favourite")
@@ -6636,6 +6769,35 @@ async def apply_metadata_endpoint(request: Request, library_id: int, manga_id: s
                 mangadex_candidate = candidate if source == "mangadex" else None
                 if await fetch_and_set_cover(library_id, manga, anilist_candidate, mangadex_candidate):
                     save_app_data(data)
+
+        # Link the manga to the AniList/MangaDex entry it was matched with
+        # and read the series' status now (see SERIES STATUS).
+        link = {}
+        for entry in entries:
+            cand = entry.get("candidate") or {}
+            if entry.get("source") == "anilist" and cand.get("anilist_id"):
+                link["anilist"] = cand["anilist_id"]
+            elif entry.get("source") == "mangadex" and cand.get("mangadex_id"):
+                link["mangadex"] = cand["mangadex_id"]
+                if cand.get("anilist_id_link"):
+                    link.setdefault("anilist", cand["anilist_id_link"])
+        if link:
+            info = await metadata_fetch.fetch_series_status(link)
+            dims = load_manga_dims(library_id, manga["name"])
+            dims["series_link"] = link
+            if info:
+                _store_series_status(dims, info)
+            else:
+                dims.pop("series_status", None)
+            save_manga_dims(library_id, manga["name"], dims)
+            # The END rename touches the library: never while a scan runs
+            # (the scan does it itself at its end then).
+            if info and library_id not in _extraction_running and _scan_exec_lock.acquire(blocking=False):
+                try:
+                    if await asyncio.to_thread(_apply_series_end, library_id, manga, dims):
+                        save_app_data(data)
+                finally:
+                    _scan_exec_lock.release()
         return JSONResponse({"ok": True})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
