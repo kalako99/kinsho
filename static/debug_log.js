@@ -112,7 +112,12 @@
     if (performance.memory) {
       parts.push(`js heap ${mb(performance.memory.usedJSHeapSize)} (rounded by the browser)`);
     }
-    if (window.KinshoDebug) {
+    // KinshoDebug.stats() is a synchronous call into the app that takes
+    // 6-11 ms on the tablet: a dropped 120 Hz frame every 2 s, visible while
+    // the BLE scroller drives the page (2026-10-09). Skipped meanwhile.
+    if (window.KinshoDebug && window.__kinshoBleMoving) {
+      parts.push('device stats skipped (BLE scroller moving)');
+    } else if (window.KinshoDebug) {
       try { parts.push(window.KinshoDebug.stats()); } catch (e) { parts.push('device stats failed: ' + e); }
     }
     if (sampleExtra) {
