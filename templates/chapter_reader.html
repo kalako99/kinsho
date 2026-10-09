@@ -7155,6 +7155,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       function kinshoEnsureLoop() {
         if (kinshoLoopRunning) return;
         kinshoLoopRunning = true;
+        window.__kinshoBleMoving = true;   // debug_log.js skips its slow device-stats sample meanwhile
         kinshoLastFrameTime = performance.now();
         requestAnimationFrame(kinshoScrollLoop);
       }
@@ -7208,6 +7209,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
         if ((kinshoRate === 0 && kinshoDisplayRate === 0) || readerSettings.mode !== 'long-strip') {
           kinshoLoopRunning = false;
+          window.__kinshoBleMoving = false;
           kinshoScrollPos = null;
           return;
         }
