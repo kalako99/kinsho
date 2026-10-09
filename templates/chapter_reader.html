@@ -7024,22 +7024,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     let kinshoLastRateTime = 0;  // performance.now() of the last notification received
     let kinshoScrollPos    = null;  // fractional mirror of reader.scrollTop while kinsho is actively driving it; null when idle
 
-    // Smoothing the hand (2026-10-09, measured on the tablet): while the
-    // wheel is held at a steady speed, the values still surge by 50-150%
-    // for 0.3-0.5 s as the finger reaches across the gadget, and the page
-    // followed every surge. kinshoSmoothRate follows kinshoRate with a
-    // KINSHO_SMOOTH_TAU time constant while moving; a start or a reversal
-    // jumps straight to the new value and a stop drops it to 0 at once (the
-    // user wants stops immediate, no coasting). At very slow speeds the
-    // device flips between ~140 (its smallest step) and 0, so a lone 0
-    // below KINSHO_BRIDGE_BELOW is held for KINSHO_BRIDGE_MS and only a
-    // second 0 (or the timeout) stops.
-    const KINSHO_SMOOTH_TAU   = 0.3;   // seconds
-    const KINSHO_BRIDGE_BELOW = 400;   // 1/120-notch units/sec
-    const KINSHO_BRIDGE_MS    = 120;
-    let kinshoSmoothRate = 0;
-    let kinshoZeroTimer  = null;
-
     function scrollerSetStatus(cssClass, text) {
       scrollerStatusText.className = 'scroller-status' + (cssClass ? ' ' + cssClass : '');
       scrollerStatusText.textContent = text;
@@ -7088,22 +7072,9 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       };
 
       window.__kinshoBleOnRate = (rate) => {
-        kinshoLastRateTime = performance.now();
-        if (rate === 0) {
-          if (kinshoRate === 0) return;
-          if (Math.abs(kinshoRate) < KINSHO_BRIDGE_BELOW && kinshoZeroTimer === null) {
-            kinshoZeroTimer = setTimeout(() => { kinshoZeroTimer = null; kinshoRate = 0; }, KINSHO_BRIDGE_MS);
-            return;
-          }
-          clearTimeout(kinshoZeroTimer); kinshoZeroTimer = null;
-          kinshoRate = 0;
-          return;
-        }
-        if (kinshoZeroTimer !== null) { clearTimeout(kinshoZeroTimer); kinshoZeroTimer = null; }
-        // Start or reversal: no build-up from the old value.
-        if (kinshoRate === 0 || Math.sign(rate) !== Math.sign(kinshoSmoothRate)) kinshoSmoothRate = rate;
         kinshoRate = rate;
-        if (readerSettings.mode === 'long-strip') kinshoEnsureLoop();
+        kinshoLastRateTime = performance.now();
+        if (rate !== 0 && readerSettings.mode === 'long-strip') kinshoEnsureLoop();
       };
 
       scrollerBtn.addEventListener('click', (e) => {
@@ -7184,7 +7155,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       function kinshoEnsureLoop() {
         if (kinshoLoopRunning) return;
         kinshoLoopRunning = true;
-        window.__kinshoBleMoving = true;   // debug_log.js skips its slow device-stats sample meanwhile
         kinshoLastFrameTime = performance.now();
         requestAnimationFrame(kinshoScrollLoop);
       }
@@ -7202,12 +7172,10 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
         // percentage-of-gap exponential chase) — also gives a real BLE
         // disconnect (kinshoRate forced to 0 above) a smooth, bounded-time
         // decel to a stop instead of an abrupt freeze.
-        if (kinshoRate === 0) kinshoSmoothRate = 0;
-        else kinshoSmoothRate += (kinshoRate - kinshoSmoothRate) * (1 - Math.exp(-dt / KINSHO_SMOOTH_TAU));
-        const rateDiff  = kinshoSmoothRate - kinshoDisplayRate;
+        const rateDiff  = kinshoRate - kinshoDisplayRate;
         const maxChange = KINSHO_MAX_ACCEL * KINSHO_UNITS_PER_NOTCH * dt;
         if (Math.abs(rateDiff) <= maxChange) {
-          kinshoDisplayRate = kinshoSmoothRate;
+          kinshoDisplayRate = kinshoRate;
         } else {
           kinshoDisplayRate += Math.sign(rateDiff) * maxChange;
         }
@@ -7240,7 +7208,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
         if ((kinshoRate === 0 && kinshoDisplayRate === 0) || readerSettings.mode !== 'long-strip') {
           kinshoLoopRunning = false;
-          window.__kinshoBleMoving = false;
           kinshoScrollPos = null;
           return;
         }
