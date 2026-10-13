@@ -6917,17 +6917,17 @@ async def _try_anilist_primary(name: str, manga_formats: set, novel_library: boo
     uses hit_rate_limit to flip its own anilist_enabled circuit breaker for
     the rest of a batch scan.
 
-    Several results: a series often exists as both a manga and a light novel
-    under the same name. Among the results whose name matches exactly, the
-    library decides (2026-10-06, user's request): a library with "novel" in
-    its name takes the novel, any other library the non-novel one, provided
-    exactly one is left.
+    A series often exists as both a manga and a light novel under the same
+    name. Among the results whose name matches exactly, the library decides
+    (2026-10-06, user's request): a library with "novel" in its name takes
+    the novel, any other library the non-novel one, provided exactly one is
+    left. A lone result goes through the same check (2026-10-13): it used to
+    be taken as is, so a manga library could get the light novel, or another
+    series with a similar name, whenever AniList returned only that one.
     """
     try:
         a_results = await metadata_fetch.search_anilist_manga(name, per_page=8)
         a_typed = [r for r in a_results if (r.get("format") or "").upper() in manga_formats]
-        if len(a_typed) == 1:
-            return a_typed[0], False
         exact = [c for c in metadata_fetch.score_all_candidates(name, a_typed) if c["match_score"] >= 1.0]
         preferred = [c for c in exact if ((c.get("format") or "").upper() == "NOVEL") == novel_library]
         return (preferred[0] if len(preferred) == 1 else None), False
