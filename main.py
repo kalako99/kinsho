@@ -1148,6 +1148,46 @@ def _rescale_page_positions(library_id: int, manga_id: str, counts: dict[str, tu
                   f"({len(counts)} chapter(s)/volume(s) changed page count)")
             auth.save_user_data(username, user_data)
 
+def _carry_over_replaced(dims: dict, bucket: str, manga_name: str, removed: dict[str, dict],
+                         added_ids: set[str]) -> tuple[dict, dict, dict, set]:
+    """
+    A chapter/volume replaced by a copy with another name (nyaa-server's
+    upgrades delete "Volume 05" and the user moves in "Black Summoner 05
+    (danke-Empire)", 2026-10-13) gets a new id, so its reading progress would
+    be pruned with the old one. Each removed item with a number is noted in
+    dims[f"replaced_{bucket}"] (number -> old id, name, page count), kept
+    across scans since the new copy can arrive scans later; a new item with
+    that number takes its place: (id_map, new_names, page counts) for
+    _remap_renamed_volume_ids and _rescale_page_positions. Returns those plus
+    the removed ids now noted, whose history must not be pruned.
+    """
+    is_vol = bucket == "volumes"
+    noted = dims.setdefault(f"replaced_{bucket}", {})
+    kept = set()
+    for old_id, entry in removed.items():
+        number = _unit_number(entry.get("name", ""), manga_name, is_vol)
+        if number is not None:
+            noted[f"{number:g}"] = {"id": old_id, "name": entry.get("name"),
+                                    "pages": len(entry.get("pages") or [])}
+            kept.add(old_id)
+    id_map, new_names, counts = {}, {}, {}
+    for new_id in added_ids:
+        entry = dims[bucket][new_id]
+        number = _unit_number(entry.get("name", ""), manga_name, is_vol)
+        old = noted.pop(f"{number:g}", None) if number is not None else None
+        if old is None:
+            continue
+        print(f"[ScanLib] '{entry.get('name')}' replaces '{old['name']}': carrying reading progress over")
+        id_map[old["id"]] = new_id
+        new_names[new_id] = entry.get("name")
+        new_count = len(entry.get("pages") or [])
+        if old["pages"] and new_count and old["pages"] != new_count:
+            counts[new_id] = (old["pages"], new_count)
+    if not noted:
+        dims.pop(f"replaced_{bucket}")
+    return id_map, new_names, counts, kept
+
+
 def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, manga_id: str,
                            classification: dict) -> None:
     """
@@ -1183,9 +1223,15 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
         return (1, natural_sort_key(dirname))
 
     ordered = sorted(dirnames, key=_rename_order_key)
-    renamed = volume_rename.compute_renamed_volumes([(d, d) for d in ordered], manga_name)
+    # Each volume's provider as last resolved (volume number -> provider), so a
+    # volume replaced with another provider's copy doesn't move the volumes
+    # before it to that provider (see volume_rename.resolve_volume_providers).
+    dims = _safe_load_manga_dims(library_id, manga_name)
+    stored_providers = dims.get("volume_providers") or {}
+    known = {int(k): v for k, v in stored_providers.items()}
+    renamed = volume_rename.compute_renamed_volumes([(d, d) for d in ordered], manga_name, known)
 
-    dims = None
+    dims_changed = False
     id_map: dict[str, str] = {}
     new_names: dict[str, str] = {}
     for old_dirname in ordered:
@@ -1207,21 +1253,26 @@ def _apply_volume_renames(library_id: int, manga_path: str, manga_name: str, man
         print(f"[ScanLib] Renamed volume: '{old_dirname}' -> '{new_name}'")
         old_vol_id = make_id(manga_name + ":vol:" + old_dirname)
         new_vol_id = make_id(manga_name + ":vol:" + new_name)
-        if dims is None:
-            dims = _safe_load_manga_dims(library_id, manga_name)
         volumes = dims.setdefault("volumes", {})
         if old_vol_id in volumes:
             vol_entry = volumes.pop(old_vol_id)
             vol_entry["name"] = new_name
             vol_entry["path"] = new_path
             volumes[new_vol_id] = vol_entry
+        dims_changed = True
         id_map[old_vol_id] = new_vol_id
         new_names[new_vol_id] = new_name
 
         idx = classification["content_subfolders"].index(old_dirname)
         classification["content_subfolders"][idx] = new_name
 
-    if dims is not None:
+    final = sorted(classification["content_subfolders"], key=_rename_order_key)
+    providers = {str(n): p for n, p in
+                 volume_rename.resolve_volume_providers([(d, d) for d in final], manga_name, known).items()}
+    if providers != stored_providers:
+        dims["volume_providers"] = providers
+        dims_changed = True
+    if dims_changed:
         save_manga_dims(library_id, manga_name, dims)
     if id_map:
         _remap_renamed_volume_ids(library_id, manga_id, id_map, new_names)
@@ -2790,6 +2841,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             return
 
         dims = _safe_load_manga_dims(library_id, manga_name)
+        ids_before = set(dims.get("chapters", {})) | set(dims.get("volumes", {}))
+        removed: dict[str, dict] = {}
 
         if manga_type == "case1":
             # Content subfolders are chapters
@@ -2846,7 +2899,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             for stale_id in stale_ids:
                 stale_name = dims["chapters"][stale_id].get("name", stale_id)
                 print(f"[ScanLib] Removing chapter no longer on disk: {stale_name}")
-                del dims["chapters"][stale_id]
+                removed[stale_id] = dims["chapters"].pop(stale_id)
+            bucket, added_ids = "chapters", valid_chapter_ids - ids_before
 
             if library.get("flat_scan") and mangas[manga_path].get("cover") is None:
                 _flat_scan_cover_fallback(manga_path, manga_name, manga_type, classification, dims)
@@ -2940,7 +2994,8 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             for stale_id in stale_ids:
                 stale_name = dims["volumes"][stale_id].get("name", stale_id)
                 print(f"[ScanLib] Removing volume no longer on disk: {stale_name}")
-                del dims["volumes"][stale_id]
+                removed[stale_id] = dims["volumes"].pop(stale_id)
+            bucket, added_ids = "volumes", valid_vol_ids - ids_before
 
             # If nothing above set a cover (e.g. every volume was unchanged
             # and skipped this pass, so the loop above never ran its
@@ -2952,8 +3007,13 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 if fallback:
                     mangas[manga_path]["cover"] = fallback
 
+        id_map, new_names, counts, noted = _carry_over_replaced(dims, bucket, manga_name, removed, added_ids)
         save_manga_dims(library_id, manga_name, dims)
-        _prune_stale_reading_history(library_id, manga_id, dims, stale_ids)
+        if id_map:
+            _remap_renamed_volume_ids(library_id, manga_id, id_map, new_names)
+        if counts:
+            _rescale_page_positions(library_id, manga_id, counts)
+        _prune_stale_reading_history(library_id, manga_id, dims, stale_ids - noted)
 
     def _register_oneshot_manga(manga_path: str):
         """

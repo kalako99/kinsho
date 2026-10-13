@@ -117,11 +117,12 @@ def recompact_providers(ordered_keys: list[str], resolved: dict[str, str | None]
     return display
 
 
-def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | None = None) -> dict[str, str | None]:
+def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | None = None,
+                            known: dict[int, str] | None = None) -> dict[str, str | None]:
     """ordered: [(item_key, current_name), ...] in natural-sort volume
     order. Returns {item_key: new_name_or_None} -- None means "could not
     parse this one, leave its name untouched entirely". manga_name: see
-    parse_volume_name.
+    parse_volume_name. known: see resolve_volume_providers.
 
     An unparseable item is excluded from the provider chain (it's neither
     a source nor a target of decode/recompact) rather than resetting the
@@ -132,16 +133,10 @@ def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | No
     """
     keys_in_order = [key for key, _ in ordered]
     names = dict(ordered)
-    # A trailing "END" (the last volume of a finished series: main.py marks
-    # the manga complete when the last name's last word is END) is set aside
-    # and put back after renaming; before 2026-10-07 renaming dropped it.
     ends = {key: names[key].split()[-1:] == ["END"] for key in keys_in_order}
-    bare = {key: names[key].rsplit("END", 1)[0].strip() if ends[key] else names[key] for key in keys_in_order}
-    parsed = {key: parse_volume_name(bare[key], manga_name) for key in keys_in_order}
-
+    parsed = _parse_all(ordered, manga_name)
     parseable_keys = [k for k in keys_in_order if parsed[k] is not None]
-    raw_pairs = [(k, parsed[k][1]) for k in parseable_keys]
-    resolved = decode_providers(raw_pairs)
+    resolved = _resolve(parsed, parseable_keys, known)
     display = recompact_providers(parseable_keys, resolved)
 
     result: dict[str, str | None] = {}
@@ -152,3 +147,35 @@ def compute_renamed_volumes(ordered: list[tuple[str, str]], manga_name: str | No
         number, _ = parsed[k]
         result[k] = format_volume_name(number, display[k]) + (" END" if ends[k] else "")
     return result
+
+
+def resolve_volume_providers(ordered: list[tuple[str, str]], manga_name: str | None = None,
+                             known: dict[int, str] | None = None) -> dict[int, str]:
+    """{volume number: provider} for every volume whose provider is known,
+    stored by main.py (dims.json "volume_providers") and passed back as
+    `known` on the next scan. known wins over the run rule for a volume
+    without a bracket of its own (2026-10-13): when volume 05 of an Ushi run
+    04-23 is replaced by a danke-Empire copy (nyaa-server's upgrades), the
+    rule alone would hand volume 04 to danke-Empire, the bracket after it.
+    A volume's own bracket still wins over known."""
+    parsed = _parse_all(ordered, manga_name)
+    parseable_keys = [k for k, _ in ordered if parsed[k] is not None]
+    resolved = _resolve(parsed, parseable_keys, known)
+    return {parsed[k][0]: resolved[k] for k in parseable_keys if resolved[k] is not None}
+
+
+def _parse_all(ordered: list[tuple[str, str]], manga_name: str | None) -> dict[str, tuple[int, str | None] | None]:
+    # A trailing "END" (the last volume of a finished series: main.py marks
+    # the manga complete when the last name's last word is END) is set aside
+    # and put back after renaming; before 2026-10-07 renaming dropped it.
+    out = {}
+    for key, name in ordered:
+        bare = name.rsplit("END", 1)[0].strip() if name.split()[-1:] == ["END"] else name
+        out[key] = parse_volume_name(bare, manga_name)
+    return out
+
+
+def _resolve(parsed: dict, parseable_keys: list[str], known: dict[int, str] | None) -> dict[str, str | None]:
+    decoded = decode_providers([(k, parsed[k][1]) for k in parseable_keys])
+    known = known or {}
+    return {k: parsed[k][1] or known.get(parsed[k][0]) or decoded[k] for k in parseable_keys}
