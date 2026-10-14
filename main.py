@@ -1365,7 +1365,13 @@ def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
     if not units or not final:
         return False
     numbers = [n for n in (_unit_number(u.get("name", ""), manga["name"], volumes) for u in units.values()) if n is not None]
-    if not numbers or max(numbers) < final:
+    if not numbers or int(max(numbers)) < int(final):
+        return False
+    if int(max(numbers)) > int(final):
+        # More than the series' final count: the link points at another
+        # series (a spin-off), so its status says nothing about this one.
+        print(f"[SeriesStatus] Not marking '{manga['name']}' END: library goes up to {max(numbers):g}, "
+              f"linked series ends at {final:g} (wrong link?)")
         return False
     ordered = sorted(units.items(), key=lambda kv: natural_sort_key(kv[1].get("name", "")))
     last_id = ordered[-1][0]
@@ -1374,7 +1380,7 @@ def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
     for uid, u in ordered[:-1]:
         name = u.get("name", "")
         if _ends_with_end(name):
-            renamed |= _rename_unit(library_id, manga, dims, volumes, uid, name.rsplit("END", 1)[0].strip())
+            renamed |= _rename_unit(library_id, manga, dims, volumes, uid, re.sub(r'[\s-]*END$', '', name))
     last_name = units[last_id].get("name", "") if last_id in units else ""
     if last_name and not _ends_with_end(last_name):
         renamed |= _rename_unit(library_id, manga, dims, volumes, last_id, last_name + " END")
