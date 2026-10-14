@@ -698,7 +698,7 @@
     
   </div>
 
-  <div class="section" v-if="lastUpdatedPage === 1">
+  <div class="section" v-if="lastUpdatedPage === 1 && !hiddenRows.includes('lastRead')">
     <div class="section-header">
       <span class="section-title">Last Read</span>
       <div class="row-more-btn" :class="{ visible: atEnd.lastRead }">
@@ -716,7 +716,7 @@
       </div>
   </div>
 
-  <div class="section" v-if="lastUpdatedPage === 1">
+  <div class="section" v-if="lastUpdatedPage === 1 && !hiddenRows.includes('random')">
     <div class="section-header">
       <span class="section-title">Random</span>
       <div class="row-more-btn" :class="{ visible: atEnd.random }">
@@ -734,7 +734,23 @@
       </div>
   </div>
 
-  <div class="section" v-if="lastUpdatedPage === 1">
+  <!-- Like what this user read in the last 30 days (SUGGESTIONS in main.py); no View more. -->
+  <div class="section" v-if="lastUpdatedPage === 1 && !hiddenRows.includes('suggested') && suggested.length > 0">
+    <div class="section-header">
+      <span class="section-title">Suggested for you</span>
+    </div>
+    <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'suggested')">
+        <manga-thumb
+          v-for="manga in suggested"
+          :key="manga.id"
+          :manga="manga"
+          @click="openManga(manga)"
+          @contextmenu="openCtxMenu(manga)"
+        />
+      </div>
+  </div>
+
+  <div class="section" v-if="lastUpdatedPage === 1 && !hiddenRows.includes('favourites')">
     <div class="section-header">
       <span class="section-title">Favourites</span>
       <div class="row-more-btn" :class="{ visible: atEnd.favourites }">

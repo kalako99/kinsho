@@ -1220,6 +1220,30 @@
     </div>
   </div>
 
+  <!-- ── ROWS (2026-10-14): library page rows, and the detail pages' Similar manga ── -->
+  <hr class="divider">
+
+  <div class="settings-section">
+    <div class="section-label">Rows</div>
+    <div class="section-hint">Choose which rows show up on the library page and the detail pages.</div>
+
+    <div class="card" style="display:flex; flex-direction:column; gap:14px;">
+      <label v-for="r in LIBRARY_ROW_CHOICES" :key="r.id" style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;" v-text="'Library page: ' + r.label"></span>
+        <input type="checkbox" :checked="!hiddenLibraryRows.includes(r.id)" @change="toggleLibraryRow(r.id, $event.target.checked)" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Library page: Collections</span>
+        <input type="checkbox" v-model="showCollectionsRow" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
+        <span style="font-size:0.85rem;">Detail pages: Similar manga</span>
+        <input type="checkbox" v-model="showSimilarRow" @change="saveRowsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </label>
+      <div class="status-msg" :class="rowsStatus.type" v-text="rowsStatus.msg" style="min-height:0; margin:0;"></div>
+    </div>
+  </div>
+
   <!-- ── COLLECTIONS PREFERENCES ── -->
   <hr class="divider">
 
@@ -1228,10 +1252,6 @@
     <div class="section-hint">Personalize how collections show up on the library page.</div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:14px;">
-      <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
-        <span style="font-size:0.85rem;">Show Collections row on Library page</span>
-        <input type="checkbox" v-model="showCollectionsRow" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
-      </label>
       <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
         <span style="font-size:0.85rem;">Hide the admin's shared collections</span>
         <input type="checkbox" v-model="hideAdminCollections" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">

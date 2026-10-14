@@ -294,6 +294,17 @@ createApp({
       hideBleScroller:   true,
       bleScrollerStatus: { msg: '', type: '' },
 
+      // ── ROWS: library page rows hidden, and the detail pages' Similar manga ──
+      hiddenLibraryRows:      [],
+      showSimilarRow:         true,
+      rowsStatus:             { msg: '', type: '' },
+      LIBRARY_ROW_CHOICES: [
+        { id: 'lastRead',   label: 'Last Read' },
+        { id: 'random',     label: 'Random' },
+        { id: 'suggested',  label: 'Suggested for you' },
+        { id: 'favourites', label: 'Favourites' },
+      ],
+
       // ── COLLECTIONS PREFERENCES ──
       showCollectionsRow:     true,
       hideAdminCollections:   false,
@@ -626,6 +637,8 @@ createApp({
         this.hideBleScroller        = data.hide_ble_scroller         !== false;
         this.hiddenLibraries        = (data.hidden_libraries || []).map(String);
         this.showCollectionsRow     = data.show_collections_row     !== false;
+        this.hiddenLibraryRows      = data.hidden_library_rows      || [];
+        this.showSimilarRow         = data.show_similar_row         !== false;
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
         this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
@@ -1083,6 +1096,35 @@ createApp({
         this.libraryVisibilityStatus = { msg: 'Could not reach server.', type: 'err' };
       }
       setTimeout(() => { this.libraryVisibilityStatus = { msg: '', type: '' }; }, 2000);
+    },
+
+    // A library page row on (shown) or off (hidden).
+    toggleLibraryRow(id, shown) {
+      const hidden = new Set(this.hiddenLibraryRows);
+      if (shown) hidden.delete(id); else hidden.add(id);
+      this.hiddenLibraryRows = this.LIBRARY_ROW_CHOICES.map(r => r.id).filter(r => hidden.has(r));
+      try { localStorage.setItem('kinsho_hidden_rows', JSON.stringify(this.hiddenLibraryRows)); } catch (e) {}
+      this.saveRowsPrefs();
+    },
+
+    async saveRowsPrefs() {
+      try {
+        const res  = await fetch(apiUrl('/api/settings/rows'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            hidden_library_rows: this.hiddenLibraryRows,
+            show_similar_row:    this.showSimilarRow,
+          }),
+        });
+        const data = await res.json();
+        this.rowsStatus = data.ok
+          ? { msg: '✓ Saved.', type: 'ok' }
+          : { msg: 'Something went wrong.', type: 'err' };
+      } catch (e) {
+        this.rowsStatus = { msg: 'Could not reach server.', type: 'err' };
+      }
+      setTimeout(() => { this.rowsStatus = { msg: '', type: '' }; }, 2000);
     },
 
     async saveCollectionsPrefs() {

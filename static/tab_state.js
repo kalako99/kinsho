@@ -1,6 +1,6 @@
 // ── LIBRARY TAB STATE: build + save (shared by the library page and the reader) ──
-// One library tab's display state (Last Read / Random / Favourites /
-// Collections rows, backdrop, first Last Updated page) is built here and
+// One library tab's display state (Last Read / Random / Suggested for you /
+// Favourites / Collections rows, backdrop, first Last Updated page) is built here and
 // saved to localStorage, so the library page can show it instantly on the
 // next load -- including a cold start of the Android app, which loses
 // sessionStorage whenever Android kills it.
@@ -183,10 +183,12 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
   const signalCore = () => { if (!coreSignalled) { coreSignalled = true; opts.afterCore?.(); } };
   const prev = opts.prev || null;
   try {
-    const [allRes, settings, historyRes] = await Promise.all([
+    const [allRes, settings, historyRes, suggestData] = await Promise.all([
       fetch(tabUrl(`/api/mangas/${libraryId}?sort=alphabetical`)),
       opts.settingsPromise || fetch(tabUrl('/api/settings')).then(r => r.json()),
       fetch(tabUrl(`/api/reading/history/${libraryId}`)),
+      // Suggested for you: manga ids, best first (see SUGGESTIONS in main.py).
+      fetch(tabUrl(`/api/suggestions/${libraryId}`)).then(r => r.json()).catch(() => ({ ids: [] })),
     ]);
     const allData  = await allRes.json();
     const historyData = await historyRes.json();
@@ -233,6 +235,7 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
     const favouriteRowIds = pickRowIds(prev && prev.favouriteIds, mangas.filter(m => favouriteIds.has(m.id)).map(m => m.id), opts.reshuffle);
     const random     = randomIds.map(id => mangaById[id]);
     const favourites = favouriteRowIds.map(id => mangaById[id]);
+    const suggested  = (suggestData.ids || []).map(id => mangaById[id]).filter(Boolean);
 
     // Ambient blurred background from the most recently read manga,
     // falling back to the first manga (natural sort) in this library.
@@ -256,7 +259,7 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
       if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
     }
 
-    opts.onCoreReady?.({ lastRead, random, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
+    opts.onCoreReady?.({ lastRead, random, suggested, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
     signalCore();
     if (opts.restGate) await opts.restGate;
 
@@ -270,7 +273,7 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
     ]);
 
     return {
-      lastRead, random, favourites, collectionsRow,
+      lastRead, random, suggested, favourites, collectionsRow,
       randomIds, favouriteIds: favouriteRowIds, collectionIds: collectionsRow.map(c => c.id),
       bgLayerStyle, bgIsRaster, bgUrlToLock,
       lastUpdated:        lu ? lu.mangas  : [],
@@ -293,7 +296,7 @@ function promoteInSavedLastRead(libraryId, mangaId) {
   const state = loadPersistedTabState(libraryId);
   if (!state || !Array.isArray(state.lastRead)) return;
   if (state.lastRead[0] && state.lastRead[0].id === mangaId) return;
-  const rows = [state.lastRead, state.random, state.favourites, state.lastUpdated];
+  const rows = [state.lastRead, state.random, state.suggested, state.favourites, state.lastUpdated];
   let tile = null;
   for (const row of rows) {
     tile = (row || []).find(m => m && m.id === mangaId);

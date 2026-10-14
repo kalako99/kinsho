@@ -228,7 +228,7 @@ const app = createApp({
       activeTab,
 
       // ── TRACKS WHETHER EACH ROW IS SCROLLED TO THE END ──
-      atEnd: { lastRead: false, random: false, favourites: false, collections: false },
+      atEnd: { lastRead: false, random: false, suggested: false, favourites: false, collections: false },
 
       // ── ADMIN: INTEGRITY ISSUE BADGE ──
       isAdmin:             false,
@@ -266,9 +266,13 @@ const app = createApp({
       // ── ROW DATA ──
       lastRead:    activeState ? activeState.lastRead   : [],
       random:      activeState ? activeState.random     : [],
+      suggested:   activeState ? (activeState.suggested || []) : [],
       favourites:  activeState ? activeState.favourites : [],
       collectionsRow:       activeState ? activeState.collectionsRow : [],
       showCollectionsRow:   true,
+      // Library rows hidden in Settings -> Appearance; the last known value
+      // is kept locally so a hidden row never flashes before /api/settings.
+      hiddenRows:           (() => { try { return JSON.parse(localStorage.getItem('kinsho_hidden_rows') || '[]'); } catch (e) { return []; } })(),
       collectionMembership: loadPersistedMembership(),
 
       // ── GRID DATA + PAGINATION ──
@@ -679,6 +683,8 @@ const app = createApp({
         const res  = await fetch(apiUrl('/api/settings'));
         const data = await res.json();
         this.showCollectionsRow = data.show_collections_row !== false;
+        this.hiddenRows = data.hidden_library_rows || [];
+        try { localStorage.setItem('kinsho_hidden_rows', JSON.stringify(this.hiddenRows)); } catch (e) {}
       } catch (e) {
         this.showCollectionsRow = true;
       }
@@ -773,6 +779,7 @@ const app = createApp({
     applyTabState(state) {
       this.lastRead          = state.lastRead;
       this.random             = state.random;
+      this.suggested          = state.suggested || [];
       this.favourites         = state.favourites;
       this.collectionsRow     = state.collectionsRow;
       this.bgLayerStyle       = state.bgLayerStyle;
@@ -794,6 +801,7 @@ const app = createApp({
     applyCoreTabState(core) {
       this.lastRead     = core.lastRead;
       this.random        = core.random;
+      this.suggested     = core.suggested || [];
       this.favourites    = core.favourites;
       this.bgLayerStyle  = core.bgLayerStyle;
       this.bgIsRaster    = core.bgIsRaster;

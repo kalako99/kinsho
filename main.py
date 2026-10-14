@@ -17,7 +17,9 @@ import secrets
 import hmac
 from PIL import Image
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import hashlib
+import math
 import asyncio
 import queue
 import threading
@@ -4705,6 +4707,8 @@ def get_settings(request: Request):
         "hide_ble_scroller":        user_data.get("hide_ble_scroller", True),
         "hidden_libraries":         user_data.get("hidden_libraries", []),
         "show_collections_row":     user_data.get("show_collections_row", True),
+        "hidden_library_rows":      user_data.get("hidden_library_rows", []),
+        "show_similar_row":         user_data.get("show_similar_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
         "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
@@ -5100,6 +5104,25 @@ async def save_collections_prefs(request: Request):
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
+# Library page rows a user has hidden (Settings -> Appearance): any of
+# LIBRARY_ROWS; the Collections row keeps its own older switch
+# (show_collections_row). show_similar_row: the detail pages' Similar manga.
+LIBRARY_ROWS = ("lastRead", "random", "suggested", "favourites")
+
+@app.post("/api/settings/rows")
+async def save_rows_prefs(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    user_data = auth.load_user_data(username)
+    if "hidden_library_rows" in body:
+        user_data["hidden_library_rows"] = [r for r in LIBRARY_ROWS if r in (body["hidden_library_rows"] or [])]
+    if "show_similar_row" in body:
+        user_data["show_similar_row"] = bool(body["show_similar_row"])
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
+
 @app.get("/api/backgrounds")
 def list_backgrounds():
     folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
@@ -5285,6 +5308,204 @@ def _manga_tile(library_id: int, manga: dict, dims: dict, user_covers: dict) -> 
             last_name = sorted_chs[-1].get("name", "")
         m["is_complete"] = bool(last_name and last_name.split()[-1] == "END")
     return m
+
+# ── SUGGESTIONS (2026-10-14) ──
+# Two rows built from genres and tags, always within one library:
+#  - "Similar manga" under the chapters/volumes of Manga/Volume Details (like
+#    that manga) and Collection Details (like the whole collection);
+#  - "Suggested for you" on the library page, under Random: like what the
+#    user read in the last 30 days, each manga counted by its minutes.
+# A label on half the library ("Action") says little, so labels are weighted
+# by rarity (idf), genres a bit less than tags (broader), and each manga's
+# weight is divided by the square root of its labels' length: a manga with
+# 40 tags doesn't win by having many, yet one sharing more labels still
+# ranks above one sharing fewer (full normalisation put "Isekai" alone above
+# "Isekai, Magic, Cooking" for an "Isekai, Magic" manga).
+# Left out: the manga itself and its collection mates, anything read in the
+# last 30 days, manga hidden from the user, and manga with no labels.
+SUGGEST_ROW_SIZE = 20
+SUGGEST_DAYS = 30
+SUGGEST_GENRE_WEIGHT = 0.6
+SUGGEST_MIN_SCORE = 0.05     # below this a match is only labels nearly every manga has
+
+
+def _suggest_labels(dims: dict) -> dict:
+    labels = {}
+    for g in dims.get("genres") or []:
+        labels["g:" + str(g).strip().lower()] = SUGGEST_GENRE_WEIGHT
+    for t in dims.get("tags") or []:
+        labels["t:" + str(t).strip().lower()] = 1.0
+    return labels
+
+
+def _suggest_vectors(username: str, library_id: int) -> dict:
+    """manga_id -> (manga record, normalised idf-weighted label vector) for
+    every manga in the library the user may see that has any labels."""
+    mangas = load_app_data_cached().get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
+    raw = {}
+    for m in mangas:
+        dims = load_manga_dims_cached(library_id, m["name"])
+        if auth.is_manga_blocked(username, dims.get("tags", [])):
+            continue
+        labels = _suggest_labels(dims)
+        if labels:
+            raw[m["id"]] = (m, labels)
+    df = {}
+    for _, labels in raw.values():
+        for k in labels:
+            df[k] = df.get(k, 0) + 1
+    n = len(raw)
+    vectors = {}
+    for mid, (m, labels) in raw.items():
+        vec = {k: w * math.log((n + 1) / (df[k] + 0.5)) for k, w in labels.items()}
+        norm = math.sqrt(math.sqrt(sum(v * v for v in vec.values()))) or 1.0
+        vectors[mid] = (m, {k: v / norm for k, v in vec.items()})
+    return vectors
+
+
+def _suggest_recent(username: str, library_id: int) -> dict:
+    """Manga name -> minutes read in the last SUGGEST_DAYS days in this
+    library (sessions are saved in UTC; older ones without a zone are UTC too)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=SUGGEST_DAYS)
+    minutes = {}
+    for s in auth.load_user_data(username).get("reading_sessions", []):
+        if str(s.get("library_id")) != str(library_id):
+            continue
+        try:
+            start = datetime.fromisoformat(s.get("start", ""))
+        except (TypeError, ValueError):
+            continue
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if start >= cutoff:
+            name = s.get("manga_name", "")
+            minutes[name] = minutes.get(name, 0) + max(1, int(s.get("minutes") or 0))
+    return minutes
+
+
+def _suggest_collection_mates(username: str, library_id: int, manga_ids: set) -> set:
+    """Ids of manga sharing a collection with any of manga_ids (this library)."""
+    mates = set()
+    user_data = auth.load_user_data(username)
+    records = list(user_data.get("collections", {}).values()) + list(load_shared_collections().values())
+    for rec in records:
+        members = [m for m in rec.get("members", []) if str(m.get("library_id")) == str(library_id)]
+        ids = {m.get("manga_id") for m in members}
+        if ids & manga_ids:
+            mates |= ids
+    return mates
+
+
+def _suggest_rank(username: str, library_id: int, profile: dict, vectors: dict, exclude: set) -> list:
+    """Manga ids most like the profile, best first. Ties are broken by a
+    per-day hash, so the row stays the same all day."""
+    norm = math.sqrt(sum(v * v for v in profile.values())) or 1.0
+    today = datetime.now(timezone.utc).date().isoformat()
+    recent_names = set(_suggest_recent(username, library_id))
+    scored = []
+    for mid, (m, vec) in vectors.items():
+        if mid in exclude or m["name"] in recent_names:
+            continue
+        score = sum(w * profile.get(k, 0.0) for k, w in vec.items()) / norm
+        if score >= SUGGEST_MIN_SCORE:
+            tie = hashlib.md5(f"{today}:{mid}".encode()).hexdigest()
+            scored.append((-score, tie, mid))
+    scored.sort()
+    return [mid for _, _, mid in scored[:SUGGEST_ROW_SIZE]]
+
+
+def _suggest_tiles(username: str, library_id: int, ids: list) -> list:
+    """Library-page style tiles (cover, title, COMPLETE, progress) for ids."""
+    user_data = auth.load_user_data(username)
+    user_covers = user_data.get("covers", {}).get(str(library_id), {})
+    history = user_data.get("reading_history", {}).get(str(library_id), {})
+    out = []
+    for mid in ids:
+        manga = _lookup_manga(library_id, mid)
+        if not manga:
+            continue
+        dims = load_manga_dims_cached(library_id, manga["name"])
+        tile = _manga_tile(library_id, manga, dims, user_covers)
+        tile["library_id"] = library_id
+        tile["progress"] = tile_progress(manga, dims, history.get(mid, {}))
+        out.append(tile)
+    return out
+
+
+def _similar_response(username: str, library_id: int, manga_ids: list) -> JSONResponse:
+    """The "Similar manga" row for one manga, or several (a collection)."""
+    if not auth.load_user_data(username).get("show_similar_row", True):
+        return JSONResponse({"mangas": [], "hidden": True})
+    vectors = _suggest_vectors(username, library_id)
+    profile = {}
+    for mid in manga_ids:
+        if mid in vectors:
+            for k, v in vectors[mid][1].items():
+                profile[k] = profile.get(k, 0.0) + v
+    if not profile:
+        return JSONResponse({"mangas": []})
+    exclude = set(manga_ids) | _suggest_collection_mates(username, library_id, set(manga_ids))
+    ids = _suggest_rank(username, library_id, profile, vectors, exclude)
+    return JSONResponse({"mangas": _suggest_tiles(username, library_id, ids)})
+
+
+@app.get("/api/manga/{library_id}/{manga_id}/similar")
+def get_similar_manga(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"mangas": []}, status_code=404)
+    manga = _lookup_manga(library_id, manga_id)
+    if not manga:
+        return JSONResponse({"mangas": []}, status_code=404)
+    if auth.is_manga_blocked(username, load_manga_dims_cached(library_id, manga["name"]).get("tags", [])):
+        return JSONResponse({"mangas": []}, status_code=404)
+    return _similar_response(username, library_id, [manga_id])
+
+
+@app.get("/api/collections/{collection_id}/similar")
+def get_collection_similar(request: Request, collection_id: str):
+    """Similar manga for a collection: like all its visible members, in the
+    library most of them are in (suggestions stay within one library)."""
+    username = auth.get_current_user(request)
+    record, _ = _find_collection(username, collection_id)
+    if record is None:
+        return JSONResponse({"mangas": []}, status_code=404)
+    visible = _visible_members(username, record.get("members", []))
+    if not visible:
+        return JSONResponse({"mangas": []})
+    counts = {}
+    for m in visible:
+        counts[m["library_id"]] = counts.get(m["library_id"], 0) + 1
+    library_id = max(counts, key=counts.get)
+    ids = [m["manga_id"] for m in visible if m["library_id"] == library_id]
+    return _similar_response(username, int(library_id), ids)
+
+
+@app.get("/api/suggestions/{library_id}")
+def get_suggestions(request: Request, library_id: int):
+    """The library page's "Suggested for you" row: manga ids, best first
+    (the page has the tiles already). Empty without reading in the last
+    SUGGEST_DAYS days."""
+    username = auth.get_current_user(request)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ids": []})
+    recent = _suggest_recent(username, library_id)
+    if not recent:
+        return JSONResponse({"ids": []})
+    vectors = _suggest_vectors(username, library_id)
+    by_name = {m["name"]: mid for mid, (m, _) in vectors.items()}
+    profile = {}
+    for name, minutes in recent.items():
+        mid = by_name.get(name)
+        if mid:
+            for k, v in vectors[mid][1].items():
+                profile[k] = profile.get(k, 0.0) + v * minutes
+    if not profile:
+        return JSONResponse({"ids": []})
+    read_ids = {by_name[n] for n in recent if n in by_name}
+    exclude = read_ids | _suggest_collection_mates(username, library_id, read_ids)
+    return JSONResponse({"ids": _suggest_rank(username, library_id, profile, vectors, exclude)})
+
 
 @app.get("/api/mangas/{library_id}/search")
 def get_mangas_for_search(request: Request, library_id: int):
