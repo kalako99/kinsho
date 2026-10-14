@@ -6944,11 +6944,13 @@ async def _try_anilist_primary(name: str, manga_formats: set, novel_library: boo
 
 
 async def _try_mangadex_primary(name: str) -> dict | None:
-    """Try to find a single, confident (match_score >= 0.85) MangaDex candidate for `name`."""
+    """The single MangaDex candidate whose name matches `name` exactly, else
+    None. Exact like AniList since 2026-10-14 (it took a near match, >= 0.85,
+    which can be a spin-off with a similar name)."""
     md_results = await metadata_fetch.search_mangadex_manga(name)
     scored_md = metadata_fetch.score_all_candidates(name, md_results)
-    strong_md = [c for c in scored_md if c["match_score"] >= 0.85]
-    return strong_md[0] if len(strong_md) == 1 else None
+    exact = [c for c in scored_md if c["match_score"] >= 1.0]
+    return exact[0] if len(exact) == 1 else None
 
 
 @app.post("/api/libraries/{library_id}/scan-metadata")
