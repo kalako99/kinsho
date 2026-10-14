@@ -740,6 +740,7 @@
     .sp-flip-face.back { transform: rotateY(180deg); }
     /* The turning page darkens as it rises (a little light, not a curl). */
     .sp-flip-shade { position: absolute; inset: 0; pointer-events: none; background: #000; opacity: 0; }
+    .sp-curl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
     /*
      * #spStrip is single-page mode's own horizontal conveyor -- same
@@ -6111,8 +6112,8 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // slots, measured on screen; at the end the strip jumps to the new view
   // without sliding and the overlay goes. A finger drag holds the leaf's
   // edge under the finger; taps, keys and the BLE scroller play the turn
-  // in SP_FLIP_MS. (User's call: this stiff turn first; a real curl only if
-  // it's not good enough.)
+  // in SP_FLIP_MS. Since 2026-10-14 the page curls instead (TWO-PAGE CURL
+  // below); this stiff turn is only the fallback while a page isn't decoded.
   const SP_FLIP_MS = 420;
   let _spFlip = null;      // the turn on screen: see _spFlipStart
   let _spFlipDrag = null;  // a finger turning the page
@@ -6132,7 +6133,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       return { x: r.left - sr.left, y: r.top - vr.top, w: r.width, h: r.height };
     };
     const look = (cell) => cell._spIdx != null
-      ? { url: spManifest[cell._spIdx].url || '' }
+      ? { url: spManifest[cell._spIdx].url || '', img: cell.querySelector('img') }
       : { white: cell.classList.contains('sp-blank-white') };
     const cells = [...slot.el.children];
     if (cells.length === 2) {
@@ -6171,10 +6172,294 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     return el;
   }
 
-  // Builds the turn from the view on screen to page idx's view (the next or
-  // previous one on the strip), leaf flat. null when a view isn't in the
-  // slot window.
-  function _spFlipStart(idx) {
+  // ── TWO-PAGE CURL (2026-10-14) ──
+  // The page turns by curling, not as a stiff card (user: the stiff turn,
+  // and the page going see-through while it turned, weren't good enough).
+  // The fold always runs parallel to the spine, so the page only bends
+  // sideways: every vertical slice of it lands as one vertical slice on
+  // screen, and the whole turn is drawn on one 2D canvas, slice by slice,
+  // with no 3D mesh. The sheet lies flat from the spine to the fold, goes
+  // round a cylinder of radius R (front side up the first quarter turn,
+  // back side coming over the second), and lies flat again on top, back
+  // side up. Drawn opaque from pages decoded ahead at screen resolution
+  // (spCurlPrepare): nothing under the turning page can show through it.
+  // The curl's shape is the same on every turn; only its position (progress
+  // t, 0 = flat, 1 = turned) moves, with the finger or by itself.
+  const SP_CURL_R = 0.13;        // cylinder radius, share of the page width
+  const SP_CURL_PERSP = 2200;    // px, for the slight growth of the lifted part
+  const SP_CURL_MS = 480;        // taps, keys, BLE
+  const _spCurlBitmaps = new Map();  // part key -> {bm}: pages decoded at screen size
+  let _spCurlRetry = null;
+
+  function _spCurlKey(part) {
+    return part.url ? `${part.url}|${part.crop || ''}|${Math.round(part.w)}x${Math.round(part.h)}` : null;
+  }
+
+  // Decodes, at screen resolution, every page of the view on screen and the
+  // views on either side of it, so a turn has them ready; drops the rest.
+  // Pages not loaded yet are tried again half a second later.
+  function spCurlPrepare() {
+    clearTimeout(_spCurlRetry);
+    _spCurlRetry = null;
+    const keep = new Set();
+    if (spIsBook()) {
+      const curP = spPosOf(spCurrentIdx);
+      const dpr = window.devicePixelRatio || 1;
+      let missing = false;
+      for (const p of [curP - 1, curP, curP + 1]) {
+        if (p < 0 || p >= spPosCount()) continue;
+        const v = _spViewParts(p);
+        if (!v) { missing = true; continue; }
+        for (const part of [v.left, v.right]) {
+          const key = _spCurlKey(part);
+          if (!key) continue;
+          keep.add(key);
+          if (_spCurlBitmaps.has(key)) continue;
+          const img = part.img;
+          if (!img || !img.complete || !img.naturalWidth) { missing = true; continue; }
+          const nw = img.naturalWidth, nh = img.naturalHeight;
+          const rec = { bm: null };
+          _spCurlBitmaps.set(key, rec);
+          createImageBitmap(img, part.crop === 'right' ? nw / 2 : 0, 0, part.crop ? nw / 2 : nw, nh, {
+            resizeWidth: Math.max(1, Math.round(part.w * dpr)),
+            resizeHeight: Math.max(1, Math.round(part.h * dpr)),
+            resizeQuality: 'high',
+          }).then(bm => {
+            if (_spCurlBitmaps.get(key) !== rec) { bm.close(); return; }
+            rec.bm = bm;
+            _spCurlWarm(bm);
+            clearTimeout(_spCurlWarmTimer);
+            _spCurlWarmTimer = setTimeout(_spCurlWarmTurn, 100);
+          }).catch(() => {
+            if (_spCurlBitmaps.get(key) === rec) _spCurlBitmaps.delete(key);
+          });
+        }
+      }
+      if (missing) _spCurlRetry = setTimeout(spCurlPrepare, 500);
+    }
+    for (const [k, rec] of _spCurlBitmaps) {
+      if (keep.has(k)) continue;
+      if (rec.bm) rec.bm.close();
+      _spCurlBitmaps.delete(k);
+    }
+  }
+
+  // Puts a decoded page on the GPU now, not on the turn's first frame (that
+  // upload stalled the first frame ~110ms; a page drawn once stays there).
+  // Drawn into a tiny, practically invisible canvas on the page, which the
+  // browser draws with the GPU like the curl's own canvas.
+  let _spCurlWarmCtx = null;
+  function _spCurlWarm(bm) {
+    try {
+      if (!_spCurlWarmCtx) {
+        const c = document.createElement('canvas');
+        c.width = c.height = 2;
+        c.style.cssText = 'position:fixed;left:0;top:0;width:2px;height:2px;opacity:0.01;pointer-events:none;';
+        document.body.appendChild(c);
+        _spCurlWarmCtx = c.getContext('2d');
+        _spCurlWarmCtx.imageSmoothingQuality = 'high';
+      }
+      const x = _spCurlWarmCtx;
+      x.drawImage(bm, 0, 0, bm.width / 3, bm.height, 0, 0, 1.3, 2);
+      // The curl's other drawing operations, so they're ready too.
+      const g = x.createLinearGradient(0, 0, 2, 0);
+      g.addColorStop(0, 'rgba(0,0,0,0.4)');
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g;
+      x.fillRect(0, 0, 2, 2);
+      x.fillStyle = 'rgba(0,0,0,0.2)';
+      x.fillRect(0, 0, 1.4, 2);
+    } catch (e) {}
+  }
+
+  // The first curl after the reader opens stalled its first frame ~100ms
+  // (the browser setting up its first full-screen canvas; later ones don't).
+  // So once, as soon as the next view's pages are decoded, one curl is shown
+  // practically invisible for two frames and removed.
+  let _spCurlWarmed = false, _spCurlWarmTimer = null;
+  function _spCurlWarmTurn() {
+    if (_spCurlWarmed || _spFlip || !spIsBook()) return;
+    const u = spViewOfIdx[spCurrentIdx] + 1;
+    const idx = _spViewFirstIdx(u < spViews.length ? u : u - 2);
+    if (idx == null) return;
+    const f = _spCurlStart(idx);
+    if (!f) return;
+    _spCurlWarmed = true;
+    f.el.style.opacity = '0.01';
+    _spFlipSet(f, 0.5);
+    requestAnimationFrame(() => requestAnimationFrame(() => f.el.remove()));
+  }
+
+  // What the curl draws for a part: a bitmap (with Dark pages already
+  // applied), a colour, or undefined when its page isn't decoded yet.
+  function _spCurlSource(part) {
+    const dark = document.body.classList.contains('dark-pages');
+    if (!part.url) return { colour: part.white && !dark ? '#fff' : '#000' };
+    const rec = _spCurlBitmaps.get(_spCurlKey(part));
+    if (!rec || !rec.bm) return undefined;
+    if (!dark || dpPaper.get(new URL(part.url, location.href).href) === null) return { image: rec.bm };
+    // Dark pages: a filtered copy, made once per page (and per filter).
+    const filter = document.body.style.getPropertyValue('--dp-filter') || 'none';
+    if (!rec.dark || rec.darkFilter !== filter) {
+      const c = document.createElement('canvas');
+      c.width = rec.bm.width;
+      c.height = rec.bm.height;
+      const cx = c.getContext('2d');
+      cx.filter = filter;
+      cx.drawImage(rec.bm, 0, 0);
+      rec.dark = c;
+      rec.darkFilter = filter;
+    }
+    return { image: rec.dark };
+  }
+
+  // The curl's radius at progress t: full size, shrinking to nothing at
+  // both ends so the page starts and lands flat.
+  function _spCurlRadius(W, t) {
+    return Math.max(0.01, W * SP_CURL_R * Math.min(1, 4 * t, 4 * (1 - t)));
+  }
+
+  // Builds the curl from the view on screen to page idx's view, flat. null
+  // when a view isn't in the slot window or a page isn't decoded yet.
+  function _spCurlStart(idx) {
+    const curP = spPosOf(spCurrentIdx), tgtP = spPosOf(idx);
+    const cur = _spViewParts(curP), tgt = _spViewParts(tgtP);
+    if (!cur || !tgt || curP === tgtP) return null;
+    const toLeft = tgtP > curP;  // the right-hand page turns over to the left
+    const parts = {
+      stay:  toLeft ? cur.left : cur.right,
+      front: toLeft ? cur.right : cur.left,
+      back:  toLeft ? tgt.left : tgt.right,
+      under: toLeft ? tgt.right : tgt.left,
+    };
+    const src = {};
+    for (const k in parts) {
+      src[k] = _spCurlSource(parts[k]);
+      if (!src[k]) { spCurlPrepare(); return null; }
+    }
+    const spine = cur.spine;
+    const front = parts.front, back = parts.back;
+    const W = Math.max(1, toLeft
+      ? Math.max(front.x + front.w - spine, spine - back.x)
+      : Math.max(spine - front.x, back.x + back.w - spine));
+    const vw = singlePageView.clientWidth, vh = singlePageView.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const el = document.createElement('div');
+    el.className = 'sp-flip';
+    el.style.background = '#000';
+    const canvas = document.createElement('canvas');
+    canvas.className = 'sp-curl';
+    canvas.width = Math.round(vw * dpr);
+    canvas.height = Math.round(vh * dpr);
+    el.appendChild(canvas);
+    singlePageView.appendChild(el);
+    const ctx = canvas.getContext('2d', { alpha: false });
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingQuality = 'high';
+    const f = { kind: 'curl', el, ctx, parts, src, spine, s: toLeft ? 1 : -1, W, vw, vh,
+                toLeft, idx, t: 0, edge: W, anim: null };
+    _spFlipSet(f, 0);
+    return f;
+  }
+
+  // Draws the screen-settled columns sx1..sx2 of a part (where they sit when
+  // flat on screen) into screen columns dx1..dx2, lifted z px towards the
+  // reader. Both ranges run the same way; clipped to the part.
+  function _spCurlCols(f, part, src, sx1, sx2, dx1, dx2, z, shade) {
+    if (sx1 > sx2) { [sx1, sx2] = [sx2, sx1]; [dx1, dx2] = [dx2, dx1]; }
+    const a = Math.max(sx1, part.x), b = Math.min(sx2, part.x + part.w);
+    if (b - a < 0.01) return;
+    const k = (dx2 - dx1) / (sx2 - sx1 || 1);
+    let x1 = dx1 + (a - sx1) * k, x2 = dx1 + (b - sx1) * k;
+    if (x1 > x2) [x1, x2] = [x2, x1];
+    // Lifted parts come a little closer (perspective from the view's centre).
+    const g = SP_CURL_PERSP / (SP_CURL_PERSP - z);
+    const cx = f.vw / 2, cy = f.vh / 2;
+    x1 = cx + (x1 - cx) * g;
+    x2 = cx + (x2 - cx) * g + 0.6;  // a hair of overlap: no seams between slices
+    const y = cy + (part.y - cy) * g, h = part.h * g;
+    const ctx = f.ctx;
+    if (src.image) {
+      const iw = src.image.width;
+      ctx.drawImage(src.image, (a - part.x) / part.w * iw, 0, Math.max(0.01, (b - a) / part.w * iw), src.image.height,
+                    x1, y, x2 - x1, h);
+    } else {
+      ctx.fillStyle = src.colour;
+      ctx.fillRect(x1, y, x2 - x1, h);
+    }
+    if (shade > 0.003) {
+      ctx.fillStyle = `rgba(0,0,0,${shade.toFixed(3)})`;
+      ctx.fillRect(x1, y, x2 - x1, h);
+    }
+  }
+
+  // The whole picture at progress t. Sheet positions u run from the spine
+  // (0) to the free edge (W); X is a distance from the spine on screen
+  // towards the turning page's side (screen x = spine + s * X).
+  function _spCurlDraw(f) {
+    const { ctx, parts, src, spine: S, s, W, t } = f;
+    const sx = (X) => S + s * X;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, f.vw, f.vh);
+    // Underneath: the page that stays, and the one being uncovered.
+    for (const k of ['stay', 'under']) {
+      const p = parts[k];
+      _spCurlCols(f, p, src[k], p.x, p.x + p.w, p.x, p.x + p.w, 0, 0);
+    }
+    const d = W * (1 - t), R = _spCurlRadius(W, t);
+    const rest = W - d;
+    const q = Math.PI * R / 2;  // sheet length of a quarter turn
+    // The curl's shadow on the uncovered page, just beyond its outer side.
+    const outer = d + R * (rest < q ? Math.sin(rest / R) : 1);
+    const sw = R * 0.8 + W * 0.04;
+    const strength = 0.45 * Math.min(1, t * 6, (1 - t) * 6);
+    if (strength > 0.003) {
+      const g = ctx.createLinearGradient(sx(outer), 0, sx(outer + sw), 0);
+      g.addColorStop(0, `rgba(0,0,0,${strength.toFixed(3)})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = g;
+      const xa = Math.min(sx(outer), sx(outer + sw));
+      ctx.fillRect(xa, 0, Math.abs(sw), f.vh);
+    }
+    // Front side: flat from the spine to the fold...
+    _spCurlCols(f, parts.front, src.front, sx(0), sx(d), sx(0), sx(d), 0, 0);
+    // ...with a soft crease just before it...
+    const crease = Math.min(d, R);
+    if (crease > 1 && strength > 0.003) {
+      const g = ctx.createLinearGradient(sx(d - crease), 0, sx(d), 0);
+      g.addColorStop(0, 'rgba(0,0,0,0)');
+      g.addColorStop(1, `rgba(0,0,0,${(strength * 0.35).toFixed(3)})`);
+      ctx.fillStyle = g;
+      const fp = parts.front;
+      ctx.fillRect(Math.min(sx(d - crease), sx(d)), fp.y, crease, fp.h);
+    }
+    // ...then up the first quarter of the cylinder, darkening as it turns away.
+    const du = Math.max(1, R / 36);
+    const frontEnd = Math.min(W, d + q);
+    for (let u = d; u < frontEnd; u += du) {
+      const u2 = Math.min(frontEnd, u + du);
+      const a1 = (u - d) / R, a2 = (u2 - d) / R, am = (a1 + a2) / 2;
+      _spCurlCols(f, parts.front, src.front, sx(u), sx(u2), sx(d + R * Math.sin(a1)), sx(d + R * Math.sin(a2)),
+                  R * (1 - Math.cos(am)), 0.5 * (1 - Math.cos(am)));
+    }
+    // Back side coming over the top of the cylinder, lightening as it faces
+    // the reader again (the back page's column u sits at spine - s*u when flat).
+    const backEnd = Math.min(W, d + 2 * q);
+    for (let u = d + q; u < backEnd; u += du) {
+      const u2 = Math.min(backEnd, u + du);
+      const a1 = (u - d) / R, a2 = (u2 - d) / R, am = (a1 + a2) / 2;
+      _spCurlCols(f, parts.back, src.back, S - s * u, S - s * u2, sx(d + R * Math.sin(a1)), sx(d + R * Math.sin(a2)),
+                  R * (1 - Math.cos(am)), 0.35 * (1 + Math.cos(am)));
+    }
+    // Back side lying flat on top: the back page, moved along as one piece.
+    if (W > d + 2 * q) {
+      const shift = 2 * d + 2 * q;
+      _spCurlCols(f, parts.back, src.back, S - s * W, S - s * (d + 2 * q), sx(shift - W), sx(d), 2 * R, 0);
+    }
+  }
+
+  // Builds the stiff turn (the fallback when a page isn't decoded yet).
+  function _spLeafStart(idx) {
     const curP = spPosOf(spCurrentIdx), tgtP = spPosOf(idx);
     const cur = _spViewParts(curP), tgt = _spViewParts(tgtP);
     if (!cur || !tgt || curP === tgtP) return null;
@@ -6215,27 +6500,47 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     leaf.appendChild(faceB);
     el.appendChild(leaf);
     singlePageView.appendChild(el);
-    const f = { el, leaf, shades, toLeft, idx, angle: 0, edge: toLeft ? front.x + front.w - spine : spine - front.x, anim: null };
+    const f = { kind: 'leaf', el, leaf, shades, toLeft, idx, t: 0, edge: toLeft ? front.x + front.w - spine : spine - front.x, anim: null };
     _spFlipSet(f, 0);
     return f;
   }
 
-  function _spFlipSet(f, angle) {
-    f.angle = Math.max(0, Math.min(180, angle));
-    f.leaf.style.transform = `rotateY(${f.toLeft ? -f.angle : f.angle}deg)`;
-    const shade = 0.35 * Math.sin(f.angle * Math.PI / 180);
+  // The turn from the view on screen to page idx's view: the curl, or the
+  // stiff turn while a page isn't decoded yet.
+  function _spFlipStart(idx) {
+    return _spCurlStart(idx) || _spLeafStart(idx);
+  }
+
+  // Progress t: 0 = flat where it was, 1 = turned.
+  function _spFlipSet(f, t) {
+    f.t = Math.max(0, Math.min(1, t));
+    if (f.kind === 'curl') { _spCurlDraw(f); return; }
+    const angle = f.t * 180;
+    f.leaf.style.transform = `rotateY(${f.toLeft ? -angle : angle}deg)`;
+    const shade = 0.35 * Math.sin(angle * Math.PI / 180);
     for (const s of f.shades) s.style.opacity = String(shade);
   }
 
-  // Eases the leaf to endAngle (180 = turned, 0 = back where it was).
-  function _spFlipAnimate(f, endAngle, ms, done) {
+  // Moves the turn to endT. With v0 (progress per ms, from a finger) it
+  // starts at that speed and eases to rest (cubic Hermite, never
+  // overshooting), taking as long as the rest of the way takes at that
+  // speed, 140-600ms: a flick finishes fast, a slow release slowly.
+  // Otherwise ease in-out in ms.
+  function _spFlipAnimate(f, endT, ms, done, v0 = null) {
     if (f.anim) cancelAnimationFrame(f.anim);
-    const a0 = f.angle, t0 = performance.now();
+    const t0 = f.t, delta = endT - t0, start = performance.now();
+    let T = ms, v = 0;
+    if (v0 !== null && Math.sign(v0) === Math.sign(delta) && v0 !== 0) {
+      T = Math.max(140, Math.min(600, 3 * Math.abs(delta) / Math.abs(v0)));
+      v = Math.sign(v0) * Math.min(Math.abs(v0), 3 * Math.abs(delta) / T);
+    }
     const step = (now) => {
-      const t = Math.min(1, (now - t0) / ms);
-      const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;  // ease in-out
-      _spFlipSet(f, a0 + (endAngle - a0) * e);
-      if (t < 1) f.anim = requestAnimationFrame(step);
+      const x = Math.min(1, (now - start) / T);
+      const pos = v !== 0
+        ? t0 + delta * (3 * x * x - 2 * x * x * x) + v * T * (x - 2 * x * x + x * x * x)
+        : t0 + delta * (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+      _spFlipSet(f, pos);
+      if (x < 1) f.anim = requestAnimationFrame(step);
       else { f.anim = null; done(); }
     };
     f.anim = requestAnimationFrame(step);
@@ -6258,7 +6563,32 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     const f = _spFlipStart(idx);
     if (!f) { spGotoIdx(idx); return; }
     _spFlip = f;
-    _spFlipAnimate(f, 180, SP_FLIP_MS, () => _spFlipFinish(f, true));
+    _spFlipAnimate(f, 1, f.kind === 'curl' ? SP_CURL_MS : SP_FLIP_MS, () => _spFlipFinish(f, true));
+  }
+
+  // Where the curl's free edge is at progress t (distance from the spine,
+  // negative once it's over the other page): rolled up in the cylinder
+  // first, then lying flat on top. Goes steadily from W down to -W.
+  function _spCurlEdge(W, t) {
+    const d = W * (1 - t), R = _spCurlRadius(W, t), rest = W - d;
+    return rest < Math.PI * R ? d + R * Math.sin(rest / R) : 2 * d + Math.PI * R - W;
+  }
+
+  // How far a finger has turned the page: the free edge stays under the
+  // finger (the first few dozen px form the curl), for the curl and the
+  // stiff leaf alike.
+  function _spFlipProgressFor(f, moved) {
+    if (f.kind === 'curl') {
+      const target = f.W - moved;
+      let lo = 0, hi = 1;
+      for (let i = 0; i < 24; i++) {
+        const m = (lo + hi) / 2;
+        if (_spCurlEdge(f.W, m) > target) lo = m; else hi = m;
+      }
+      return (lo + hi) / 2;
+    }
+    const cos = Math.max(-1, Math.min(1, (f.edge - moved) / f.edge));
+    return Math.acos(cos) / Math.PI;
   }
 
   // Finger turns (from the swipe handlers in two-page mode).
@@ -6277,11 +6607,8 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       d.x0 = e.clientX;
       try { spStrip.setPointerCapture(e.pointerId); } catch (err) {}
     }
-    // The leaf's free edge stays under the finger: cos(angle) = where the
-    // edge is now / where it started, measured from the spine.
-    const moved = d.f.toLeft ? -(e.clientX - d.x0) : (e.clientX - d.x0);
-    const cos = Math.max(-1, Math.min(1, (d.f.edge - moved) / d.f.edge));
-    _spFlipSet(d.f, Math.acos(cos) * 180 / Math.PI);
+    d.moved = d.f.toLeft ? -(e.clientX - d.x0) : (e.clientX - d.x0);
+    _spFlipSet(d.f, _spFlipProgressFor(d.f, d.moved));
     const dt = e.timeStamp - d.lastT;
     if (dt > 0) d.v = 0.6 * ((e.clientX - d.lastX) / dt) + 0.4 * d.v;
     d.lastX = e.clientX;
@@ -6301,11 +6628,19 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     _spSuppressClick = true;
     const f = d.f;
     // A flick in the turning direction finishes the turn even if short.
-    const towards = f.toLeft ? -d.v : d.v;
-    const flick = e.timeStamp - d.lastT < 100 && towards >= SP_SWIPE_MIN_VELOCITY;
-    const turned = f.angle > 90 || flick;
-    const left = turned ? 180 - f.angle : f.angle;
-    _spFlipAnimate(f, turned ? 180 : 0, Math.max(120, SP_FLIP_MS * left / 180), () => _spFlipFinish(f, turned));
+    const fresh = e.timeStamp - d.lastT < 100;
+    const towards = f.toLeft ? -d.v : d.v;  // px/ms, turning direction positive
+    const flick = fresh && towards >= SP_SWIPE_MIN_VELOCITY;
+    const turned = f.t > 0.5 || flick;
+    const left = turned ? 1 - f.t : f.t;
+    if (f.kind === 'curl') {
+      // Carries on at the finger's speed, easing to rest.
+      // The finger's speed as progress per ms, where the page is now.
+      const v0 = fresh ? (_spFlipProgressFor(f, d.moved + towards * 16) - f.t) / 16 : 0;
+      _spFlipAnimate(f, turned ? 1 : 0, Math.max(120, SP_CURL_MS * left), () => _spFlipFinish(f, turned), v0);
+    } else {
+      _spFlipAnimate(f, turned ? 1 : 0, Math.max(120, SP_FLIP_MS * left), () => _spFlipFinish(f, turned));
+    }
   }
 
   // A second finger (pinch) during a finger turn puts the page back.
@@ -6381,7 +6716,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
     const globalIdx = manifest.indexOf(entry);
     if (globalIdx !== -1) _spSchedulePrefetch(globalIdx);
-    _spAfterTurn(() => { spCbUpdate(); updateProgressBar(); });
+    _spAfterTurn(() => { spCbUpdate(); updateProgressBar(); spCurlPrepare(); });
 
     // No separate chapter-boundary prefetch needed anymore -- _spSchedulePrefetch
     // just above already reaches ahead/behind by the same tier1/tier2 radius
