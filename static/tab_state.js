@@ -183,12 +183,14 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
   const signalCore = () => { if (!coreSignalled) { coreSignalled = true; opts.afterCore?.(); } };
   const prev = opts.prev || null;
   try {
-    const [allRes, settings, historyRes, suggestData] = await Promise.all([
+    // Suggested for you: manga ids, best first (SUGGESTIONS in main.py).
+    // Started now, waited for only after the first rows are shown (its first
+    // call after a server restart reads every manga's details, ~0.6s).
+    const suggestPromise = fetch(tabUrl(`/api/suggestions/${libraryId}`)).then(r => r.json()).catch(() => ({ ids: [] }));
+    const [allRes, settings, historyRes] = await Promise.all([
       fetch(tabUrl(`/api/mangas/${libraryId}?sort=alphabetical`)),
       opts.settingsPromise || fetch(tabUrl('/api/settings')).then(r => r.json()),
       fetch(tabUrl(`/api/reading/history/${libraryId}`)),
-      // Suggested for you: manga ids, best first (see SUGGESTIONS in main.py).
-      fetch(tabUrl(`/api/suggestions/${libraryId}`)).then(r => r.json()).catch(() => ({ ids: [] })),
     ]);
     const allData  = await allRes.json();
     const historyData = await historyRes.json();
@@ -235,7 +237,6 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
     const favouriteRowIds = pickRowIds(prev && prev.favouriteIds, mangas.filter(m => favouriteIds.has(m.id)).map(m => m.id), opts.reshuffle);
     const random     = randomIds.map(id => mangaById[id]);
     const favourites = favouriteRowIds.map(id => mangaById[id]);
-    const suggested  = (suggestData.ids || []).map(id => mangaById[id]).filter(Boolean);
 
     // Ambient blurred background from the most recently read manga,
     // falling back to the first manga (natural sort) in this library.
@@ -259,18 +260,20 @@ async function buildTabState(libraryId, lastUpdatedPage = 1, opts = {}) {
       if (lockBackdrop) bgUrlToLock = bgManga.coverLarge;
     }
 
-    opts.onCoreReady?.({ lastRead, random, suggested, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
+    opts.onCoreReady?.({ lastRead, random, favourites, bgLayerStyle, bgIsRaster, bgUrlToLock });
     signalCore();
     if (opts.restGate) await opts.restGate;
 
     // Last Updated + Collections, fetched together (independent).
     const showCollections = settings.show_collections_row !== false;
-    const [lu, collectionsRow] = await Promise.all([
+    const [lu, collectionsRow, suggestData] = await Promise.all([
       fetchLastUpdatedPage(libraryId, lastUpdatedPage, historyByMangaId, opts.columns || 1),
       showCollections
         ? fetchCollectionsRow(libraryId, prev && prev.collectionIds, opts.reshuffle)
         : Promise.resolve([]),
+      suggestPromise,
     ]);
+    const suggested = (suggestData.ids || []).map(id => mangaById[id]).filter(Boolean);
 
     return {
       lastRead, random, suggested, favourites, collectionsRow,

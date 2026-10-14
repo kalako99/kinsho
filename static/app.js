@@ -801,7 +801,6 @@ const app = createApp({
     applyCoreTabState(core) {
       this.lastRead     = core.lastRead;
       this.random        = core.random;
-      this.suggested     = core.suggested || [];
       this.favourites    = core.favourites;
       this.bgLayerStyle  = core.bgLayerStyle;
       this.bgIsRaster    = core.bgIsRaster;
