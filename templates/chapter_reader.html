@@ -8770,7 +8770,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
         if (entry) setVirtualY(entry.globalY);
       }
     } else {
-      goToChapter(`/manga/${libraryId}/${mangaId}/chapter/${pos.chapterId}?page=${pos.pageIdx}`);
+      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${pos.chapterId}?page=${pos.pageIdx}`);
     }
   }
 
