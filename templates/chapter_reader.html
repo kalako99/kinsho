@@ -7758,7 +7758,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     return idx;
   }
 
-  // ── PER-PAGE READING TIME (2026-09-25) ──
+  // ── PER-PAGE READING TIME (2026-09-25, reads 2026-10-21) ──
   // Times each page while it sits at the reading position (the same page
   // getCurrentPageIdx reports), for the per-chapter average reading time
   // (see /api/reading/chapter-time in main.py for the rules). A page the idle
@@ -7766,49 +7766,132 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // while the app is hidden/locked, is marked paused: the server counts it as
   // the page average. Pages passed during normal scrolling get 0 (skimming);
   // a jump of more than PT_JUMP pages (bookmark, dropdown) leaves the skipped
-  // ones untimed. A chapter is posted once the reader moves on from its last
-  // page (or leaves the reader on it); partial timings are kept per device in
-  // localStorage, so a chapter/volume read over several sessions adds up.
+  // ones untimed. Time on a page visited again is added to its time.
+  //
+  // Each chapter/volume has one read in progress (the user's rules,
+  // 2026-10-21), kept on the server so it continues on any device
+  // (/api/reading/reads, synced every PT_SYNC_MS; localStorage is the
+  // offline copy):
+  //   {t: {localIdx: secs}, p: {localIdx: 1}, r: last page read in order
+  //    from the first one (-1: none), s: started on the first page,
+  //    b: read through a bookmark, x: restart candidate, u: epoch ms}
+  // - Pages count as read in order only by moving forward at most PT_JUMP
+  //   pages from a page up to r + 1. After a jump ahead the read is on hold
+  //   until the reader comes back to page r + 1 and reads on from there.
+  // - Going back to the first page and reading PT_RESTART_SHARE of the pages
+  //   in order at the usual pace (at least half the average page time)
+  //   restarts the read: the old times are dropped.
+  // - Moving forward off the last page ends the read: it's posted only if it
+  //   started on the first page, was read in order to the end and not through
+  //   a bookmark; either way the next time is a new read.
   const PT_TICK_MS = 250;
   const PT_JUMP = 5;
-  const PT_KEEP_MS = 7 * 24 * 3600 * 1000;
+  const PT_KEEP_MS = 30 * 24 * 3600 * 1000;  // offline copy only; the server keeps it
+  const PT_SYNC_MS = 10000;
+  const PT_RESTART_SHARE = 0.1;
+  const PT_FAST_SECS = 5;  // the server's skimming threshold, when there's no page average yet
   const PT_KEY = `kinsho_pagetimes_${libraryId}_${mangaId}`;
-  let ptTimes = {};  // {chapterId: {t: {localIdx: secs}, p: {localIdx: 1}, u: epoch ms}}
+  let ptTimes = {};
   try { ptTimes = JSON.parse(localStorage.getItem(PT_KEY) || '{}') || {}; } catch (e) { ptTimes = {}; }
   for (const cid of Object.keys(ptTimes)) {
     if (!ptTimes[cid] || Date.now() - (ptTimes[cid].u || 0) > PT_KEEP_MS) delete ptTimes[cid];
+    else ptUpgrade(ptTimes[cid]);
   }
   let ptIdx = null;
   let ptVisitSecs = 0, ptVisitPaused = false;  // the current visit to ptIdx
   let ptLast = performance.now();
   let ptDirty = false;
+  const ptUnsynced = new Set();  // chapter ids changed since the last sync
+  let ptReady = false;           // the server's copy is merged in (or unreachable)
+  // A bookmark was opened: the read it lands in doesn't count. Set by
+  // navigateToBookmark; a bookmark in another chapter reloads the reader, so
+  // it's passed on through sessionStorage.
+  let ptBmPending = false;
+  try {
+    if (sessionStorage.getItem('kinsho_pt_bm') === mangaId) ptBmPending = true;
+    sessionStorage.removeItem('kinsho_pt_bm');
+  } catch (e) {}
+
+  // A read saved before 2026-10-21 has only t/p/u: it started on the first
+  // page if that page was timed, and was read in order up to the last page
+  // of an unbroken timed run from it (the old code left jumped-over pages
+  // untimed).
+  function ptUpgrade(c) {
+    if (c.s !== undefined) return;
+    let r = -1;
+    while ((r + 1) in c.t || (r + 1) in c.p) r++;
+    c.s = r >= 0;
+    c.r = r;
+    c.b = false;
+    c.x = null;
+  }
+
+  fetch(apiUrl(`/api/reading/reads/${libraryId}/${mangaId}`))
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => {
+      const server = (j && j.reads) || {};
+      for (const [cid, st] of Object.entries(server)) {
+        if (!st || typeof st !== 'object') continue;
+        if (!ptTimes[cid] || (st.u || 0) > (ptTimes[cid].u || 0)) { ptTimes[cid] = st; ptUpgrade(st); ptDirty = true; }
+        else if ((st.u || 0) < (ptTimes[cid].u || 0)) ptUnsynced.add(cid);
+      }
+      for (const cid of Object.keys(ptTimes)) if (!(cid in server)) ptUnsynced.add(cid);
+    })
+    .catch(() => {})
+    .finally(() => { ptReady = true; ptLast = performance.now(); });
+  setTimeout(() => { ptReady = true; }, 5000);  // server unreachable: go on with the local copy
 
   function ptCurrentIdx() {
     if (!manifest.length) return null;
     if (readerSettings.mode === 'single-page') return spCurrentIdx;
     return firstIndexAfter(currentTrackingY());
   }
-  function ptChapter(cid) {
-    return (ptTimes[cid] ||= { t: {}, p: {}, u: Date.now() });
+  function ptTouch(cid) {
+    if (ptTimes[cid]) ptTimes[cid].u = Date.now();
+    ptUnsynced.add(cid);
+    ptDirty = true;
   }
   function ptAdd(idx, secs) {
     const e = manifest[idx];
-    if (!e) return;
-    const c = ptChapter(e.chapterId);
+    const c = e && ptTimes[e.chapterId];
+    if (!c) return;
     c.t[e.localIdx] = (c.t[e.localIdx] || 0) + secs;
-    c.u = Date.now();
-    ptDirty = true;
+    if (c.x) c.x.t[e.localIdx] = (c.x.t[e.localIdx] || 0) + secs;
+    ptTouch(e.chapterId);
   }
   function ptPause(idx) {
     const e = manifest[idx];
-    if (!e) return;
-    const c = ptChapter(e.chapterId);
-    if (!c.p[e.localIdx]) { c.p[e.localIdx] = 1; c.u = Date.now(); ptDirty = true; }
+    const c = e && ptTimes[e.chapterId];
+    if (!c || c.p[e.localIdx]) return;
+    c.p[e.localIdx] = 1;
+    if (c.x) c.x.p[e.localIdx] = 1;
+    ptTouch(e.chapterId);
   }
   function ptSave() {
     if (!ptDirty) return;
     ptDirty = false;
     try { localStorage.setItem(PT_KEY, JSON.stringify(ptTimes)); } catch (e) {}
+  }
+  let _ptSyncing = false;
+  async function ptSync() {
+    if (_ptSyncing || !ptReady || !ptUnsynced.size) return;
+    _ptSyncing = true;
+    const ids = [...ptUnsynced];
+    ptUnsynced.clear();
+    const reads = {};
+    for (const cid of ids) reads[cid] = ptTimes[cid] || null;
+    try {
+      const r = await postSave('/api/reading/reads', { library_id: libraryId, manga_id: mangaId, reads });
+      if (!r.ok || !r.data || !r.data.ok) {
+        for (const cid of ids) ptUnsynced.add(cid);  // tried again next time
+        if (!r.ok) dbg(`[readtime] reads sync failed: ${r.reason}`);
+      }
+    } finally {
+      _ptSyncing = false;
+    }
+  }
+  function ptChapterCount(cid) {
+    return manifest.reduce((n, e) => n + (e.chapterId === cid ? 1 : 0), 0);
   }
   function ptIsLastOfChapter(idx) {
     const e = manifest[idx], next = manifest[idx + 1];
@@ -7822,15 +7905,70 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     try { if (spIsBook() && spViews.length) pages = spPagesAt(spPosOf(idx)); } catch (e) {}
     return pages.map(i => [i, 1 / pages.length]);
   }
-  function ptReport(cid) {
+  // The view's pages in chapter cid, as localIdx (lowest, highest).
+  function ptViewLocals(idx, cid) {
+    const locals = ptViewShares(idx).map(([i]) => manifest[i]).filter(e => e && e.chapterId === cid).map(e => e.localIdx);
+    return locals.length ? [Math.min(...locals), Math.max(...locals)] : null;
+  }
+  // The reading position moved from view `from` (null: the reader just
+  // opened) to view `idx`: starts the read of the chapter shown, moves its
+  // in-order mark, starts/advances/drops a restart.
+  function ptArrive(from, idx) {
+    const cid = manifest[idx].chapterId;
+    const here = ptViewLocals(idx, cid);
+    if (!here) return;
+    const bm = ptBmPending || bmEndToEndActive;
+    ptBmPending = false;
+    let c = ptTimes[cid];
+    if (!c) {
+      c = ptTimes[cid] = { t: {}, p: {}, r: here[0] === 0 ? here[1] : -1, s: here[0] === 0, b: bm, x: null, u: Date.now() };
+      ptTouch(cid);
+      return;
+    }
+    if (bm && !c.b) c.b = true;
+    const prev = from != null && manifest[from].chapterId === cid ? ptViewLocals(from, cid) : null;
+    const stepForward = prev && idx > from && idx - from <= PT_JUMP;
+    if (stepForward && prev[0] <= c.r + 1) c.r = Math.max(c.r, here[1]);
+    const count = ptChapterCount(cid);
+    const need = Math.max(1, Math.ceil(PT_RESTART_SHARE * count));
+    if (c.x) {
+      if (stepForward && prev[0] <= c.x.r + 1) c.x.r = Math.max(c.x.r, here[1]);
+      else if (!prev || here[0] > c.x.r + 1) c.x = null;  // left the re-read
+    }
+    // Back on the first page of a read that already went past the first
+    // PT_RESTART_SHARE (or didn't start on the first page): maybe a re-read.
+    // Going back inside that first part is just going back.
+    if (!c.x && here[0] === 0 && (!c.s || c.r + 1 >= need)) c.x = { t: {}, p: {}, r: here[1] };
+    if (c.x) {
+      if (c.x.r + 1 >= need && c.x.r < count - 1) {
+        let secs = 0;
+        for (let i = 0; i <= c.x.r; i++) secs += c.x.t[i] || 0;
+        const avg = avgPageSecs();
+        if (secs / (c.x.r + 1) >= (avg ? avg / 2 : PT_FAST_SECS)) {
+          ptTimes[cid] = c = { t: c.x.t, p: c.x.p, r: c.x.r, s: true, b: bmEndToEndActive, x: null, u: Date.now() };
+          dbg(`[readtime] ${cid}: re-read from the first page, new read`);
+        } else {
+          c.x = null;  // a quick look back, not a re-read
+        }
+      }
+    }
+    ptTouch(cid);
+  }
+  // The read of cid is over (moved on from its last page): posted if it
+  // counts, then dropped either way.
+  function ptFinish(cid) {
     const c = ptTimes[cid];
     if (!c) return;
-    const count = manifest.reduce((n, e) => n + (e.chapterId === cid ? 1 : 0), 0);
+    const count = ptChapterCount(cid);
+    delete ptTimes[cid];
+    ptTouch(cid);
+    ptSave();
+    if (!c.s || c.b || c.r < count - 1) {
+      dbg(`[readtime] ${cid}: finished, not counted (${!c.s ? 'not started on the first page' : c.b ? 'read through a bookmark' : 'not read in order'})`);
+      return;
+    }
     const times = Array.from({ length: count }, (_, i) => (i in c.t ? Math.round(c.t[i] * 10) / 10 : null));
     const paused = Object.keys(c.p).map(Number);
-    delete ptTimes[cid];
-    ptDirty = true;
-    ptSave();
     const id = pendingNewId();
     const item = {
       id, kind: 'chapter-time', path: '/api/reading/chapter-time', savedAt: Date.now(),
@@ -7846,9 +7984,10 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     const now = performance.now();
     const dt = (now - ptLast) / 1000;
     ptLast = now;
+    if (!ptReady) return;
     const idx = ptCurrentIdx();
     if (idx == null || !manifest[idx]) return;
-    if (ptIdx == null || !manifest[ptIdx]) { ptIdx = idx; return; }
+    if (ptIdx == null || !manifest[ptIdx]) { ptIdx = idx; ptArrive(null, idx); return; }
     // Timers are throttled while hidden, so a long gap also means "paused".
     const shares = ptViewShares(ptIdx);
     if (document.hidden || dt > 5 || Date.now() - _lastActivityTs > idleLimitMs()) {
@@ -7866,27 +8005,38 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     if (!ptVisitPaused && ptVisitSecs >= 1) { _sessPageSecs += ptVisitSecs; _sessPages += spScreenPageCount(from); }
     ptVisitSecs = 0;
     ptVisitPaused = false;
-    if (idx > from && idx - from <= PT_JUMP) {
-      for (let i = from + 1; i < idx; i++) ptAdd(i, 0);  // scrolled past: counted as fast
+    const step = idx > from && idx - from <= PT_JUMP;
+    if (step) {
+      // Walked page by page, so the pages scrolled past (counted as fast,
+      // 0s) and a chapter boundary crossed on the way are read in order.
+      for (let i = from + 1; i <= idx; i++) {
+        ptArrive(i - 1, i);
+        if (i < idx) ptAdd(i, 0);
+      }
+    } else {
+      ptArrive(from, idx);
     }
     // Moved forward off a chapter's last page (normally, not by a jump that
-    // skipped it): that chapter is finished.
+    // skipped it): that chapter's read is over.
     const fromCid = manifest[from].chapterId;
     if (idx > from && manifest[idx].chapterId !== fromCid) {
       let lastIdx = from;
       while (manifest[lastIdx + 1] && manifest[lastIdx + 1].chapterId === fromCid) lastIdx++;
-      if (lastIdx === from || idx - from <= PT_JUMP) ptReport(fromCid);
+      if (lastIdx === from || step) ptFinish(fromCid);
     }
   }
   setInterval(ptTick, PT_TICK_MS);
   setInterval(ptSave, 5000);
+  setInterval(ptSync, PT_SYNC_MS);
   // Leaving the reader on a chapter's last page (the next-chapter button,
   // back, or the manga's last page) finishes that chapter too.
   window.addEventListener('pagehide', () => {
     ptTick();
-    if (ptIdx != null && ptViewShares(ptIdx).some(([i]) => ptIsLastOfChapter(i))) ptReport(manifest[ptIdx].chapterId);
+    if (ptIdx != null && ptViewShares(ptIdx).some(([i]) => ptIsLastOfChapter(i))) ptFinish(manifest[ptIdx].chapterId);
     ptSave();
+    ptSync();
   });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) { ptSave(); ptSync(); } });
 
   async function checkChapterCompletion() {
     // Mode-agnostic now that single-page mode's spManifest is the same
@@ -8590,6 +8740,10 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       bmEndToEndActive = false;
     }
     bmSetReadRange(bmEndToEndActive ? bm : null);
+    // The read this lands in doesn't count toward the average reading time
+    // (PER-PAGE READING TIME); another chapter's bookmark reloads the reader.
+    ptBmPending = true;
+    if (bm.start.chapterId !== chapterId) { try { sessionStorage.setItem('kinsho_pt_bm', mangaId); } catch (e) {} }
     jumpToPosition(bm.start);
   }
 

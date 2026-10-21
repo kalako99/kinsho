@@ -1004,6 +1004,7 @@ def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, sta
         for cid in removed:
             del entry["chapters"][cid]
             (entry.get("avg_times") or {}).pop(cid, None)
+            (entry.get("reads") or {}).pop(cid, None)
         furthest, furthest_name = None, None
         for cid in ordered_ids:
             if entry["chapters"].get(cid, {}).get("completed"):
@@ -1057,11 +1058,12 @@ def _remap_renamed_volume_ids(library_id: int, manga_id: str, id_map: dict[str, 
                         ch_entry["name"] = new_names[new_id]
                     chapters[new_id] = ch_entry
                     changed = True
-            avg_times = entry.get("avg_times") or {}
-            for old_id, new_id in id_map.items():
-                if old_id in avg_times:
-                    avg_times[new_id] = avg_times.pop(old_id)
-                    changed = True
+            for field in ("avg_times", "reads"):
+                stored = entry.get(field) or {}
+                for old_id, new_id in id_map.items():
+                    if old_id in stored:
+                        stored[new_id] = stored.pop(old_id)
+                        changed = True
             if entry.get("last_volume_id") in id_map:
                 new_id = id_map[entry["last_volume_id"]]
                 entry["last_volume_id"] = new_id
@@ -1137,6 +1139,11 @@ def _rescale_page_positions(library_id: int, manga_id: str, counts: dict[str, tu
                 if item_id in counts and ch_entry.get("last_page"):
                     ch_entry["last_page"] = _rescale_page(ch_entry["last_page"], *counts[item_id])
                     changed = True
+            # A read in progress holds page times by page number: they don't
+            # fit the new pages, so that read is dropped.
+            for item_id in [k for k in (entry.get("reads") or {}) if k in counts]:
+                del entry["reads"][item_id]
+                changed = True
 
         for bm in user_data.get("bookmarks", {}).get(bm_key) or []:
             for side in ("start", "end"):
@@ -7976,15 +7983,19 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
 # per manga (reading_history entry):
 #   avg_times: {chapter_or_volume_id: seconds}, updated (previous + latest) / 2
 #   page_time: {"total": seconds, "pages": n}, the manga's running page average
-# Rules (the user's spec): a read counts only if ~all pages were timed; after
-# a 50-page warm-up, a read where more than 30% of the judged pages took under
-# half the page average is skimming and is discarded; a page the idle pause
-# (or screen lock / backgrounding) hit counts as exactly the page average in
-# the chapter total and never feeds the page average.
+# Rules (the user's spec): a read counts only if ~all pages were timed; a
+# read where more than half the judged pages took under 5s (a spread: 10s)
+# was flipped through and is discarded (2026-10-21: it used to be "30% under
+# half the page average", which locked a manga's average to its slow first
+# volumes and rejected every faster one after them); a fast page in a counted
+# read still counts with its own time; a page the idle pause (or screen lock /
+# backgrounding) hit counts as exactly the page average in the chapter total
+# and never feeds the page average. The reader only posts reads that started
+# on the first page and went through in order, not through a bookmark (see
+# the read in progress below).
 READ_TIME_MIN_COVERAGE   = 0.9
-READ_TIME_WARMUP_PAGES   = 50
-READ_TIME_FAST_FRACTION  = 0.5
-READ_TIME_MAX_FAST_SHARE = 0.3
+READ_TIME_SKIM_SECS      = 5
+READ_TIME_MAX_SKIM_SHARE = 0.5
 # A two-page spread joined into one image counts as two pages (user's rule,
 # 2026-10-07): same test as the reader's two-page mode, at least this many
 # times as wide for its height as the chapter/volume's most common page
@@ -8085,10 +8096,10 @@ async def post_chapter_time(request: Request):
     judged_times = [max(0.0, float(times[i])) for i in judged]
     weights = _page_weights(unit.get("pages") or [])  # a joined spread = 2 pages
     judged_weight = sum(weights[i] for i in judged)
-    if page_time["pages"] >= READ_TIME_WARMUP_PAGES and page_avg and judged:
-        fast = sum(1 for i, t in zip(judged, judged_times) if t < READ_TIME_FAST_FRACTION * page_avg * weights[i])
-        if fast > READ_TIME_MAX_FAST_SHARE * len(judged):
-            return JSONResponse({"ok": False, "reason": "skimmed", "fast": fast, "judged": len(judged)})
+    if judged:
+        fast = sum(weights[i] for i, t in zip(judged, judged_times) if t < READ_TIME_SKIM_SECS * weights[i])
+        if fast > READ_TIME_MAX_SKIM_SHARE * judged_weight:
+            return JSONResponse({"ok": False, "reason": "skimmed", "fast": fast, "judged": judged_weight})
     # Paused and untimed pages count as the page average (this chapter's own
     # mean during the warm-up, when there isn't one yet).
     fill = page_avg if page_avg else (sum(judged_times) / judged_weight if judged_weight else 0.0)
@@ -8102,6 +8113,63 @@ async def post_chapter_time(request: Request):
         entry["time_reports"] = (entry.get("time_reports", []) + [report_id])[-50:]
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True, "seconds": round(chapter_secs), "average": round(avg_times[unit_id])})
+
+# ── READ IN PROGRESS (2026-10-21) ──
+# The page times of each chapter/volume being read, kept on the server so a
+# read continues on another device (they used to live only in the device's
+# localStorage, for 7 days). Per user, per manga (reading_history entry):
+#   reads: {chapter_or_volume_id: state}
+# state is the reader's own (page times, paused pages, how far it was read in
+# order, whether it started on the first page or through a bookmark...): the
+# server only stores it. The reader sends the states it changed every few
+# seconds (null = that read is over) and, on open, takes whichever copy, its
+# own or the server's, was changed last.
+READS_MAX_BYTES = 200_000
+
+@app.get("/api/reading/reads/{library_id}/{manga_id}")
+def get_reads(request: Request, library_id: int, manga_id: str):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"error": "Not logged in"}, status_code=401)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"error": "Manga not found"}, status_code=404)
+    entry = auth.load_user_data(username).get("reading_history", {}).get(str(library_id), {}).get(manga_id)
+    return JSONResponse({"reads": (entry or {}).get("reads") or {}})
+
+@app.post("/api/reading/reads")
+async def post_reads(request: Request):
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not logged in"}, status_code=401)
+    body = await request.json()
+    try:
+        library_id = int(body.get("library_id"))
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Bad library_id"}, status_code=400)
+    manga_id = body.get("manga_id")
+    reads = body.get("reads")
+    if not isinstance(reads, dict) or not all(v is None or isinstance(v, dict) for v in reads.values()):
+        return JSONResponse({"ok": False, "error": "Bad reads"}, status_code=400)
+    if not auth.can_access_library(username, library_id):
+        return JSONResponse({"ok": False, "error": "Library not found"}, status_code=404)
+    if _is_manga_id_blocked(username, library_id, manga_id):
+        return JSONResponse({"ok": False, "error": "Manga not found"}, status_code=404)
+    user_data = auth.load_user_data(username)
+    entry = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id)
+    if entry is None:
+        return JSONResponse({"ok": False, "reason": "no reading history"})
+    stored = entry.setdefault("reads", {})
+    for cid, state in reads.items():
+        if state is None:
+            stored.pop(cid, None)
+        else:
+            stored[cid] = state
+    if len(json.dumps(stored)) > READS_MAX_BYTES:
+        return JSONResponse({"ok": False, "error": "Too large"}, status_code=400)
+    auth.save_user_data(username, user_data)
+    return JSONResponse({"ok": True})
 
 # ── READING PACE (2026-09-29) ──
 # The readers stop counting reading time (and mark the page paused) after a
