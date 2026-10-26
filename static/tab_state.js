@@ -90,8 +90,8 @@ function deriveCoverLarge(coverUrl) {
   return `${dir}${filename.slice(0, dotIdx)}+${filename.slice(dotIdx)}`;
 }
 
-// The server's tile % (tile_progress in main.py: pages read for volume
-// manga, completed chapters for chapter manga).
+// The server's tile % (tile_progress in main.py: the last read page's
+// position in the series, as on the detail page).
 function historyProgress(h) {
   return h && h.progress ? h.progress : 0;
 }

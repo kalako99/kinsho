@@ -1424,12 +1424,37 @@ def is_volume_manga_type(manga: dict, dims: dict) -> bool:
     "loose" for those, so the type alone isn't enough)."""
     return manga.get("manga_type") == "case2" or bool(dims.get("volumes"))
 
-def tile_progress(manga: dict, dims: dict, history_entry: dict) -> int:
-    """The % on a manga tile. Volumes: pages read out of every volume's
-    pages (a completed volume counts whole, an unfinished one up to its
-    resume page), since volumes are long and "1 of 4 read" would sit at
-    25% through the whole second volume. Chapters: completed chapters out
-    of all chapters (completed_chapter_count)."""
+def series_position(dims: dict, entry: dict, is_volume_manga: bool) -> dict | None:
+    """Where the last read page sits in the whole series: {"percent" (one
+    decimal), "name" (that chapter/volume)}, or None without a last read
+    chapter/volume. The detail pages' "last read" bar and the manga tiles
+    both show this percent."""
+    buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
+    last_id = entry.get("last_volume_id" if is_volume_manga else "last_chapter_id")
+    ordered = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
+    total = sum(len(buckets[k].get("pages") or []) for k in ordered)
+    if last_id not in buckets or not total:
+        return None
+    before = 0
+    for k in ordered:
+        if k == last_id:
+            break
+        before += len(buckets[k].get("pages") or [])
+    count = len(buckets[last_id].get("pages") or [])
+    pos = before + min(entry.get("last_page", 0), max(count - 1, 0)) + 1
+    return {"percent": round(pos * 100 / total, 1), "name": buckets[last_id].get("name")}
+
+def tile_progress(manga: dict, dims: dict, history_entry: dict) -> float:
+    """The % on a manga tile: the same series position the detail page's
+    "last read" bar shows (user's request, 2026-10-26: a chapter count gave
+    29% on the tile next to 31.4% on the page, chapters differing in
+    length). Without a last read chapter/volume, falls back to: volumes,
+    pages read out of every volume's pages (a completed volume counts whole,
+    an unfinished one up to its resume page); chapters, completed chapters
+    out of all chapters (completed_chapter_count)."""
+    position = series_position(dims, history_entry, is_volume_manga_type(manga, dims))
+    if position:
+        return position["percent"]
     if is_volume_manga_type(manga, dims):
         volumes = dims.get("volumes") or {}
         total = sum(len(v.get("pages", [])) for v in volumes.values())
@@ -5874,10 +5899,9 @@ def get_collection(request: Request, collection_id: str):
     for m in visible:
         manga = _lookup_manga(m["library_id"], m["manga_id"])
         cover_url, cover_url_large = _resolve_member_cover_urls(username, m["library_id"], m["manga_id"])
-        # Same "X of Y chapters actually marked completed" progress the manga
-        # list tiles show (see /api/category-list and get_reading_history) --
-        # computed per member here so the collection detail page's tiles can
-        # show it too.
+        # Same progress the manga list tiles show (tile_progress, see
+        # /api/category-list and get_reading_history) -- computed per member
+        # here so the collection detail page's tiles can show it too.
         progress = 0
         entry = reading_history.get(str(m["library_id"]), {}).get(m["manga_id"])
         if entry and manga and manga.get("name"):
@@ -8031,19 +8055,7 @@ def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, comp
     buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
     avg_times = {k: round(v) for k, v in (entry.get("avg_times") or {}).items() if k in buckets}
     completed = set(completed_ids)
-    last_read = None
-    last_id = entry.get("last_volume_id" if is_volume_manga else "last_chapter_id")
-    ordered = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
-    total = sum(len(buckets[k].get("pages") or []) for k in ordered)
-    if last_id in buckets and total:
-        before = 0
-        for k in ordered:
-            if k == last_id:
-                break
-            before += len(buckets[k].get("pages") or [])
-        count = len(buckets[last_id].get("pages") or [])
-        pos = before + min(entry.get("last_page", 0), max(count - 1, 0)) + 1
-        last_read = {"percent": round(pos * 100 / total, 1), "name": buckets[last_id].get("name")}
+    last_read = series_position(dims, entry, is_volume_manga)
     avg_unit = sum(avg_times.values()) / len(avg_times) if avg_times else None
     read_count = sum(1 for k in buckets if k in completed)
     return {
