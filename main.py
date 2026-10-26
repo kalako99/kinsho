@@ -2652,8 +2652,9 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     _scan_total = max(len(existing_mangas), 1)
     _scan_processed = 0
     def _tick():
-        nonlocal _scan_processed
+        nonlocal _scan_processed, _scan_total
         _scan_processed += 1
+        _scan_total = max(_scan_total, _scan_processed)  # library grew since the last scan
         if progress_cb:
             progress_cb(_scan_processed, _scan_total)
     existing_by_id = {m["id"]: m for m in existing_mangas if "id" in m}
@@ -3167,13 +3168,18 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             if library.get("flat_scan"):
                 dirnames[:] = []
                 continue  # flat-scan libraries are populated by the one-level walk above, not PASS 2
-            _tick()
             filenames_sorted = sorted(filenames, key=natural_sort_key)
 
             # Collect archive/pdf/epub files directly in this folder
             archive_files = [f for f in filenames_sorted if is_archive(f)]
             pdf_files     = [f for f in filenames_sorted if is_pdf(f)]
             epub_files    = [f for f in filenames_sorted if is_epub(f)]
+            # Progress counts manga, not folders: ticking every folder os.walk
+            # visits (each loose chapter is one) pushed the bar to e.g.
+            # "5144 / 131" (2026-10-26). Only a folder holding archive/pdf/epub
+            # files can register anything in this pass.
+            if archive_files or pdf_files or epub_files:
+                _tick()
 
             # ── AUTO-EXTRACT: divert archive/pdf files instead of registering them ──
             # Opt-in per library (library["auto_extract"], toggleable any
