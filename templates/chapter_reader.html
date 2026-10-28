@@ -674,6 +674,7 @@
     .sp-cell.sp-selected::after {
       content: '';
       position: absolute;
+      z-index: 2;  /* above a two-page view's canvas */
       inset: 0;
       border: 3px solid var(--theme-primary, #e94560);
       pointer-events: none;
@@ -840,6 +841,10 @@
     body.dark-pages .sp-flip-white { background: #000; }
     /* The page being pinch-zoomed paints over its neighbours. */
     .sp-slot.sp-zoomed { position: relative; z-index: 1; transform-origin: 0 0; }
+    /* Two-page mode: the view drawn as one picture, see TWO-PAGE VIEWS AS ONE PICTURE. */
+    .sp-slot { position: relative; }
+    .sp-view-canvas { position: absolute; z-index: 1; pointer-events: none; display: block; }
+    .sp-slot.sp-zoomed .sp-view-canvas { display: none; }
     /* Pages more than one away are loaded but not drawn: see spMarkFarSlots. */
     .sp-slot.sp-far img { visibility: hidden; }
 
@@ -2339,6 +2344,9 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     document.body.classList.toggle('dark-pages', darkPages && isDocSource);
     const f = dpFilter();
     if (document.body.style.getPropertyValue('--dp-filter') !== f) document.body.style.setProperty('--dp-filter', f);
+    // Two-page views bake the filter into their canvas. Can run before the
+    // single-page code below has set itself up, hence the try.
+    try { _spViewCanvasUpdate(); } catch (e) {}
   }
 
   function dpOnImage(img) {
@@ -5067,6 +5075,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       if (spWindowHi === -1) return;
       _spSyncSpacers();
       if (readerSettings.mode === 'single-page') spStrip.scrollLeft = spPosOf(spCurrentIdx) * viewW;
+      spCurlPrepare();  // new page sizes: new curl pages and two-page view canvases
     }, 200);
   });
 
@@ -6135,7 +6144,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     const look = (cell) => cell._spIdx != null
       ? { url: spManifest[cell._spIdx].url || '', img: cell.querySelector('img') }
       : { white: cell.classList.contains('sp-blank-white') };
-    const cells = [...slot.el.children];
+    const cells = [...slot.el.querySelectorAll(':scope > .sp-cell')];
     if (cells.length === 2) {
       const a = box(cells[0]), b = box(cells[1]);
       return { left: { ...a, ...look(cells[0]) }, right: { ...b, ...look(cells[1]) }, spine: a.x + a.w };
@@ -6230,6 +6239,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
             _spCurlWarm(bm);
             clearTimeout(_spCurlWarmTimer);
             _spCurlWarmTimer = setTimeout(_spCurlWarmTurn, 100);
+            _spViewCanvasSoon();
           }).catch(() => {
             if (_spCurlBitmaps.get(key) === rec) _spCurlBitmaps.delete(key);
           });
@@ -6241,6 +6251,84 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       if (keep.has(k)) continue;
       if (rec.bm) rec.bm.close();
       _spCurlBitmaps.delete(k);
+    }
+    _spViewCanvasUpdate();
+  }
+
+  // ── TWO-PAGE VIEWS AS ONE PICTURE (2026-10-28) ──
+  // User (tablet videos): a hairline between the two pages that opened up
+  // around a turn, and pages landing rough (moire on screentone) and only
+  // turning crisp a second or so later. Each page was its own picture, cut
+  // down from full size by the GPU at fractional pixel positions, so the
+  // black behind them showed at the spine, and the browser only redrew them
+  // in high quality once the screen had been still for a while. Now the view
+  // on screen and the one on each side (the two pages before and after) are
+  // each drawn once into ONE canvas at exactly the screen's pixels, from the
+  // curl's pages already decoded at screen resolution in high quality
+  // (spCurlPrepare): no seam, and as sharp the moment a view lands as it
+  // ever gets. It lies over the cells, which stay underneath for taps, the
+  // chosen-page frame (drawn above it) and pinch zoom (hidden while zoomed,
+  // the full-size pages show then); until its pages are decoded the cells
+  // show as before.
+  let _spViewCanvasRaf = 0;
+  function _spViewCanvasSoon() {
+    if (!_spViewCanvasRaf) _spViewCanvasRaf = requestAnimationFrame(() => { _spViewCanvasRaf = 0; _spViewCanvasUpdate(); });
+  }
+
+  function _spViewCanvasUpdate() {
+    const want = new Map();  // slot element -> strip position
+    if (spIsBook()) {
+      const curP = spPosOf(spCurrentIdx);
+      for (const p of [curP - 1, curP, curP + 1]) {
+        const si = p >= 0 && p < spPosCount() ? spAssignedSlot[p] : -1;
+        if (si != null && si !== -1 && spSlotPool[si]) want.set(spSlotPool[si].el, p);
+      }
+    }
+    for (const { el } of spSlotPool) {
+      if (want.has(el) || !el._spViewCanvas) continue;
+      el._spViewCanvas.remove();
+      el._spViewCanvas = el._spViewKey = null;
+    }
+    const dpr = window.devicePixelRatio || 1;
+    const vr = singlePageView.getBoundingClientRect();
+    const skip = (part) => part.url && dpPaper.get(new URL(part.url, location.href).href) === null ? 's' : '';
+    const filter = document.body.classList.contains('dark-pages')
+      ? (document.body.style.getPropertyValue('--dp-filter') || 'none') : '';
+    for (const [el, p] of want) {
+      const v = _spViewParts(p);
+      if (!v) continue;
+      const src = [_spCurlSource(v.left), _spCurlSource(v.right)];
+      if (!src[0] || !src[1]) continue;  // not decoded yet: the cells show meanwhile
+      const parts = [v.left, v.right];
+      const key = [dpr, filter, ...parts.map((part, k) =>
+        `${_spCurlKey(part) || src[k].colour}@${part.x.toFixed(2)},${part.y.toFixed(2)}${skip(part)}`)].join('|');
+      if (el._spViewKey === key) continue;
+      // Device-pixel sizes: an image part is its decoded bitmap, drawn 1:1.
+      const ws = parts.map((part, k) => src[k].image ? src[k].image.width : Math.max(1, Math.round(part.w * dpr)));
+      const hs = parts.map((part, k) => src[k].image ? src[k].image.height : Math.max(1, Math.round(part.h * dpr)));
+      const slotTop = el.getBoundingClientRect().top - vr.top;
+      const y0 = Math.min(v.left.y, v.right.y);
+      const ys = parts.map(part => Math.round((part.y - y0) * dpr));
+      const W = ws[0] + ws[1], H = Math.max(ys[0] + hs[0], ys[1] + hs[1]);
+      const c = el._spViewCanvas || document.createElement('canvas');
+      c.className = 'sp-view-canvas';
+      c.width = W;
+      c.height = H;
+      c.style.left = Math.round(v.left.x * dpr) / dpr + 'px';
+      c.style.top = Math.round((y0 - slotTop) * dpr) / dpr + 'px';
+      c.style.width = W / dpr + 'px';
+      c.style.height = H / dpr + 'px';
+      const ctx = c.getContext('2d', { alpha: false });
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+      let x = 0;
+      for (let k = 0; k < 2; k++) {
+        if (src[k].image) ctx.drawImage(src[k].image, x, ys[k]);
+        else { ctx.fillStyle = src[k].colour; ctx.fillRect(x, ys[k], ws[k], hs[k]); }
+        x += ws[k];
+      }
+      if (!el._spViewCanvas) { el.appendChild(c); el._spViewCanvas = c; }
+      el._spViewKey = key;
     }
   }
 
@@ -6886,7 +6974,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   function _spCurrentCells() {
     const s = _spSlotOf(spCurrentIdx);
-    return s ? [...s.el.children] : [];
+    return s ? [...s.el.querySelectorAll(':scope > .sp-cell')] : [];
   }
 
   // Chooses the first page of the pair on screen (when nothing on it is chosen).
