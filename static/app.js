@@ -163,6 +163,23 @@ function roundUpToMultiple(n, multiple) {
   return remainder === 0 ? n : n + (multiple - remainder);
 }
 
+// ── BACKDROP IMAGE ──
+// The backdrop is a CSS background, which the browser fetches at low
+// priority -- behind every cover tile on the page, so it showed up seconds
+// after them (2026-10-29). Asking for it through an Image with high
+// priority puts it first; the CSS background then reads it from cache.
+function backdropUrl(style) {
+  const m = style && style.backgroundImage && style.backgroundImage.match(/^url\('(.*)'\)$/);
+  return m ? m[1] : null;
+}
+
+function requestBackdrop(url, priority = 'high') {
+  const img = new Image();
+  img.fetchPriority = priority;
+  img.src = url;
+  return img;
+}
+
 // ── MANGA LIST SCROLL MEMORY ──
 // Remembered across a normal "click into a manga, hit back" round trip,
 // but only until the chapter reader is actually opened -- chapter_reader.html
@@ -221,6 +238,8 @@ const app = createApp({
       }
     } catch (e) {}
     const activeState = activeTab !== null ? tabCache[activeTab] : null;
+    const seededBg = activeState && backdropUrl(activeState.bgLayerStyle);
+    if (seededBg) requestBackdrop(seededBg);
 
     return {
       // ── TABS — loaded from backend via window.__LIBRARIES__ ──
@@ -338,7 +357,9 @@ const app = createApp({
   },
 
   async mounted() {
-    await this.loadTheme();
+    // Not awaited: the theme only sets colours, and waiting for it held the
+    // scroll restore and the tab load behind one more round-trip.
+    this.loadTheme();
     // Global on/off setting for the Collections row (template v-if only --
     // buildTabState reads the same setting itself), and which manga open
     // their collection instead: both fetched in parallel, never gating the
@@ -755,6 +776,12 @@ const app = createApp({
       });
       if (!state) return;
       this.tabCache[libraryId] = state;
+      // Another tab's backdrop, fetched now (normal priority, after the
+      // active tab's load) so switching to that tab can show it at once.
+      if (libraryId !== this.activeTab) {
+        const bg = backdropUrl(state.bgLayerStyle);
+        if (bg) requestBackdrop(bg, 'low');
+      }
       // Also persisted to sessionStorage (not just kept in memory) so the
       // NEXT full page load -- a back-navigation, since this is a
       // traditional multi-page app -- can seed data() with it synchronously
@@ -782,8 +809,7 @@ const app = createApp({
       this.suggested          = state.suggested || [];
       this.favourites         = state.favourites;
       this.collectionsRow     = state.collectionsRow;
-      this.bgLayerStyle       = state.bgLayerStyle;
-      this.bgIsRaster         = state.bgIsRaster;
+      this.setBackdrop(state.bgLayerStyle, state.bgIsRaster);
       this.lastUpdated        = state.lastUpdated;
       this.lastUpdatedPage    = state.lastUpdatedPage;
       this.lastUpdatedTotal   = state.lastUpdatedTotal;
@@ -802,8 +828,27 @@ const app = createApp({
       this.lastRead     = core.lastRead;
       this.random        = core.random;
       this.favourites    = core.favourites;
-      this.bgLayerStyle  = core.bgLayerStyle;
-      this.bgIsRaster    = core.bgIsRaster;
+      this.setBackdrop(core.bgLayerStyle, core.bgIsRaster);
+    },
+
+    // Swaps the backdrop only once the new image is loaded and decoded, so a
+    // tab whose backdrop isn't downloaded yet keeps the current one on screen
+    // instead of going black first. No image (backdrop off) applies at once.
+    setBackdrop(style, isRaster) {
+      const url = backdropUrl(style);
+      this._bgWanted = url;
+      if (!url || url === backdropUrl(this.bgLayerStyle)) {
+        this.bgLayerStyle = style;
+        this.bgIsRaster   = isRaster;
+        return;
+      }
+      const img = requestBackdrop(url);
+      const show = () => {
+        if (this._bgWanted !== url) return;   // another tab's backdrop asked for since
+        this.bgLayerStyle = style;
+        this.bgIsRaster   = isRaster;
+      };
+      img.decode().then(show, show);
     },
 
     async persistLockedBackdrop(url) {
@@ -872,8 +917,9 @@ const app = createApp({
         root.style.setProperty('--color-background', theme.background);
         root.style.setProperty('--color-text',       theme.text);
         document.body.style.background = theme.background;
-        this.bgLayerStyle = null;
-        this.bgIsRaster = false;
+        // Never touches the backdrop: it used to be cleared here, which
+        // blanked the saved one ~1 s after every page load until the
+        // library fetch put it back (2026-10-29).
       } catch (e) {
         console.error('Failed to load theme:', e);
       }
