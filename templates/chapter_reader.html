@@ -5857,8 +5857,11 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // task and the last 130-600px became a single jump. The incoming page itself
   // is loaded before the turn starts, as before.
   let _spAfterTurnFns = [];
+  // Set while a page curl's overlay is still on screen after its turn landed
+  // (_spFlipFinish): the after-turn work waits until the overlay is gone.
+  let _spAfterTurnHeld = false;
   function _spAfterTurn(fn) {
-    if (_spFlipAnimId === null) fn();
+    if (_spFlipAnimId === null && !_spAfterTurnHeld) fn();
     else _spAfterTurnFns.push(fn);
   }
   function _spRunAfterTurn() {
@@ -6636,11 +6639,35 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   // Ends a turn: turned = land on the new view (the strip jumps there under
   // the overlay, which goes two frames later, once the strip is drawn).
+  // The after-turn work (window recenter, canvas pages, the next views'
+  // decodes) waits until the overlay is gone: run first, it was a 300-450ms
+  // task followed by ~110ms frames on the tablet, so the curl's last frame
+  // -- the pages rescaled, visibly soft -- stayed up 0.8-1.1s although the
+  // sharp view was ready under it (measured 2026-10-29).
   function _spFlipFinish(f, turned) {
     if (f.anim) { cancelAnimationFrame(f.anim); f.anim = null; }
     if (_spFlip === f) _spFlip = null;
-    if (turned) spGotoIdx(f.idx, null, { instant: true });
-    requestAnimationFrame(() => requestAnimationFrame(() => f.el.remove()));
+    if (turned) {
+      _spAfterTurnHeld = true;
+      spGotoIdx(f.idx, null, { instant: true });
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      f.el.remove();
+      // One more frame so the overlay's removal is on screen first. A turn
+      // started meanwhile releases the work when it ends instead (landed or
+      // cancelled).
+      if (_spAfterTurnHeld) requestAnimationFrame(() => setTimeout(() => {
+        if (_spFlip) return;
+        _spAfterTurnHeld = false;
+        _spAfterInstantTurn();
+      }, 0));
+    }));
+  }
+
+  function _spAfterInstantTurn() {
+    if (_spScriptMoving()) return;
+    spRecenterWindow();
+    _spRunAfterTurn();
   }
 
   // A tap/key/BLE turn to page idx's view.
@@ -6790,11 +6817,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
         if (_spFlipAnimId !== null) { cancelAnimationFrame(_spFlipAnimId); _spFlipAnimId = null; }
         spStrip.style.scrollSnapType = '';
         spStrip.scrollLeft = targetR * viewW;
-        setTimeout(() => {
-          if (_spScriptMoving()) return;
-          spRecenterWindow();
-          _spRunAfterTurn();
-        }, 0);
+        if (!_spAfterTurnHeld) setTimeout(_spAfterInstantTurn, 0);
       } else {
         _spAnimateScrollTo(targetR * viewW, startVelocity);
       }
