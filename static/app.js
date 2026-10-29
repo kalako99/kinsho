@@ -25,6 +25,10 @@ const MangaThumb = defineComponent({
     // progress of their own -- pass :show-progress="false" there to drop
     // the bar entirely rather than render an always-empty one.
     showProgress: { type: Boolean, default: true },
+    // Loads the cover right away; every other tile waits until it's near
+    // the screen, so the covers on screen aren't queued behind the ~150 a
+    // library page holds (2026-10-29).
+    eager: { type: Boolean, default: false },
   },
   emits: ['click', 'contextmenu'],
   methods: {
@@ -70,7 +74,7 @@ const MangaThumb = defineComponent({
       @touchcancel="onTouchEnd"
     >
       <div class="cover">
-        <img v-if="manga.cover" :src="manga.cover" :alt="manga.title">
+        <img v-if="manga.cover" :src="manga.cover" :alt="manga.title" :loading="eager ? 'eager' : 'lazy'" decoding="async">
         <span v-else>No Cover</span>
         <span v-if="manga.is_complete" class="complete-badge">COMPLETE</span>
       </div>
@@ -245,6 +249,10 @@ const app = createApp({
       // ── TABS — loaded from backend via window.__LIBRARIES__ ──
       tabs,
       activeTab,
+
+      // Tiles per row whose covers load at once (about a screen's width on
+      // the tablet, plus a couple); the rest of the row loads lazily.
+      ROW_EAGER: 12,
 
       // ── TRACKS WHETHER EACH ROW IS SCROLLED TO THE END ──
       atEnd: { lastRead: false, random: false, suggested: false, favourites: false, collections: false },

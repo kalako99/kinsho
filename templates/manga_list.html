@@ -707,7 +707,8 @@
     </div>
     <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'lastRead')">
         <manga-thumb
-          v-for="manga in lastRead"
+          v-for="(manga, i) in lastRead"
+          :eager="i < ROW_EAGER"
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga)"
@@ -725,7 +726,8 @@
     </div>
     <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'random')">
         <manga-thumb
-          v-for="manga in random"
+          v-for="(manga, i) in random"
+          :eager="i < ROW_EAGER"
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga)"
@@ -741,7 +743,8 @@
     </div>
     <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'suggested')">
         <manga-thumb
-          v-for="manga in suggested"
+          v-for="(manga, i) in suggested"
+          :eager="i < ROW_EAGER"
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga)"
@@ -759,7 +762,8 @@
     </div>
     <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'favourites')">
         <manga-thumb
-          v-for="manga in favourites"
+          v-for="(manga, i) in favourites"
+          :eager="i < ROW_EAGER"
           :key="manga.id"
           :manga="manga"
           @click="openManga(manga)"
@@ -777,7 +781,8 @@
     </div>
     <div class="manga-row" v-drag-scroll @scroll="onRowScroll($event, 'collections')">
         <manga-thumb
-          v-for="c in collectionsRow"
+          v-for="(c, i) in collectionsRow"
+          :eager="i < ROW_EAGER"
           :key="c.id"
           :manga="c"
           :show-progress="false"
