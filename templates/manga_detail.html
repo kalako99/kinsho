@@ -1976,13 +1976,7 @@ createApp({
     sortedChapters() {
       if (!this.manga) return [];
       const chapters = [...this.manga.chapters];
-      chapters.sort((a, b) => {
-        const keyA = this.naturalSortKey(a.name);
-        const keyB = this.naturalSortKey(b.name);
-        return this.sortDesc
-          ? keyB.localeCompare(keyA)
-          : keyA.localeCompare(keyB);
-      });
+      chapters.sort((a, b) => this.sortDesc ? this.chapterCompare(b, a) : this.chapterCompare(a, b));
       return chapters;
     },
   },
@@ -2080,6 +2074,17 @@ createApp({
     },
     onOverlayClick(e, closeFn) {
       if (e.target === e.currentTarget && this._overlayMouseDownSelf) closeFn();
+    },
+
+    // Same order as chapter_sort_key in main.py: names starting with a
+    // chapter word (Chapter, Chap, Ch, Episode, Ep + number) first, by that
+    // number; then the rest (spin-offs, extras) by name.
+    chapterCompare(a, b) {
+      const re = /^\s*(?:chapter|chap|ch|episode|ep)(?![a-z])[\s._#-]*(\d+(?:\.\d+)?)/i;
+      const ma = re.exec(a.name), mb = re.exec(b.name);
+      if (!!ma !== !!mb) return ma ? -1 : 1;
+      if (ma && parseFloat(ma[1]) !== parseFloat(mb[1])) return parseFloat(ma[1]) - parseFloat(mb[1]);
+      return this.naturalSortKey(a.name).localeCompare(this.naturalSortKey(b.name));
     },
 
     naturalSortKey(name) {

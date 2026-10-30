@@ -856,6 +856,42 @@ def make_id(name: str) -> str:
 def is_chapter_folder(name: str) -> bool:
     return bool(re.search(r'chapter', name, re.IGNORECASE))
 
+# ── CHAPTER OR VOLUME MANGA (2026-10-30) ──
+# A manga folder is a chapter manga when at least one item directly inside
+# it (image subfolder, archive, PDF, EPUB; the name without extension)
+# STARTS with a chapter word followed by a number. Then everything in it is
+# a chapter ("Spin-off 1", "Extra" too); otherwise everything is a volume.
+# Word boundary after the word, so "Chaos 3" / "Epilogue 2" don't count.
+CHAPTER_WORD_RE = re.compile(r'^\s*(?:chapter|chap|ch|episode|ep)(?![a-z])[\s._#-]*(\d+(?:\.\d+)?)', re.I)
+VOLUME_WORD_RE  = re.compile(r'^(?:volume|vol|v)(?![a-z])[\s._#-]*\d|^\d', re.I)
+
+def is_chapter_name(name: str) -> bool:
+    return bool(CHAPTER_WORD_RE.match(name))
+
+def is_numbered_unit(name: str, manga_name: str, volumes: bool) -> bool:
+    """Chapter-named (chapter manga) or volume-named (volume manga): the
+    items END and COMPLETE look at, never a spin-off or extra. A volume is
+    volume-named when, without the manga's own name in front, it starts
+    with a volume word + number or with a number ("Title v01", "Title - 01")."""
+    if not volumes:
+        return is_chapter_name(name)
+    s = name.strip()
+    if manga_name and s.lower().startswith(manga_name.strip().lower()):
+        s = s[len(manga_name.strip()):]
+    return bool(VOLUME_WORD_RE.match(s.lstrip(" -_.~:")))
+
+def chapter_sort_key(name: str) -> tuple:
+    """Chapters order: chapter-named items first, by their number; then the
+    rest (spin-offs, extras) by name."""
+    m = CHAPTER_WORD_RE.match(name)
+    if m:
+        return (0, float(m.group(1)), natural_sort_key(name))
+    return (1, 0.0, natural_sort_key(name))
+
+def unit_sort_key(name: str, volumes: bool) -> tuple:
+    """Order of a manga's volumes (by name) or chapters (chapter_sort_key)."""
+    return (1, 0.0, natural_sort_key(name)) if volumes else chapter_sort_key(name)
+
 ARCHIVE_EXTENSIONS = {'.cbz', '.cbr', '.zip', '.rar'}
 IMAGE_EXTENSIONS   = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
 
@@ -923,8 +959,9 @@ def checkable_items_for_manga(dims: dict) -> list:
                     "source_path": v["path"], "source_type": vol_type,
                 })
     elif chapters:
-        for cid, c in sorted(chapters.items(), key=lambda kv: natural_sort_key(kv[1].get("name", ""))):
-            if c.get("path"):
+        for cid, c in sorted(chapters.items(), key=lambda kv: chapter_sort_key(kv[1].get("name", ""))):
+            # PDF/EPUB chapters are left out, same as PDF/EPUB volumes above.
+            if c.get("path") and c.get("source") not in ("pdf", "epub"):
                 source_type = "archive" if c.get("source") == "archive" else "loose"
                 items.append({
                     "item_type": "chapter", "item_id": cid, "item_name": c.get("name", cid),
@@ -961,7 +998,7 @@ def manga_pages_read(dims: dict, history_entry: dict, is_volume_manga: bool) -> 
     buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
     if not buckets:
         return 0
-    ordered_ids = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
+    ordered_ids = sorted(buckets.keys(), key=lambda k: unit_sort_key(buckets[k].get("name", k), is_volume_manga))
     furthest_id = history_entry.get("furthest_volume" if is_volume_manga else "furthest_chapter")
     if not furthest_id or furthest_id not in ordered_ids:
         return 0
@@ -988,7 +1025,7 @@ def _prune_stale_reading_history(library_id: int, manga_id: str, dims: dict, sta
     source_dict = dims.get("chapters") or dims.get("volumes", {})
     ordered_ids = sorted(
         source_dict.keys(),
-        key=lambda cid: natural_sort_key(source_dict[cid].get("name", cid))
+        key=lambda cid: chapter_sort_key(source_dict[cid].get("name", cid))
     )
     for user in auth._load_users().get("users", []):
         username = user.get("username")
@@ -1373,6 +1410,9 @@ def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
     final = st.get("volumes" if volumes else "chapters")
     if not units or not final:
         return False
+    # Only chapter-named (volume-named) items count: a spin-off or extra
+    # never sets the highest number and never gets END.
+    units = _numbered_units(units, manga["name"], volumes)
     numbers = [n for n in (_unit_number(u.get("name", ""), manga["name"], volumes) for u in units.values()) if n is not None]
     if not numbers or int(max(numbers)) < int(final):
         return False
@@ -1382,7 +1422,7 @@ def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
         print(f"[SeriesStatus] Not marking '{manga['name']}' END: library goes up to {max(numbers):g}, "
               f"linked series ends at {final:g} (wrong link?)")
         return False
-    ordered = sorted(units.items(), key=lambda kv: natural_sort_key(kv[1].get("name", "")))
+    ordered = sorted(units.items(), key=lambda kv: unit_sort_key(_strip_end(kv[1].get("name", "")), volumes))
     last_id = ordered[-1][0]
     folder_mtime_before = os.path.getmtime(folder)
     renamed = False
@@ -1396,16 +1436,30 @@ def _apply_series_end(library_id: int, manga: dict, dims: dict) -> bool:
     if renamed:
         save_manga_dims(library_id, manga["name"], dims)
         _keep_folder_unchanged(manga, folder, folder_mtime_before)
-        manga["is_complete"] = _is_complete(dims)
+        manga["is_complete"] = _is_complete(dims, manga["name"])
     return renamed
 
 
-def _is_complete(dims: dict) -> bool:
-    """COMPLETE: the last chapter/volume's name ends with the word END."""
-    _, units = _series_units(dims)
+def _strip_end(name: str) -> str:
+    return name.rsplit("END", 1)[0].strip() if _ends_with_end(name) else name
+
+
+def _numbered_units(units: dict, manga_name: str, volumes: bool) -> dict:
+    """The chapter-named (volume-named) items, or all of them when none is
+    (e.g. chapters inside one archive named "Vol.1 Chapter 3")."""
+    named = {k: u for k, u in units.items()
+             if is_numbered_unit(_strip_end(u.get("name", "")), manga_name, volumes)}
+    return named or units
+
+
+def _is_complete(dims: dict, manga_name: str = "") -> bool:
+    """COMPLETE: the last chapter-named chapter (volume-named volume) ends
+    with the word END; spin-offs/extras sorted after it don't matter."""
+    volumes, units = _series_units(dims)
     if not units:
         return False
-    last = sorted(units.values(), key=lambda u: natural_sort_key(u.get("name", "")))[-1]
+    units = _numbered_units(units, manga_name, volumes)
+    last = sorted(units.values(), key=lambda u: unit_sort_key(_strip_end(u.get("name", "")), volumes))[-1]
     return _ends_with_end(last.get("name", ""))
 
 
@@ -1431,7 +1485,7 @@ def series_position(dims: dict, entry: dict, is_volume_manga: bool) -> dict | No
     both show this percent."""
     buckets = dims.get("volumes" if is_volume_manga else "chapters") or {}
     last_id = entry.get("last_volume_id" if is_volume_manga else "last_chapter_id")
-    ordered = sorted(buckets.keys(), key=lambda k: natural_sort_key(buckets[k].get("name", k)))
+    ordered = sorted(buckets.keys(), key=lambda k: unit_sort_key(buckets[k].get("name", k), is_volume_manga))
     total = sum(len(buckets[k].get("pages") or []) for k in ordered)
     if last_id not in buckets or not total:
         return None
@@ -2084,11 +2138,13 @@ def _classify_loose_folder(folder_path: str) -> dict:
     - A subfolder is a "content subfolder" if it contains only images (and
       optionally skippable subfolders).
     - A subfolder is a "nested manga" if it contains its own image-only sub-subfolders.
-    - If at least one content subfolder name contains "chapter" (case-insensitive)
-      -> manga_type = "case1"
-    - Otherwise -> manga_type = "case2"
+    - "files": the archives (not case1: those are a manga of their own),
+      PDFs and EPUBs directly inside, as (filename, full_path, kind).
+    - If at least one content subfolder or file name STARTS with a chapter
+      word (is_chapter_name) -> manga_type = "case1", every item is a chapter
+    - Otherwise -> manga_type = "case2", every item is a volume
     - A folder is a manga if it has at least one content subfolder after removing
-      nested mangas.
+      nested mangas (a folder of files only is registered by PASS 2).
     """
     def _has_images_anywhere(path: str) -> bool:
         for root, dirs, files in os.walk(path):
@@ -2162,16 +2218,194 @@ def _classify_loose_folder(folder_path: str) -> dict:
         return {"is_manga": False, "manga_type": None,
                 "content_subfolders": [], "nested_manga_paths": nested_manga_paths}
 
-    has_chapter_name = any(
-        re.search(r'chapter', name, re.IGNORECASE) for name in content_subfolders
-    )
-    manga_type = "case1" if has_chapter_name else "case2"
+    files = _unit_files_in_folder(folder_path)
+    names = content_subfolders + [os.path.splitext(f)[0] for f, _, _ in files]
+    manga_type = "case1" if any(is_chapter_name(n) for n in names) else "case2"
 
     return {
         "is_manga": True,
         "manga_type": manga_type,
         "content_subfolders": content_subfolders,
         "nested_manga_paths": nested_manga_paths,
+        "files": files,
+    }
+
+def _unit_files_in_folder(folder_path: str) -> list:
+    """The archive (not case1), PDF and EPUB files directly inside a manga
+    folder, as (filename, full_path, "archive"|"pdf"|"epub"), name order."""
+    try:
+        names = sorted((f for f in os.listdir(folder_path)
+                        if os.path.isfile(os.path.join(folder_path, f))), key=natural_sort_key)
+    except Exception:
+        return []
+    files = []
+    for f in names:
+        fpath = os.path.join(folder_path, f)
+        if is_archive(f):
+            if classify_archive(fpath) != 'case1':
+                files.append((f, fpath, "archive"))
+        elif is_pdf(f):
+            files.append((f, fpath, "pdf"))
+        elif is_epub(f):
+            files.append((f, fpath, "epub"))
+    return files
+
+def _scan_file_volume(library_id: int, manga_name: str, vol_name: str, vol_path: str, vol_type: str,
+                      vol_mtime: float, new_unit_cover_mtimes: dict) -> tuple[dict, Optional[str]]:
+    """A volume file (archive/PDF/EPUB) scanned into its dims entry: page
+    sizes, and its first page saved as its cover (recorded in
+    new_unit_cover_mtimes, the manga's unit_cover_mtimes). Returns (entry,
+    cover filename or None)."""
+    _invalidate_stale_source_caches(vol_path)
+
+    # Initialise so we always have valid values reaching the dims write
+    pages       = []
+    cover_entry = None
+    cover_fname = None
+
+    if vol_type == 'archive':
+        arc = open_archive(vol_path)
+        if arc is None:
+            print(f"[ScanLib] Cannot open archive: {vol_path}")
+        else:
+            with arc:
+                images = list_archive_images(arc)
+            pages = [{"w": w, "h": h} for w, h in
+                    (get_archive_image_dims(vol_path, n) for n in images)]
+            if images:
+                cover_entry = images[0]
+                cover_fname = vol_name + os.path.splitext(cover_entry)[1]
+                cover_bytes = _cached_archive_page(vol_path, cover_entry)
+                if cover_bytes:
+                    # unit_cover_mtimes, NOT cover_mtimes -- see the
+                    # comment on stored_unit_cover_mtimes above.
+                    # The dict itself is intentionally not captured
+                    # here (matches the direct-mutation pattern
+                    # below) -- reassigning this name to
+                    # process_cover_from_bytes' returned dict would
+                    # silently detach it from the same object
+                    # already stored in mangas[manga_path], which is
+                    # exactly what the old 'pdf' branch below did.
+                    # The returned FILENAME is still needed though --
+                    # the saved thumbnail is always .jpg now regardless
+                    # of cover_entry's own extension (see
+                    # process_cover_from_bytes), so cover_fname must be
+                    # corrected to match what's actually on disk before
+                    # it's used as dims' cover_image below.
+                    result_fname, _ = process_cover_from_bytes(
+                        cover_bytes, cover_fname,
+                        library_id, manga_name,
+                        new_unit_cover_mtimes, vol_mtime
+                    )
+                    if result_fname:
+                        cover_fname = result_fname
+                    new_unit_cover_mtimes[cover_fname] = vol_mtime
+
+    elif vol_type == 'pdf':
+        if not PDF_SUPPORT:
+            print(f"[ScanLib] pymupdf not installed, skipping {vol_path}")
+        else:
+            try:
+                doc = pymupdf.open(vol_path)
+                page_count = len(doc)
+                doc.close()
+                pages = [get_pdf_page_dims(vol_path, i) for i in range(page_count)]
+                pages = [{"w": w, "h": h} for w, h in pages]
+                cover_entry = 0
+                cover_fname = vol_name + ".jpg"
+                cover_bytes = _cached_pdf_page(vol_path, 0)
+                if cover_bytes:
+                    result_fname, _ = process_cover_from_bytes(
+                        cover_bytes, cover_fname,
+                        library_id, manga_name,
+                        new_unit_cover_mtimes, vol_mtime
+                    )
+                    if result_fname:
+                        cover_fname = result_fname
+                        new_unit_cover_mtimes[cover_fname] = vol_mtime
+            except Exception as e:
+                print(f"[ScanLib] Failed to process PDF {vol_path}: {e}")
+
+    elif vol_type == 'epub':
+        image_list = get_epub_image_list(vol_path)
+        for href in image_list:
+            epub_bytes = _cached_epub_page(vol_path, href)
+            if epub_bytes:
+                try:
+                    img = Image.open(io.BytesIO(epub_bytes))
+                    pages.append({"w": img.width, "h": img.height})
+                except Exception:
+                    pages.append({"w": 800, "h": 1100})
+            else:
+                pages.append({"w": 800, "h": 1100})
+        if image_list:
+            cover_entry = image_list[0]
+            cover_fname = vol_name + ".jpg"
+            cover_bytes = _cached_epub_page(vol_path, cover_entry)
+            if cover_bytes:
+                process_cover_from_bytes(
+                    cover_bytes, cover_fname,
+                    library_id, manga_name,
+                    new_unit_cover_mtimes, vol_mtime
+                )
+                new_unit_cover_mtimes[cover_fname] = vol_mtime
+
+    # Always return the volume record, even if cover extraction failed
+    entry = {
+        "name":        vol_name,
+        "path":        vol_path,
+        "type":        vol_type,
+        "mtime":       vol_mtime,
+        "pages":       pages,
+        "cover_image": cover_fname,
+        "source":      vol_type,
+        "page_count":  len(pages),
+    }
+    return entry, cover_fname
+
+
+def _scan_file_chapter(chapter_name: str, path: str, kind: str, mtime: float) -> dict | None:
+    """A chapter file (archive/PDF/EPUB) scanned into its dims entry, or None
+    for an archive that can't be opened. PDF and EPUB chapters are read like
+    PDF/EPUB volumes (an EPUB opens in the EPUB text reader); chapters have
+    no cover of their own."""
+    _invalidate_stale_source_caches(path)
+    pages = []
+    if kind == "archive":
+        arc = open_archive(path)
+        if arc is not None:
+            with arc:
+                images = list_archive_images(arc)
+            pages = [{"w": w, "h": h} for w, h in (get_archive_image_dims(path, n) for n in images)]
+        else:
+            print(f"[ScanLib] Cannot open archive: {path}")
+            return None
+    elif kind == "pdf":
+        if not PDF_SUPPORT:
+            print(f"[ScanLib] pymupdf not installed, skipping {path}")
+        else:
+            try:
+                doc = pymupdf.open(path)
+                page_count = len(doc)
+                doc.close()
+                pages = [{"w": w, "h": h} for w, h in (get_pdf_page_dims(path, i) for i in range(page_count))]
+            except Exception as e:
+                print(f"[ScanLib] Failed to process PDF {path}: {e}")
+    elif kind == "epub":
+        for href in get_epub_image_list(path):
+            epub_bytes = _cached_epub_page(path, href)
+            try:
+                img = Image.open(io.BytesIO(epub_bytes)) if epub_bytes else None
+                pages.append({"w": img.width, "h": img.height} if img else {"w": 800, "h": 1100})
+            except Exception:
+                pages.append({"w": 800, "h": 1100})
+    return {
+        "name":       chapter_name,
+        "path":       path,
+        "mtime":      mtime,
+        "pages":      pages,
+        "source":     kind,
+        "page_count": len(pages),
     }
 
 def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stored_mtimes: dict,
@@ -2786,6 +3020,14 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         stored_unit_cover_mtimes = existing.get("unit_cover_mtimes", {})
         current_mtime = os.path.getmtime(manga_path)
         manga_type    = classification["manga_type"]  # "case1" or "case2"
+        # Archive/PDF/EPUB files next to the subfolders are chapters/volumes
+        # of this manga too (the same type). An auto-extract library leaves
+        # archives and PDFs out: they become folders after extraction.
+        unit_files = [
+            (f, fp, kind) for f, fp, kind in classification.get("files", [])
+            if not (library.get("auto_extract") and kind in ("archive", "pdf"))
+            and os.path.splitext(f)[0] not in classification["content_subfolders"]
+        ]
 
         if manga_type == "case2" and library.get("rename_volumes"):
             # Must run before folder_unchanged/any_subfolder_changed below --
@@ -2826,6 +3068,14 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 if stored_sub_mtime != current_sub_mtime:
                     any_subfolder_changed = True
                     break
+            for f, fp, _ in unit_files:
+                if any_subfolder_changed:
+                    break
+                stored_file_mtime = bucket.get(make_id(manga_name + id_infix + os.path.splitext(f)[0]), {}).get("mtime")
+                try:
+                    any_subfolder_changed = stored_file_mtime != os.path.getmtime(fp)
+                except OSError:
+                    any_subfolder_changed = True
 
         dims_paths_valid = _dims_paths_valid(manga_name)
         if folder_unchanged and not any_subfolder_changed and dims_paths_valid:
@@ -2925,6 +3175,19 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                     "filenames": files,
                 }
 
+            for f, fp, kind in unit_files:
+                chapter_name = os.path.splitext(f)[0]
+                chapter_id   = make_id(manga_name + ":" + chapter_name)
+                valid_chapter_ids.add(chapter_id)
+                file_mtime   = os.path.getmtime(fp)
+                if dims["chapters"].get(chapter_id, {}).get("mtime") == file_mtime:
+                    print(f"[ScanLib] Chapter unchanged: {f}")
+                    continue
+                print(f"[ScanLib] Scanning {kind} chapter: {f}")
+                entry = _scan_file_chapter(chapter_name, fp, kind, file_mtime)
+                if entry:
+                    dims["chapters"][chapter_id] = entry
+
             # Prune chapters whose backing subfolder is no longer present
             # under this name -- renamed or deleted. The loop above always
             # visits every CURRENTLY existing subfolder (unchanged ones
@@ -3022,6 +3285,21 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 # never set a manga-level cover at all -- confirmed live as
                 # the cause of a converted manga showing "No Cover" despite
                 # every individual volume having its own correct cover.
+                if mangas[manga_path].get("cover") is None and cover_fname is not None:
+                    mangas[manga_path]["cover"] = cover_fname
+
+            unit_cover_mtimes = mangas[manga_path].setdefault("unit_cover_mtimes", {})
+            for f, fp, kind in unit_files:
+                vol_name  = os.path.splitext(f)[0]
+                vol_id    = make_id(manga_name + ":vol:" + vol_name)
+                valid_vol_ids.add(vol_id)
+                vol_mtime = os.path.getmtime(fp)
+                if dims["volumes"].get(vol_id, {}).get("mtime") == vol_mtime:
+                    print(f"[ScanLib] Volume unchanged: {f}")
+                    continue
+                print(f"[ScanLib] Scanning {kind} volume: {f}")
+                dims["volumes"][vol_id], cover_fname = _scan_file_volume(
+                    library_id, manga_name, vol_name, fp, kind, vol_mtime, unit_cover_mtimes)
                 if mangas[manga_path].get("cover") is None and cover_fname is not None:
                     mangas[manga_path]["cover"] = cover_fname
 
@@ -3398,31 +3676,34 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             # ── CASE 2 & 3: archives inside a manga folder ──
             # Only process if this folder itself contains archive/pdf/epub files
             # that are NOT case1 (i.e., don't have internal chapter structure)
-            case2_files = []  # (filename, full_path, type)
-            case3_files = []
+            # One rule for the whole folder (see CHAPTER_WORD_RE): when any
+            # file's name starts with a chapter word, every file is a chapter
+            # (case3, PDF/EPUB included); otherwise every file is a volume.
+            unit_files = []  # (filename, full_path, type)
 
             for arc_file in archive_files:
                 arc_path = os.path.join(dirpath, arc_file)
-                case = classify_archive(arc_path)
-                if case == 'case1':
+                if classify_archive(arc_path) == 'case1':
                     continue  # handled above
-                elif case == 'case3':
-                    case3_files.append((arc_file, arc_path, 'archive'))
-                else:
-                    case2_files.append((arc_file, arc_path, 'archive'))
+                unit_files.append((arc_file, arc_path, 'archive'))
 
             for pdf_file in pdf_files:
-                case2_files.append((pdf_file, os.path.join(dirpath, pdf_file), 'pdf'))
+                unit_files.append((pdf_file, os.path.join(dirpath, pdf_file), 'pdf'))
 
             for epub_file in epub_files:
-                case2_files.append((epub_file, os.path.join(dirpath, epub_file), 'epub'))
+                unit_files.append((epub_file, os.path.join(dirpath, epub_file), 'epub'))
+
+            if any(is_chapter_name(os.path.splitext(f)[0]) for f, _, _ in unit_files):
+                case2_files, case3_files = [], unit_files
+            else:
+                case2_files, case3_files = unit_files, []
 
             # ── CASE 3 ──
             if case3_files:
                 manga_path = dirpath
                 manga_name = os.path.basename(manga_path)
                 if manga_path in mangas:
-                    # Already registered as loose — skip
+                    # Already registered as loose, files included — skip
                     pass
                 else:
                     manga_id          = make_id(manga_name)
@@ -3473,7 +3754,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                         }
 
                         dims = _safe_load_manga_dims(library_id, manga_name)
-                        for arc_file, arc_path, _ in case3_files:
+                        for arc_file, arc_path, kind in case3_files:
                             chapter_name = os.path.splitext(arc_file)[0]
                             chapter_id   = make_id(manga_name + ":" + chapter_name)
                             arc_mtime    = os.path.getmtime(arc_path)
@@ -3483,23 +3764,10 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                 print(f"[ScanLib] Chapter unchanged (case3): {chapter_name}")
                                 continue
 
-                            print(f"[ScanLib] Scanning case3 chapter: {chapter_name}")
-                            _invalidate_stale_source_caches(arc_path)
-                            arc = open_archive(arc_path)
-                            if arc is None:
-                                continue
-                            with arc:
-                                images = list_archive_images(arc)
-                            pages = [{"w": w, "h": h} for w, h in
-                                    (get_archive_image_dims(arc_path, n) for n in images)]
-                            dims["chapters"][chapter_id] = {
-                                "name":       chapter_name,
-                                "path":       arc_path,
-                                "mtime":      arc_mtime,
-                                "pages":      pages,
-                                "source":     "archive",
-                                "page_count": len(pages),
-                            }
+                            print(f"[ScanLib] Scanning case3 chapter: {arc_file}")
+                            entry = _scan_file_chapter(chapter_name, arc_path, kind, arc_mtime)
+                            if entry:
+                                dims["chapters"][chapter_id] = entry
                         save_manga_dims(library_id, manga_name, dims)
 
             # ── CASE 2 ──
@@ -3577,111 +3845,9 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                                 continue
 
                             print(f"[ScanLib] Scanning case2 volume: {vol_name}")
-                            _invalidate_stale_source_caches(vol_path)
-
-                            # Initialise so we always have valid values reaching the dims write
-                            pages       = []
-                            cover_entry = None
-                            cover_fname = None
-
-                            if vol_type == 'archive':
-                                arc = open_archive(vol_path)
-                                if arc is None:
-                                    print(f"[ScanLib] Cannot open archive: {vol_path}")
-                                else:
-                                    with arc:
-                                        images = list_archive_images(arc)
-                                    pages = [{"w": w, "h": h} for w, h in
-                                            (get_archive_image_dims(vol_path, n) for n in images)]
-                                    if images:
-                                        cover_entry = images[0]
-                                        cover_fname = vol_name + os.path.splitext(cover_entry)[1]
-                                        cover_bytes = _cached_archive_page(vol_path, cover_entry)
-                                        if cover_bytes:
-                                            # unit_cover_mtimes, NOT cover_mtimes -- see the
-                                            # comment on stored_unit_cover_mtimes above.
-                                            # The dict itself is intentionally not captured
-                                            # here (matches the direct-mutation pattern
-                                            # below) -- reassigning this name to
-                                            # process_cover_from_bytes' returned dict would
-                                            # silently detach it from the same object
-                                            # already stored in mangas[manga_path], which is
-                                            # exactly what the old 'pdf' branch below did.
-                                            # The returned FILENAME is still needed though --
-                                            # the saved thumbnail is always .jpg now regardless
-                                            # of cover_entry's own extension (see
-                                            # process_cover_from_bytes), so cover_fname must be
-                                            # corrected to match what's actually on disk before
-                                            # it's used as dims' cover_image below.
-                                            result_fname, _ = process_cover_from_bytes(
-                                                cover_bytes, cover_fname,
-                                                library_id, manga_name,
-                                                new_unit_cover_mtimes, vol_mtime
-                                            )
-                                            if result_fname:
-                                                cover_fname = result_fname
-                                            new_unit_cover_mtimes[cover_fname] = vol_mtime
-
-                            elif vol_type == 'pdf':
-                                if not PDF_SUPPORT:
-                                    print(f"[ScanLib] pymupdf not installed, skipping {vol_path}")
-                                else:
-                                    try:
-                                        doc = pymupdf.open(vol_path)
-                                        page_count = len(doc)
-                                        doc.close()
-                                        pages = [get_pdf_page_dims(vol_path, i) for i in range(page_count)]
-                                        pages = [{"w": w, "h": h} for w, h in pages]
-                                        cover_entry = 0
-                                        cover_fname = vol_name + ".jpg"
-                                        cover_bytes = _cached_pdf_page(vol_path, 0)
-                                        if cover_bytes:
-                                            result_fname, _ = process_cover_from_bytes(
-                                                cover_bytes, cover_fname,
-                                                library_id, manga_name,
-                                                new_unit_cover_mtimes, vol_mtime
-                                            )
-                                            if result_fname:
-                                                cover_fname = result_fname
-                                                new_unit_cover_mtimes[cover_fname] = vol_mtime
-                                    except Exception as e:
-                                        print(f"[ScanLib] Failed to process PDF {vol_path}: {e}")
-
-                            elif vol_type == 'epub':
-                                image_list = get_epub_image_list(vol_path)
-                                for href in image_list:
-                                    epub_bytes = _cached_epub_page(vol_path, href)
-                                    if epub_bytes:
-                                        try:
-                                            img = Image.open(io.BytesIO(epub_bytes))
-                                            pages.append({"w": img.width, "h": img.height})
-                                        except Exception:
-                                            pages.append({"w": 800, "h": 1100})
-                                    else:
-                                        pages.append({"w": 800, "h": 1100})
-                                if image_list:
-                                    cover_entry = image_list[0]
-                                    cover_fname = vol_name + ".jpg"
-                                    cover_bytes = _cached_epub_page(vol_path, cover_entry)
-                                    if cover_bytes:
-                                        process_cover_from_bytes(
-                                            cover_bytes, cover_fname,
-                                            library_id, manga_name,
-                                            new_unit_cover_mtimes, vol_mtime
-                                        )
-                                        new_unit_cover_mtimes[cover_fname] = vol_mtime
-
-                            # Always write the volume record, even if cover extraction failed
-                            dims["volumes"][vol_id] = {
-                                "name":        vol_name,
-                                "path":        vol_path,
-                                "type":        vol_type,
-                                "mtime":       vol_mtime,
-                                "pages":       pages,
-                                "cover_image": cover_fname,
-                                "source":      vol_type,
-                                "page_count":  len(pages),
-                            }
+                            dims["volumes"][vol_id], cover_fname = _scan_file_volume(
+                                library_id, manga_name, vol_name, vol_path, vol_type,
+                                vol_mtime, new_unit_cover_mtimes)
                             if default_cover is None and cover_fname is not None:
                                 default_cover = cover_fname
                                 mangas[manga_path]["cover"] = default_cover
@@ -3742,7 +3908,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     for manga in mangas.values():
         manga_name = manga.get("name", "")
         dims = _safe_load_manga_dims(library_id, manga_name)
-        manga["is_complete"] = _is_complete(dims)
+        manga["is_complete"] = _is_complete(dims, manga_name)
 
         # ── ComicInfo.xml: fill in description/genres/tags left empty by
         # everything else (manual edit, a prior fetch, or a prior run of
@@ -5335,16 +5501,7 @@ def _manga_tile(library_id: int, manga: dict, dims: dict, user_covers: dict) -> 
     if "is_complete" in manga:
         m["is_complete"] = manga["is_complete"]
     else:
-        volumes = dims.get("volumes", {})
-        chapters = dims.get("chapters", {})
-        last_name = None
-        if volumes:
-            sorted_vols = sorted(volumes.values(), key=lambda v: natural_sort_key(v.get("name", "")))
-            last_name = sorted_vols[-1].get("name", "")
-        elif chapters:
-            sorted_chs = sorted(chapters.values(), key=lambda c: natural_sort_key(c.get("name", "")))
-            last_name = sorted_chs[-1].get("name", "")
-        m["is_complete"] = bool(last_name and last_name.split()[-1] == "END")
+        m["is_complete"] = _is_complete(dims, manga["name"])
     return m
 
 # ── SUGGESTIONS (2026-10-14) ──
@@ -7680,7 +7837,7 @@ async def save_reading_progress(request: Request):
             source_dict = dims.get("chapters") or dims.get("volumes", {})
             ordered_ids = sorted(
                 source_dict.keys(),
-                key=lambda cid: natural_sort_key(source_dict[cid].get("name", cid))
+                key=lambda cid: chapter_sort_key(source_dict[cid].get("name", cid))
             )
             furthest = None
             furthest_name = None
@@ -7760,7 +7917,7 @@ async def bulk_mark_read(request: Request, library_id: int, manga_id: str):
     # completed" convention save_reading_progress already uses (walks the
     # whole ordered list rather than stopping at the first gap, so marking a
     # later batch read while an earlier one is still unread doesn't get lost).
-    ordered_ids = sorted(source_dict.keys(), key=lambda i: natural_sort_key(source_dict[i].get("name", i)))
+    ordered_ids = sorted(source_dict.keys(), key=lambda i: chapter_sort_key(source_dict[i].get("name", i)))
     furthest = None
     furthest_name = None
     for iid in ordered_ids:
@@ -7817,7 +7974,7 @@ def get_reading_history(request: Request, library_id: int):
             if furthest_cid:
                 ordered = sorted(
                     dims.get("chapters", {}).keys(),
-                    key=lambda cid: natural_sort_key(dims["chapters"][cid].get("name", cid))
+                    key=lambda cid: chapter_sort_key(dims["chapters"][cid].get("name", cid))
                 )
                 if furthest_cid in ordered:
                     furthest_idx = ordered.index(furthest_cid) + 1
@@ -8423,6 +8580,19 @@ def chapter_reader(request: Request, library_id: int, manga_id: str, chapter_id:
     manga = next((m for m in manga_data.get("mangas", []) if m.get("id") == manga_id), None) if manga_data else None
     is_oneshot = bool(manga and manga.get("manga_type") == "oneshot")
 
+    # An EPUB chapter that parses opens in the EPUB text reader, like an
+    # EPUB volume (see volume_reader).
+    if manga:
+        chapter = load_manga_dims_cached(library_id, manga["name"]).get("chapters", {}).get(chapter_id)
+        if chapter and chapter.get("source") == "epub" and epub_reader.is_parseable(chapter["path"]):
+            return templates.TemplateResponse(request, "epub_reader.html", {
+                "library_id": library_id,
+                "manga_id":   manga_id,
+                "volume_id":  chapter_id,
+                "theme_css":  get_theme_css(username),
+                "dark_pages": bool(auth.load_user_data(username).get("dark_pages")),
+            })
+
     return templates.TemplateResponse(request, "chapter_reader.html", {
         "library_id": library_id,
         "manga_id": manga_id,
@@ -8451,7 +8621,7 @@ def get_chapters(request: Request, library_id: int, manga_id: str):
         {"id": cid, "name": ch["name"], "path": ch["path"]}
         for cid, ch in dims.get("chapters", {}).items()
     ]
-    chapters.sort(key=lambda c: natural_sort_key(c["name"]))
+    chapters.sort(key=lambda c: chapter_sort_key(c["name"]))
     return JSONResponse({"chapters": chapters})
 
 
@@ -8634,6 +8804,61 @@ async def abort_if_disconnected(request: Request):
     if await request.is_disconnected():
         raise HTTPException(status_code=499, detail="Client disconnected")
 
+def _serve_doc_page(library_id: int, manga: dict, unit_id: str, unit: dict, source: str,
+                    page_index: int, scale: float):
+    """One page of a PDF/EPUB volume or chapter, as an image."""
+    if source == "pdf":
+        # Clamp scale to valid presets
+        scale = min(max(scale, 1.0), 2.0)
+        # Check in-memory cache first (covers repeated requests and back-navigation)
+        cache_key = (unit["path"], page_index, scale)
+        if cache_key in _pdf_page_cache:
+            return Response(
+                content=_pdf_page_cache[cache_key],
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=480"},
+            )
+        thumbs_dir = get_thumbs_dir(library_id, manga["name"], unit_id)
+        # Serve pre-rendered disk file at default scale, and warm the in-memory cache
+        if thumbs_dir and abs(scale - 1.5) < 0.1:
+            disk_path = os.path.join(thumbs_dir, f"p{page_index}.jpg")
+            if os.path.exists(disk_path):
+                with open(disk_path, "rb") as f:
+                    img_bytes = f.read()
+                if len(_pdf_page_cache) >= 128:
+                    _pdf_page_cache.pop(next(iter(_pdf_page_cache)))
+                _pdf_page_cache[cache_key] = img_bytes
+                return Response(
+                    content=img_bytes,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=480"},
+                )
+        # Render on demand at requested scale
+        img_bytes = _cached_pdf_page(unit["path"], page_index, scale=scale)
+        if img_bytes is None:
+            return JSONResponse({"error": "Failed to render PDF page"}, status_code=500)
+        return Response(
+            content=img_bytes,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=480"},
+        )
+
+    elif source == "epub":
+        image_list = get_epub_image_list(unit["path"])
+        if page_index >= len(image_list):
+            return JSONResponse({"error": "Page not found"}, status_code=404)
+        img_bytes = _cached_epub_page(unit["path"], image_list[page_index])
+        if img_bytes is None:
+            return JSONResponse({"error": "Failed to read epub page"}, status_code=500)
+        ext = os.path.splitext(image_list[page_index])[1].lower().lstrip('.')
+        media_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
+        return Response(
+            content=img_bytes, media_type=media_type,
+            headers={"Cache-Control": "public, max-age=480"},
+        )
+
+    return JSONResponse({"error": "Unknown source type"}, status_code=500)
+
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
 def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, filename_or_index: str, scale: float = 1.5):
     username = auth.get_opds_user(request)
@@ -8706,55 +8931,8 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
             headers={"Cache-Control": "public, max-age=480"},
         )
 
-    elif vol_type == "pdf":
-        # Clamp scale to valid presets
-        scale = min(max(scale, 1.0), 2.0)
-        # Check in-memory cache first (covers repeated requests and back-navigation)
-        cache_key = (volume["path"], page_index, scale)
-        if cache_key in _pdf_page_cache:
-            return Response(
-                content=_pdf_page_cache[cache_key],
-                media_type="image/jpeg",
-                headers={"Cache-Control": "public, max-age=480"},
-            )
-        thumbs_dir = get_thumbs_dir(library_id, manga["name"], volume_id)
-        # Serve pre-rendered disk file at default scale, and warm the in-memory cache
-        if thumbs_dir and abs(scale - 1.5) < 0.1:
-            disk_path = os.path.join(thumbs_dir, f"p{page_index}.jpg")
-            if os.path.exists(disk_path):
-                with open(disk_path, "rb") as f:
-                    img_bytes = f.read()
-                if len(_pdf_page_cache) >= 128:
-                    _pdf_page_cache.pop(next(iter(_pdf_page_cache)))
-                _pdf_page_cache[cache_key] = img_bytes
-                return Response(
-                    content=img_bytes,
-                    media_type="image/jpeg",
-                    headers={"Cache-Control": "public, max-age=480"},
-                )
-        # Render on demand at requested scale
-        img_bytes = _cached_pdf_page(volume["path"], page_index, scale=scale)
-        if img_bytes is None:
-            return JSONResponse({"error": "Failed to render PDF page"}, status_code=500)
-        return Response(
-            content=img_bytes,
-            media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=480"},
-        )
-
-    elif vol_type == "epub":
-        image_list = get_epub_image_list(volume["path"])
-        if page_index >= len(image_list):
-            return JSONResponse({"error": "Page not found"}, status_code=404)
-        img_bytes = _cached_epub_page(volume["path"], image_list[page_index])
-        if img_bytes is None:
-            return JSONResponse({"error": "Failed to read epub page"}, status_code=500)
-        ext = os.path.splitext(image_list[page_index])[1].lower().lstrip('.')
-        media_type = f"image/{ext}" if ext != 'jpg' else "image/jpeg"
-        return Response(
-            content=img_bytes, media_type=media_type,
-            headers={"Cache-Control": "public, max-age=480"},
-        )
+    elif vol_type in ("pdf", "epub"):
+        return _serve_doc_page(library_id, manga, volume_id, volume, vol_type, page_index, scale)
 
     return JSONResponse({"error": "Unknown volume type"}, status_code=500)
 
@@ -8778,12 +8956,13 @@ def _load_epub_volume(username: str, library_id: int, manga_id: str, volume_id: 
     dims = load_manga_dims_cached(library_id, manga["name"])
     if auth.is_manga_blocked(username, dims.get("tags", [])):
         return None, None, JSONResponse({"error": "Manga not found"}, status_code=404)
-    volume = dims.get("volumes", {}).get(volume_id)
+    volume = dims.get("volumes", {}).get(volume_id) or dims.get("chapters", {}).get(volume_id)
     if not volume or volume.get("source") != "epub":
         return None, None, JSONResponse({"error": "Volume not found"}, status_code=404)
     return manga, volume, None
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/toc")
+@app.get("/api/manga/{library_id}/{manga_id}/chapter/{volume_id}/epub/toc")
 def get_epub_toc(request: Request, library_id: int, manga_id: str, volume_id: str):
     username = auth.get_opds_user(request)
     manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
@@ -8797,6 +8976,7 @@ def get_epub_toc(request: Request, library_id: int, manga_id: str, volume_id: st
     return JSONResponse({"spine_count": len(spine_docs), "toc": toc})
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/chapter/{spine_index:int}")
+@app.get("/api/manga/{library_id}/{manga_id}/chapter/{volume_id}/epub/chapter/{spine_index:int}")
 def get_epub_chapter(request: Request, library_id: int, manga_id: str, volume_id: str, spine_index: int):
     username = auth.get_opds_user(request)
     manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
@@ -8806,7 +8986,8 @@ def get_epub_chapter(request: Request, library_id: int, manga_id: str, volume_id
     if book is None:
         return JSONResponse({"error": "Cannot open epub"}, status_code=500)
     spine_docs = epub_reader.build_reading_spine(book)
-    asset_base_url = f"/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/asset"
+    kind = "chapter" if "/chapter/" + volume_id + "/" in request.url.path else "volume"
+    asset_base_url = f"/api/manga/{library_id}/{manga_id}/{kind}/{volume_id}/epub/asset"
     chapter = epub_reader.render_chapter(book, spine_docs, spine_index, asset_base_url)
     if chapter is None:
         return JSONResponse({"error": "Page not found"}, status_code=404)
@@ -8816,6 +8997,7 @@ def get_epub_chapter(request: Request, library_id: int, manga_id: str, volume_id
     })
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/epub/asset/{path:path}")
+@app.get("/api/manga/{library_id}/{manga_id}/chapter/{volume_id}/epub/asset/{path:path}")
 def get_epub_asset(request: Request, library_id: int, manga_id: str, volume_id: str, path: str):
     username = auth.get_opds_user(request)
     manga, volume, err = _load_epub_volume(username, library_id, manga_id, volume_id)
@@ -8857,6 +9039,10 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
     source = chapter.get("source")
     base_url = f"/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page"
 
+    if source in ("pdf", "epub"):
+        count, _ = _opds_chapter_info(library_id, manga_id, chapter)
+        pages = [f"{base_url}/{i}" for i in range(count)]
+        return JSONResponse({"pages": pages, "count": len(pages)})
     if source == "archive":
         all_images = _cached_archive_image_list(chapter["path"])
         prefix = chapter.get("prefix", "")
@@ -8876,7 +9062,7 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
         return JSONResponse({"pages": pages, "count": len(pages)})
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
-def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str):
+def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str, scale: float = 1.5):
     from fastapi.responses import FileResponse
     username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
@@ -8897,6 +9083,10 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
 
     source = chapter.get("source")
 
+    if source in ("pdf", "epub"):
+        if not filename_or_index.isdigit():
+            return JSONResponse({"error": "Invalid page index"}, status_code=400)
+        return _serve_doc_page(library_id, manga, chapter_id, chapter, source, int(filename_or_index), scale)
     if source == "archive":
         try:
             page_index = int(filename_or_index)
@@ -9493,6 +9683,8 @@ def _opds_chapter_info(library_id: int, manga_id: str, chapter: dict) -> tuple:
         prefix = chapter.get("prefix", "")
         images = [n for n in all_images if n.startswith(prefix)] if prefix else all_images
         count = len(images)
+    elif chapter.get("source") in ("pdf", "epub"):
+        count, _ = _opds_volume_info(library_id, manga_id, "", chapter)
     else:
         try:
             count = len([f for f in os.listdir(chapter["path"]) if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS])

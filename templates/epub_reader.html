@@ -664,10 +664,13 @@
   const libraryId  = parts[2];
   const mangaId    = parts[3];
   const volumeId   = parts[5];
+  // 'volume', or 'chapter' for an EPUB chapter of a chapter manga: its
+  // neighbours in the menu/arrows are then the manga's chapters.
+  const unitKind   = parts[4] === 'chapter' ? 'chapter' : 'volume';
   const startIndex    = parseInt(new URLSearchParams(window.location.search).get('page') || '0', 10);
   const startFraction = parseFloat(new URLSearchParams(window.location.search).get('frac') || '0') || 0;
 
-  const ASSET_PREFIX = `/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/asset/`;
+  const ASSET_PREFIX = `/api/manga/${libraryId}/${mangaId}/${unitKind}/${volumeId}/epub/asset/`;
 
   let spineCount    = 0;
   let currentIndex  = Math.max(0, startIndex);
@@ -912,7 +915,7 @@
   }
 
   async function loadSpineChapter(index, { land = 'start', fraction = 0, saveProgress = true } = {}) {
-    const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/volume/${volumeId}/epub/chapter/${index}`);
+    const data = await apiFetch(`/api/manga/${libraryId}/${mangaId}/${unitKind}/${volumeId}/epub/chapter/${index}`);
     if (data.error) return;
     paceLeaveChapter(data.spine_index === currentIndex + 1 && land === 'start');
     currentIndex = data.spine_index;
@@ -1110,7 +1113,7 @@
       item.addEventListener('click', (e) => {
         e.stopPropagation();
         closeBbMenu();
-        if (vol.id !== volumeId) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${vol.id}`);
+        if (vol.id !== volumeId) goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${vol.id}`);
       });
       bbChapMenu.appendChild(item);
     });
@@ -1129,11 +1132,11 @@
 
   bbPrevVol.addEventListener('click', () => {
     const idx = volumesList.findIndex((v) => v.id === volumeId);
-    if (idx > 0) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${volumesList[idx - 1].id}`);
+    if (idx > 0) goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${volumesList[idx - 1].id}`);
   });
   bbNextVol.addEventListener('click', () => {
     const idx = volumesList.findIndex((v) => v.id === volumeId);
-    if (idx >= 0 && idx < volumesList.length - 1) goToVolume(`/manga/${libraryId}/${mangaId}/volume/${volumesList[idx + 1].id}`);
+    if (idx >= 0 && idx < volumesList.length - 1) goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${volumesList[idx + 1].id}`);
   });
 
   function openBbMenu() {
@@ -1660,7 +1663,7 @@
         await loadSpineChapter(pos.spineIndex, { land: 'fraction', fraction: pos.scrollFraction });
       }
     } else {
-      goToVolume(`/manga/${libraryId}/${mangaId}/volume/${pos.volumeId}?page=${pos.spineIndex}&frac=${pos.scrollFraction}`);
+      goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${pos.volumeId}?page=${pos.spineIndex}&frac=${pos.scrollFraction}`);
     }
   }
 
@@ -1710,12 +1713,12 @@
   (async () => {
     const [mangaData, volumesData] = await Promise.all([
       apiFetch(`/api/manga/${libraryId}/${mangaId}`),
-      apiFetch(`/api/manga/${libraryId}/${mangaId}/volumes`),
+      apiFetch(`/api/manga/${libraryId}/${mangaId}/${unitKind}s`),
       loadBookmarks(),
     ]);
     topbarTitle.textContent = mangaData.name || 'KINSHO';
     startReadingSession(mangaData.name || 'Unknown');
-    volumesList = volumesData.volumes || [];
+    volumesList = volumesData[`${unitKind}s`] || [];
     buildVolumeMenu();
     const land = startFraction > 0 ? 'fraction' : 'start';
     await loadSpineChapter(Math.max(0, startIndex), { land, fraction: startFraction, saveProgress: false });
