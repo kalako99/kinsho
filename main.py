@@ -7106,6 +7106,28 @@ def get_local_metadata(request: Request, library_id: int, manga_id: str):
         "cover_url_medium": None,
     }})
 
+def _preview_cover_url(url):
+    """What the popup's <img> loads: a MangaDex cover through this server (a
+    browser only gets MangaDex's verification page), any other as it is."""
+    if metadata_fetch.is_mangadex_cover(url):
+        return f"/api/metadata-cover?url={quote(url, safe='')}"
+    return url
+
+@app.get("/api/metadata-cover")
+async def metadata_cover_preview(request: Request, url: str = ""):
+    username = auth.get_current_user(request)
+    perms = auth.resolve_permissions(username)
+    if not (perms.get("is_admin") or perms.get("metadata_fetch")):
+        return JSONResponse({"error": "Permission denied"}, status_code=403)
+    if not metadata_fetch.is_mangadex_cover(url):
+        return JSONResponse({"error": "Not a MangaDex cover"}, status_code=400)
+    try:
+        content, content_type = await metadata_fetch.download_mangadex_preview(url)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    return Response(content=content, media_type=content_type,
+                    headers={"Cache-Control": "private, max-age=86400"})
+
 @app.get("/api/manga/{library_id}/{manga_id}/search-metadata")
 async def search_metadata_endpoint(request: Request, library_id: int, manga_id: str, q: str = "", provider: str = "anilist"):
     username = auth.get_current_user(request)
@@ -7145,7 +7167,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
                 # MangaDex candidates already carry one resolution tier for
                 # their cover -- no AniList cross-check needed here, unlike
                 # the AniList branch's resolve_candidate_preview_cover below.
-                c["preview_cover_url"] = c.get("cover_url")
+                c["preview_cover_url"] = _preview_cover_url(c.get("cover_url"))
             return JSONResponse({"candidates": scored})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -7173,7 +7195,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
                 mangadex_best = await metadata_fetch.find_mangadex_for_anilist(candidate)
                 chosen_url, _ = await resolve_best_cover(candidate, mangadex_best)
                 if chosen_url:
-                    candidate["preview_cover_url"] = chosen_url
+                    candidate["preview_cover_url"] = _preview_cover_url(chosen_url)
             except Exception:
                 pass
 

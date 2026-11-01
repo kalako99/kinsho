@@ -374,6 +374,35 @@ async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
     return results
 
 
+_MANGADEX_COVER_RE = re.compile(
+    re.escape(MANGADEX_UPLOADS_URL)
+    + r"/covers/[0-9a-fA-F-]{36}/[0-9a-fA-F-]{36}\.(?:jpg|jpeg|png|webp|gif)"
+)
+
+
+def is_mangadex_cover(url) -> bool:
+    return bool(url) and _MANGADEX_COVER_RE.fullmatch(url) is not None
+
+
+async def download_mangadex_preview(url: str) -> tuple[bytes, str]:
+    """
+    The 256px thumbnail of a MangaDex cover, as (bytes, content type), for the
+    Fetch Metadata popup. MangaDex's API rules forbid hotlinking its images,
+    and its image server answers a browser with a "Browser verification" page
+    instead of the cover (found 2026-11-01), so the server fetches them. Raises
+    ValueError if the answer isn't an image, or on any url but a MangaDex cover.
+    """
+    if not is_mangadex_cover(url):
+        raise ValueError("Not a MangaDex cover")
+    async with httpx.AsyncClient(timeout=20.0, headers=_UA) as client:
+        response = await client.get(f"{url}.256.jpg")
+        response.raise_for_status()
+    content_type = response.headers.get("content-type", "").split(";")[0].strip()
+    if not content_type.startswith("image/"):
+        raise ValueError(f"MangaDex answered with {content_type or 'no content type'}")
+    return response.content, content_type
+
+
 async def download_cover_image(url: str) -> bytes:
     """
     Download the image at `url` and return its raw bytes.
