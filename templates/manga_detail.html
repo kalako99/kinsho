@@ -730,22 +730,30 @@
       color: #444;
       font-style: italic;
     }
+    /* Editing looks like the description itself (same type, colour, spacing, no dark box),
+       with only a faint outline to show it's editable, and always shows the whole text:
+       it grows with its content (autoGrowDesc), never cut to "View more". */
     .desc-textarea {
-      width: 100%;
-      background: var(--color-background, #0f0f0f);
-      border: 1px solid #333;
-      border-radius: 8px;
-      padding: 10px 12px;
-      color: var(--color-text, #f0f0f0);
+      display: block;
+      margin: -5px -8px 0;   /* the text stays exactly where the description was */
+      width: calc(100% + 16px);
+      background: transparent;
+      border: 1px dashed rgba(255,255,255,0.16);
+      border-radius: 6px;
+      padding: 4px 7px;
+      color: #aaa;
+      font: inherit;
       font-size: 0.82rem;
-      font-family: 'Segoe UI', sans-serif;
+      line-height: 1.6;
+      white-space: pre-wrap;
       outline: none;
-      resize: vertical;
-      min-height: 80px;
+      resize: none;
+      overflow: hidden;
+      min-height: 3.2em;
       box-sizing: border-box;
       transition: border-color 0.2s;
     }
-    .desc-textarea:focus { border-color: var(--color-primary, #e94560); }
+    .desc-textarea:focus { border-color: var(--color-primary, #e94560); border-style: solid; }
     .desc-edit-actions {
       display: flex;
       gap: 8px;
@@ -1415,7 +1423,7 @@
               <button v-if="manga.description && descMaxH" ref="descMore" class="desc-more" @click="descOpen = !descOpen">{{ descOpen ? 'View less' : 'View more' }}</button>
             </div>
             <div v-else>
-              <textarea class="desc-textarea" v-model="descInput" placeholder="Write a description…"></textarea>
+              <textarea class="desc-textarea" ref="descTextarea" v-model="descInput" placeholder="Write a description…" @input="autoGrowDesc"></textarea>
               <div class="desc-edit-actions">
                 <button class="popup-btn soft" @click="cancelEditDesc">Cancel</button>
                 <button class="popup-btn primary" @click="saveDesc">Save</button>
@@ -2547,6 +2555,19 @@ createApp({
     startEditDesc() {
       this.descInput = this.manga.description || '';
       this.editingDesc = true;
+      this.$nextTick(() => {
+        this.autoGrowDesc();
+        const el = this.$refs.descTextarea;
+        if (el) { el.focus({ preventScroll: true }); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    },
+
+    // The edit box is as tall as its text, so the whole description is always in view.
+    autoGrowDesc() {
+      const el = this.$refs.descTextarea;
+      if (!el) return;
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 2 + 'px';
     },
 
     cancelEditDesc() {
