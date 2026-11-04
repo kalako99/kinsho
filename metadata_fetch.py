@@ -73,9 +73,9 @@ DEFAULT_MIN_TAG_RANK = 60
 # so the caller can pass one or more formats (or omit the filter entirely).
 # type: MANGA is still hardcoded since we never want anime results here.
 ANILIST_SEARCH_QUERY = """
-query ($search: String, $perPage: Int, $format: [MediaFormat]) {
+query ($search: String, $perPage: Int, $format: [MediaFormat], $isAdult: Boolean) {
   Page(page: 1, perPage: $perPage) {
-    media(search: $search, type: MANGA, format_in: $format) {
+    media(search: $search, type: MANGA, format_in: $format, isAdult: $isAdult) {
       id
       format
       title {
@@ -205,6 +205,7 @@ async def search_anilist_manga(
     title: str,
     per_page: int = 5,
     formats: list[str] | None = None,
+    allow_adult: bool = True,
 ) -> list[dict]:
     """
     Query AniList for MANGA entries matching `title`.
@@ -247,6 +248,8 @@ async def search_anilist_manga(
     variables: dict = {"search": title, "perPage": per_page}
     if formats:
         variables["format"] = formats
+    if not allow_adult:
+        variables["isAdult"] = False      # AniList leaves 18+ entries out
     # If formats is None/empty we omit the variable entirely; AniList
     # treats a missing $format as "no format filter" — all formats match.
 
@@ -269,7 +272,7 @@ MANGADEX_API_URL = "https://api.mangadex.org"
 MANGADEX_UPLOADS_URL = "https://uploads.mangadex.org"
 
 
-async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
+async def search_mangadex_manga(title: str, per_page: int = 5, allow_adult: bool = True) -> list[dict]:
     """
     Query MangaDex for series matching `title` and return normalized candidate
     dicts that mirror the AniList candidate shape closely enough that the same
@@ -303,10 +306,10 @@ async def search_mangadex_manga(title: str, per_page: int = 5) -> list[dict]:
         ("includes[]", "cover_art"),
         ("contentRating[]", "safe"),
         ("contentRating[]", "suggestive"),
-        ("contentRating[]", "erotica"),
-        ("contentRating[]", "pornographic"),
         ("order[relevance]", "desc"),
     ]
+    if allow_adult:                       # erotica + pornographic = MangaDex's 18+ ratings
+        params += [("contentRating[]", "erotica"), ("contentRating[]", "pornographic")]
     async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
         response = await client.get(f"{MANGADEX_API_URL}/manga", params=params)
         response.raise_for_status()
@@ -503,6 +506,17 @@ async def search_mangaupdates(title: str, per_page: int = 8) -> list[dict]:
     return results
 
 
+ADULT_GENRES = {"adult", "hentai", "smut", "erotica", "pornographic"}
+
+
+def is_adult_candidate(candidate: dict) -> bool:
+    """18+ by the provider's own marks, for providers whose search can't leave
+    them out by itself (MangaUpdates genres, Google Books maturityRating)."""
+    if candidate.get("is_adult"):
+        return True
+    return any((g or "").strip().lower() in ADULT_GENRES for g in candidate.get("genres") or [])
+
+
 async def search_google_books(title: str, api_key: str | None = None, per_page: int = 8) -> list[dict]:
     params = {"q": f"intitle:{title}", "maxResults": per_page, "printType": "books"}
     if api_key:
@@ -527,6 +541,7 @@ async def search_google_books(title: str, api_key: str | None = None, per_page: 
         results.append({
             "provider":       "googlebooks",
             "googlebooks_id": it.get("id"),
+            "is_adult":       v.get("maturityRating") == "MATURE",
             "title_english":  title_full,
             "subtitle":       " · ".join(x for x in (", ".join(v.get("authors") or []), (v.get("publishedDate") or "")[:4], (v.get("language") or "").upper()) if x),
             "synonyms":       [v.get("title")] if v.get("subtitle") else [],

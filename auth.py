@@ -407,6 +407,10 @@ _DEFAULT_PERMISSIONS: dict = {
     # AniList/MangaDex Fetch Metadata popup (or the reverse), rather than
     # that popup's access being an implicit side effect of the other three.
     "metadata_fetch":  True,
+    # Whether Fetch Metadata's search results may include 18+ titles (AniList
+    # isAdult, MangaDex erotica/pornographic, MangaUpdates Adult/Hentai/Smut,
+    # Google Books MATURE). Off unless an admin allows it.
+    "metadata_adult":  False,
     # Two-page reading: may save blank pages / pairing shifts for everyone
     # (without it, a user's changes last only for that reader session).
     "page_pairing":    True,
@@ -426,14 +430,14 @@ def resolve_permissions(username: str) -> dict:
     if user and user.get("role") == "admin":
         return {
             "tags": True, "genres": True, "description": True, "metadata_fetch": True,
-            "page_pairing": True, "libraries": {}, "is_admin": True,
+            "metadata_adult": True, "page_pairing": True, "libraries": {}, "is_admin": True,
         }
     try:
         data = load_permissions()
     except Exception:
         return {
             "tags": False, "genres": False, "description": False, "metadata_fetch": False,
-            "page_pairing": False, "libraries": {}, "is_admin": False,
+            "metadata_adult": False, "page_pairing": False, "libraries": {}, "is_admin": False,
         }
     default    = data.get("_default", _DEFAULT_PERMISSIONS.copy())
     user_entry = data.get(username)
@@ -448,6 +452,7 @@ def resolve_permissions(username: str) -> dict:
     # description already behave there.
     perms.setdefault("metadata_fetch", True)
     perms.setdefault("page_pairing", True)  # same opt-out convention as metadata_fetch
+    perms.setdefault("metadata_adult", False)  # 18+ search results: opt-in
     perms["is_admin"] = False
     return perms
 
@@ -818,11 +823,14 @@ def route_get_permissions(request: Request):
         entry = perms_data.get(uname)
         perms = (default_perms if entry is None else entry).copy()
         perms.setdefault("libraries", {})
+        perms.setdefault("metadata_adult", False)
         users_list.append({
             "username":    uname,
             "role":        user["role"],
             "permissions": perms,
         })
+    default_perms = dict(default_perms)
+    default_perms.setdefault("metadata_adult", False)
     return JSONResponse({
         "ok":      True,
         "users":   users_list,
@@ -839,7 +847,7 @@ async def route_set_user_permissions(request: Request, username: str):
         return JSONResponse({"ok": False, "error": "User not found."}, status_code=404)
     body  = await request.json()
     perms = body.get("permissions", {})
-    allowed_keys = {"tags", "genres", "description", "metadata_fetch", "page_pairing", "libraries", "blocked_tags"}
+    allowed_keys = {"tags", "genres", "description", "metadata_fetch", "metadata_adult", "page_pairing", "libraries", "blocked_tags"}
     perms = {k: v for k, v in perms.items() if k in allowed_keys}
     perms.setdefault("libraries", {})
     perms_data          = load_permissions()

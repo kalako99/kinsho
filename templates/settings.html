@@ -1424,6 +1424,13 @@
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions['_default'].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
           </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;" title="Whether this user's Fetch Metadata search shows 18+ titles (AniList, MangaDex, MangaUpdates and Google Books mark them).">
+            <span style="flex:none;">18+ results</span>
+            <select class="theme-select" v-model="userPermissions['_default'].metadata_adult" :disabled="!userPermissions['_default'].metadata_fetch" style="width:auto; margin-bottom:0; padding:5px 10px; font-size:0.82rem;">
+              <option :value="false">Not permitted</option>
+              <option :value="true">Permitted</option>
+            </select>
+          </label>
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
             <input type="checkbox" v-model="userPermissions['_default'].page_pairing"> Page pairing (two-page reading, saved for everyone)
           </label>
@@ -1520,6 +1527,13 @@
           </label>
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions[user.username].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;" title="Whether this user's Fetch Metadata search shows 18+ titles (AniList, MangaDex, MangaUpdates and Google Books mark them).">
+            <span style="flex:none;">18+ results</span>
+            <select class="theme-select" v-model="userPermissions[user.username].metadata_adult" :disabled="!userPermissions[user.username].metadata_fetch" style="width:auto; margin-bottom:0; padding:5px 10px; font-size:0.82rem;">
+              <option :value="false">Not permitted</option>
+              <option :value="true">Permitted</option>
+            </select>
           </label>
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
             <input type="checkbox" v-model="userPermissions[user.username].page_pairing"> Page pairing (two-page reading, saved for everyone)

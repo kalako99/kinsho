@@ -993,6 +993,14 @@
       letter-spacing: normal;
       color: rgba(255,255,255,0.65);
     }
+    .meta-fields-row {
+      margin: 8px 0 0;
+      padding-top: 7px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      gap: 14px;
+    }
+    .meta-fields-row label { font-size: 0.74rem; color: rgba(255,255,255,0.8); }
+    .meta-fields-row input[type="checkbox"] { width: 15px; height: 15px; }
     .meta-fields-inline input[type="checkbox"] {
       width: 13px;
       height: 13px;
@@ -1739,11 +1747,6 @@
         <div class="meta-section" v-if="localMetaCandidate">
           <div class="meta-section-heading">
             Local File
-            <span class="meta-fields-inline" v-if="metaSelected.local" @click.stop>
-              <label><input type="checkbox" :checked="metaFields.local.description" @change="toggleMetaField('local','description')"> Desc</label>
-              <label><input type="checkbox" :checked="metaFields.local.genres" @change="toggleMetaField('local','genres')"> Genres</label>
-              <label><input type="checkbox" :checked="metaFields.local.tags" @change="toggleMetaField('local','tags')"> Tags</label>
-            </span>
           </div>
           <div
             class="meta-candidate"
@@ -1759,6 +1762,12 @@
               <div class="meta-genres-preview" v-if="(localMetaCandidate.genres || []).length">
                 {{ (localMetaCandidate.genres || []).slice(0, 5).join(' · ') }}
               </div>
+              <!-- what to take from it: on the selected row itself -->
+              <div class="meta-fields-inline meta-fields-row" v-if="metaSelected.local === localMetaCandidate" @click.stop>
+                <label><input type="checkbox" :checked="metaFields.local.description" @change="toggleMetaField('local','description')"> Desc</label>
+                <label><input type="checkbox" :checked="metaFields.local.genres" @change="toggleMetaField('local','genres')"> Genres</label>
+                <label><input type="checkbox" :checked="metaFields.local.tags" @change="toggleMetaField('local','tags')"> Tags</label>
+              </div>
             </div>
           </div>
         </div>
@@ -1767,12 +1776,6 @@
           <div class="meta-section-heading">
             {{ metaSourceNames[src] }}
             <span v-if="metaLoading[src]" class="meta-section-loading">loading…</span>
-            <span class="meta-fields-inline" v-if="metaSelected[src]" @click.stop>
-              <label><input type="checkbox" :checked="metaFields[src].description" @change="toggleMetaField(src,'description')"> Desc</label>
-              <label><input type="checkbox" :checked="metaFields[src].genres" @change="toggleMetaField(src,'genres')"> Genres</label>
-              <label><input type="checkbox" :checked="metaFields[src].tags" @change="toggleMetaField(src,'tags')"> Tags</label>
-              <label><input type="checkbox" :checked="metaFields[src].cover" @change="toggleMetaField(src,'cover')"> Cover</label>
-            </span>
           </div>
           <div
             v-for="(c, ci) in metaCandidates[src]"
@@ -1796,6 +1799,13 @@
               </div>
               <div class="meta-genres-preview" v-if="(c.genres || []).length">
                 {{ (c.genres || []).slice(0, 5).join(' · ') }}
+              </div>
+              <!-- what to take from it: on the selected row itself, so a lower row needs no scrolling back up -->
+              <div class="meta-fields-inline meta-fields-row" v-if="metaSelected[src] === c" @click.stop>
+                <label><input type="checkbox" :checked="metaFields[src].description" @change="toggleMetaField(src,'description')"> Desc</label>
+                <label><input type="checkbox" :checked="metaFields[src].genres" @change="toggleMetaField(src,'genres')"> Genres</label>
+                <label><input type="checkbox" :checked="metaFields[src].tags" @change="toggleMetaField(src,'tags')"> Tags</label>
+                <label><input type="checkbox" :checked="metaFields[src].cover" @change="toggleMetaField(src,'cover')"> Cover</label>
               </div>
             </div>
           </div>

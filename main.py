@@ -7159,6 +7159,8 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
     if not (perms.get("is_admin") or perms.get("metadata_fetch")):
         return JSONResponse({"error": "Permission denied"}, status_code=403)
     query = q.strip() or manga_id
+    # Users without the 18+ permission never see 18+ titles in the results.
+    allow_adult = bool(perms.get("is_admin") or perms.get("metadata_adult"))
 
     if provider in ("mangaupdates", "googlebooks", "openlibrary"):
         # The other sources (2026-10-08): MangaUpdates in manga libraries,
@@ -7170,6 +7172,8 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
                 results = await metadata_fetch.search_google_books(query, load_app_data_cached().get("google_books_api_key"))
             else:
                 results = await metadata_fetch.search_openlibrary(query)
+            if not allow_adult:
+                results = [c for c in results if not metadata_fetch.is_adult_candidate(c)]
             scored = metadata_fetch.score_all_candidates(query, results)
             for c in scored:
                 c["preview_cover_url"] = c.get("cover_url")
@@ -7183,7 +7187,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
         # MangaDex is only ever consulted per-candidate for a cover preview,
         # never surfaced as its own set of results.
         try:
-            results = await metadata_fetch.search_mangadex_manga(query, per_page=8)
+            results = await metadata_fetch.search_mangadex_manga(query, per_page=8, allow_adult=allow_adult)
             scored  = metadata_fetch.score_all_candidates(query, results)
             for c in scored:
                 # MangaDex candidates already carry one resolution tier for
@@ -7195,7 +7199,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
             return JSONResponse({"error": str(e)}, status_code=500)
 
     try:
-        results = await metadata_fetch.search_anilist_manga(query, per_page=8)
+        results = await metadata_fetch.search_anilist_manga(query, per_page=8, allow_adult=allow_adult)
         scored  = metadata_fetch.score_all_candidates(query, results)
 
         # Resolve each candidate's actual preview cover the same way Apply will
