@@ -2408,6 +2408,24 @@ def _scan_file_chapter(chapter_name: str, path: str, kind: str, mtime: float) ->
         "page_count": len(pages),
     }
 
+def _existing_cover_in(manga_covers_dir: str) -> str | None:
+    """The first cover (small file name) already in a manga's covers directory
+    that has its large '+' twin, in the cover picker's order; None if none."""
+    extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
+    try:
+        files = set(os.listdir(manga_covers_dir))
+    except OSError:
+        return None
+    larges = sorted((f for f in files
+                     if os.path.splitext(f)[0].endswith('+') and os.path.splitext(f)[1].lower() in extensions),
+                    key=natural_sort_key)
+    for large in larges:
+        name, ext = os.path.splitext(large)
+        if name[:-1] + ext in files:
+            return name[:-1] + ext
+    return None
+
+
 def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stored_mtimes: dict,
                           only_files: list[str] | None = None) -> tuple[str | None, dict]:
     extensions = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif'}
@@ -2460,7 +2478,11 @@ def process_manga_covers(manga_path: str, library_id: int, manga_name: str, stor
             del stored_mtimes[stored_filename]
 
     if not images:
-        return None, stored_mtimes
+        # No image in the folder, but covers made earlier may still be in the
+        # covers directory (e.g. fetched metadata covers from before fetched
+        # covers were also saved into the manga folder, which then showed in
+        # the cover picker but never became the default): use the first one.
+        return _existing_cover_in(manga_covers_dir), stored_mtimes
 
     new_mtimes = dict(stored_mtimes)
     default_cover = None
