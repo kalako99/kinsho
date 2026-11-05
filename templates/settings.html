@@ -581,6 +581,15 @@
   #infoTipPop::before { content: ""; position: absolute; left: var(--ax, 50%); width: 10px; height: 10px; background: inherit; transform: translateX(-50%) rotate(45deg); }
   #infoTipPop.below::before { top: -5px; } #infoTipPop.above::before { bottom: -5px; }
   .btn-with-tip { display: flex; align-items: center; gap: 6px; }
+
+  /* Automatic fetch sources: providers x details */
+  .src-table { display: grid; gap: 2px; }
+  .src-row { display: grid; grid-template-columns: minmax(96px, 1.3fr) repeat(4, minmax(52px, 1fr)); align-items: center; }
+  .src-row + .src-row { border-top: 1px solid var(--color-border, #2a2a2a); }
+  .src-head span { font-size: 0.7rem; color: var(--color-muted, #888); text-transform: uppercase; letter-spacing: 0.5px; text-align: center; padding-bottom: 4px; }
+  .src-name { font-size: 0.85rem; font-weight: 600; padding: 8px 0; }
+  .src-cell { display: flex; justify-content: center; align-items: center; padding: 8px 0; cursor: pointer; }
+  .src-cell input { width: 18px; height: 18px; cursor: pointer; accent-color: var(--color-primary, #e94560); }
 </style>
   <script>
     (function () {
@@ -877,16 +886,22 @@
     <template v-if="isAdmin">
 
     <div class="card" style="display:flex; flex-direction:column; gap:10px; margin-bottom:14px;">
-      <div class="field-label">Automatic fetch priority <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Which site each library&#x27;s Fetch metadata button asks first. The other one is used when a series isn&#x27;t found there, or to fill in what&#x27;s missing. The Fetch Metadata popup on a manga&#x27;s own page always searches both."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
-      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0;">
-        <input type="radio" v-model="metadataFetchPriority" value="anilist" @change="saveMetadataPriority" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
-        <div style="font-size:0.85rem; font-weight:600;">AniList first</div>
-      </label>
-      <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0; border-top:1px solid var(--color-border,#2a2a2a);">
-        <input type="radio" v-model="metadataFetchPriority" value="mangadex" @change="saveMetadataPriority" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
-        <div style="font-size:0.85rem; font-weight:600;">MangaDex first</div>
-      </label>
-      <div class="status-msg" :class="metadataPriorityStatus.type" v-text="metadataPriorityStatus.msg" style="min-height:0; margin:0;"></div>
+      <div class="field-label">Automatic fetch sources <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Where each detail comes from when a library&#x27;s Fetch metadata button runs: tick one site per detail (leave a column empty to never fetch it). A manga is only fetched when each site has exactly one series with exactly its name; with two or more, it&#x27;s skipped so you can pick it by hand from the manga&#x27;s page. If a site doesn&#x27;t have the manga, that detail comes from the other ticked site (with all three ticked: the one with more ticks, or else the one with more information)."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
+      <div class="src-table" role="table" aria-label="Automatic fetch sources">
+        <div class="src-row src-head" role="row">
+          <span role="columnheader"></span>
+          <span v-for="f in META_FIELDS" :key="f.id" role="columnheader" v-text="f.label"></span>
+        </div>
+        <div class="src-row" role="row" v-for="pr in META_PROVIDERS" :key="pr.id">
+          <span class="src-name" role="rowheader" v-text="pr.label"></span>
+          <label v-for="f in META_FIELDS" :key="f.id" class="src-cell" role="cell">
+            <input type="checkbox" :checked="metadataSources[f.id] === pr.id"
+                   @change="setMetadataSource(f.id, pr.id, $event.target.checked)"
+                   :aria-label="f.label + ' from ' + pr.label">
+          </label>
+        </div>
+      </div>
+      <div class="status-msg" :class="metadataSourcesStatus.type" v-text="metadataSourcesStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">
@@ -1017,11 +1032,7 @@
           :disabled="metaScanStatus[lib.id] && metaScanStatus[lib.id].type === 'scanning'"
           style="font-size:0.78rem; padding: 6px 12px;"
         >⬇ Fetch metadata</button>
-        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Looks up every manga of this library online and fills in the ticked details that are still missing. Details a manga already has are left alone."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
-        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.description"> Description</label>
-        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.genres"> Genres</label>
-        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.tags"> Tags</label>
-        <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.cover"> Cover</label>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Looks up every manga of this library on the sites ticked in Automatic fetch sources above and fills in the details that are still missing. Details a manga already has are left alone."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
         <span
           class="status-msg"
           style="margin: 0;"
@@ -1756,6 +1767,6 @@
   addEventListener('resize', hide);
 })();
 </script>
-<script src="/static/settings.js?v=4"></script>
+<script src="/static/settings.js?v=5"></script>
 </body>
 </html>

@@ -4937,6 +4937,7 @@ def get_settings(request: Request):
         "show_similar_row":         user_data.get("show_similar_row", True),
         "hide_admin_collections":   user_data.get("hide_admin_collections", False),
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
+        "metadata_fetch_sources":   _metadata_sources(data),
         "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
         "google_books_key_set":     bool(data.get("google_books_api_key")),
         "local_assets_available":   local_assets_available(),
@@ -5079,6 +5080,45 @@ async def set_data_path(request: Request):
     existing["data_path"] = new_path
     save_app_data(existing)
     return JSONResponse({"ok": True})
+
+# ── Automatic fetch sources (2026-11-05, user's design) ──────────────────
+# Settings -> Libraries: a table of the 3 providers x the 4 fields; each field
+# is ticked on at most one provider (none = never fetched automatically). The
+# library's Fetch metadata button fetches the ticked fields. Replaces the
+# "AniList first / MangaDex first" priority.
+METADATA_PROVIDERS = ("anilist", "mangadex", "mangaupdates")
+DEFAULT_METADATA_SOURCES = {"description": "anilist", "cover": "mangadex", "genres": "mangaupdates", "tags": "mangaupdates"}
+
+
+def _metadata_sources(data: dict) -> dict:
+    """field -> provider for the ticked fields (absent = not fetched)."""
+    s = data.get("metadata_fetch_sources")
+    if not isinstance(s, dict):
+        return dict(DEFAULT_METADATA_SOURCES)
+    return {f: p for f, p in s.items() if f in metadata_fetch.METADATA_FIELDS and p in METADATA_PROVIDERS}
+
+
+@app.post("/api/settings/metadata-sources")
+async def set_metadata_sources(request: Request):
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    sources = body.get("sources")
+    if not isinstance(sources, dict):
+        return JSONResponse({"error": "sources must be an object"}, status_code=400)
+    clean = {}
+    for field, provider in sources.items():
+        if provider in (None, ""):
+            continue
+        if field not in metadata_fetch.METADATA_FIELDS or provider not in METADATA_PROVIDERS:
+            return JSONResponse({"error": f"unknown field or provider: {field} / {provider}"}, status_code=400)
+        clean[field] = provider
+    data = load_app_data()
+    data["metadata_fetch_sources"] = clean
+    save_app_data(data)
+    return JSONResponse({"ok": True, "sources": clean})
+
 
 @app.post("/api/settings/metadata-priority")
 async def set_metadata_priority(request: Request):
@@ -7416,6 +7456,43 @@ async def _try_mangadex_primary(name: str) -> dict | None:
     return exact[0] if len(exact) == 1 else None
 
 
+async def _bulk_lookup(provider: str, name: str, manga_formats: set, novel_library: bool, state: dict) -> tuple:
+    """The automatic fetch's search on one provider: ("found", candidate) when
+    exactly one result's name matches `name` 100%, ("ambiguous", None) when two
+    or more do, ("none", None) when none does. A novel library prefers novels,
+    any other library the non-novel entries (AniList format / MangaUpdates
+    type); MangaDex has comics only, so it's not used for novel libraries.
+    AniList's rate limit switches AniList off for the rest of the run."""
+    def one(lst):
+        return ("found", lst[0]) if len(lst) == 1 else ("ambiguous", None) if lst else ("none", None)
+    if provider == "anilist":
+        if not state.get("anilist_enabled", True):
+            return ("none", None)
+        try:
+            results = await metadata_fetch.search_anilist_manga(name, per_page=8)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                state["anilist_enabled"] = False
+                return ("none", None)
+            raise
+        finally:
+            await asyncio.sleep(0.7)
+        typed = [r for r in results if (r.get("format") or "").upper() in manga_formats]
+        exact = [c for c in typed if metadata_fetch.is_exact_name(name, c)]
+        return one([c for c in exact if ((c.get("format") or "").upper() == "NOVEL") == novel_library])
+    if provider == "mangadex":
+        if novel_library:
+            return ("none", None)
+        results = await metadata_fetch.search_mangadex_manga(name)
+        return one([c for c in results if metadata_fetch.is_exact_name(name, c)])
+    if provider == "mangaupdates":
+        results = await metadata_fetch.search_mangaupdates(name, per_page=8)
+        await asyncio.sleep(0.5)
+        exact = [c for c in results if metadata_fetch.is_exact_name(name, c, include_synonyms=True)]
+        return one([c for c in exact if ((c.get("format") or "").lower() == "novel") == novel_library])
+    return ("none", None)
+
+
 @app.post("/api/libraries/{library_id}/scan-metadata")
 async def scan_library_metadata(request: Request, library_id: int):
     username = auth.get_current_user(request)
@@ -7425,106 +7502,132 @@ async def scan_library_metadata(request: Request, library_id: int):
         body = await request.json()
     except Exception:
         body = {}
-    requested_fields = set(body.get("fields", ["description", "genres", "tags", "cover"]))
     data = load_app_data()
-    manga_data = data.get("manga_data", {}).get(str(library_id))
-    if not manga_data:
+    # Which provider each field comes from (Settings -> Automatic fetch sources).
+    # A manga is only fetched when every provider it uses has exactly ONE
+    # result whose name matches 100%; two or more such results anywhere -> the
+    # manga is skipped (counted as "ambiguous", left for the manual popup).
+    # A provider without the manga (or without that field) hands the field to:
+    #   only 2 providers ticked -> the other ticked one;
+    #   all 3 ticked           -> the other one with more ticks, or on a tie the
+    #                             one with more data (longer description, larger
+    #                             cover, more genres/tags);
+    #   only 1 ticked          -> whichever of the other two has more data.
+    # (then, as a last resort, the provider not ticked at all.)
+    sources = _metadata_sources(data)
+    if not sources:
+        return JSONResponse({"error": "Tick at least one box in Automatic fetch sources first."}, status_code=400)
+    ticks = {p: sum(1 for v in sources.values() if v == p) for p in METADATA_PROVIDERS}
+    data_mangas = data.get("manga_data", {}).get(str(library_id))
+    if not data_mangas:
         return JSONResponse({"error": "Library not found"}, status_code=404)
-    mangas = manga_data.get("mangas", [])
+    mangas = data_mangas.get("mangas", [])
     manga_formats = set(metadata_fetch.ANILIST_MANGA_FORMATS)
-    auto_matched = skipped = no_match = errors = 0
-    covers_changed = False
-    # Which provider to try first -- admin setting, Settings -> Libraries.
-    # Only affects this bulk/automatic scan; the manual single-manga popup
-    # always searches AniList directly regardless of this setting.
-    priority = data.get("metadata_fetch_priority", "anilist")
-    # A library named like "Novels" / "Light Novel": AniList's NOVEL entries win
-    # over a same-named manga, and MangaDex (comics only) isn't used at all,
-    # since its match would be the manga adaptation.
     library = next((l for l in data.get("libraries", []) if l.get("id") == library_id), {})
     novel_library = "novel" in (library.get("name") or "").lower()
-    if novel_library:
-        priority = "anilist"
-    # Once AniList rate-limits us, stop hitting it for the rest of the scan and
-    # run on MangaDex alone — the whole point of the fallback. Also gates the
-    # AniList half of MangaDex-first mode's counterpart lookup below.
-    anilist_enabled = True
+    state = {"anilist_enabled": True}
+    auto_matched = skipped = no_match = ambiguous = errors = 0
+    covers_changed = False
+
+    def field_value(cand, field):
+        if not cand:
+            return None
+        if field == "cover":
+            return (cand.get("cover_url_extra_large") or cand.get("cover_url_large")
+                    or cand.get("cover_url_medium") or cand.get("cover_url"))
+        return metadata_fetch.resolve_field_value(cand, field)
+
+    async def best_by_data(field, found):
+        """The (provider, candidate) with the most data for this field."""
+        if field == "cover":
+            best, best_w = found[0], -1
+            for p, c in found:
+                try:
+                    w = _image_width(await metadata_fetch.download_cover_image(field_value(c, field)))
+                except Exception:
+                    w = 0
+                if w > best_w:
+                    best, best_w = (p, c), w
+            return best
+        return max(found, key=lambda pc: len(field_value(pc[1], field) or ""))
 
     for manga in mangas:
         dims = load_manga_dims(library_id, manga["name"])
-        pending = [f for f in requested_fields if not _metadata_field_done(dims, f)]
+        pending = [f for f in metadata_fetch.METADATA_FIELDS if f in sources and not _metadata_field_done(dims, f)]
         if not pending:
             skipped += 1
             continue
+        name = manga["name"]
+        looked = {}
+
+        async def get(p):
+            if p not in looked:
+                try:
+                    looked[p] = await _bulk_lookup(p, name, manga_formats, novel_library, state)
+                except Exception:
+                    looked[p] = ("error", None)
+            return looked[p]
+
         try:
-            name = manga["name"]
-
-            # ── Decide source(s), in whichever provider order the admin picked ──
-            # Both directions: the priority provider is tried as a single/
-            # confident match; if it hits, the OTHER provider is looked up as
-            # its same-series counterpart (fills gaps + supplies a cover
-            # candidate) — exact ID join when possible, multi-name fuzzy
-            # match otherwise. If the priority provider misses, the fallback
-            # provider gets one shot at its own direct match against the
-            # folder name, with no further counterpart lookup on that path —
-            # matching this scan's original (pre-priority) AniList-first
-            # asymmetry exactly, just mirrored for whichever side lost.
-            primary = fallback = anilist_for_cover = mangadex_for_cover = None
-
-            if priority == "mangadex":
-                mangadex_primary = await _try_mangadex_primary(name)
-                if mangadex_primary:
-                    counterpart = None
-                    if anilist_enabled:
-                        try:
-                            counterpart = await metadata_fetch.find_anilist_for_mangadex(mangadex_primary)
-                        except httpx.HTTPStatusError as e:
-                            if e.response is not None and e.response.status_code == 429:
-                                anilist_enabled = False
-                            else:
-                                raise
-                        await asyncio.sleep(0.7)
-                    primary, fallback = mangadex_primary, counterpart
-                    anilist_for_cover, mangadex_for_cover = counterpart, mangadex_primary
-                elif anilist_enabled:
-                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats)
-                    if rate_limited:
-                        anilist_enabled = False
-                    await asyncio.sleep(0.7)
-                    if anilist_primary:
-                        primary = anilist_for_cover = anilist_primary
-            else:  # priority == "anilist" (default, original behavior)
-                anilist_primary = None
-                if anilist_enabled:
-                    anilist_primary, rate_limited = await _try_anilist_primary(name, manga_formats, novel_library)
-                    if rate_limited:
-                        anilist_enabled = False
-                    await asyncio.sleep(0.7)
-                if anilist_primary:
-                    mangadex_best = None if novel_library else await metadata_fetch.find_mangadex_for_anilist(anilist_primary)
-                    primary, fallback = anilist_primary, mangadex_best
-                    anilist_for_cover, mangadex_for_cover = anilist_primary, mangadex_best
-                elif not novel_library:
-                    mangadex_single = await _try_mangadex_primary(name)
-                    if mangadex_single:
-                        primary = mangadex_for_cover = mangadex_single
-
-            if primary is None:
-                no_match += 1
+            chosen, is_ambiguous = {}, False
+            for f in pending:
+                p = sources[f]
+                st, c = await get(p)
+                if st == "ambiguous":
+                    is_ambiguous = True
+                    break
+                if st == "found" and field_value(c, f):
+                    chosen[f] = (p, c)
+                    continue
+                others = [q for q in METADATA_PROVIDERS if q != p]
+                ticked = [q for q in others if ticks[q]]
+                unticked = [q for q in others if not ticks[q]]
+                if len(ticked) == 2 and ticks[ticked[0]] != ticks[ticked[1]]:
+                    tiers = [sorted(ticked, key=lambda q: -ticks[q])[:1], sorted(ticked, key=lambda q: -ticks[q])[1:]]
+                elif ticked:
+                    tiers = [ticked, unticked]
+                else:
+                    tiers = [others]
+                for tier in tiers:
+                    found = []
+                    for q in tier:
+                        st2, c2 = await get(q)
+                        if st2 == "ambiguous":
+                            is_ambiguous = True
+                            break
+                        if st2 == "found" and field_value(c2, f):
+                            found.append((q, c2))
+                    if is_ambiguous:
+                        break
+                    if found:
+                        chosen[f] = found[0] if len(found) == 1 else await best_by_data(f, found)
+                        break
+                if is_ambiguous:
+                    break
+            if is_ambiguous:
+                ambiguous += 1
+                await asyncio.sleep(0.3)
+                continue
+            if not chosen:
+                if any(v[0] == "error" for v in looked.values()):
+                    errors += 1
+                else:
+                    no_match += 1
                 await asyncio.sleep(0.3)
                 continue
 
-            applied = [f for f in pending if f in ("description", "genres", "tags")]
-            if "cover" in pending:
-                if await fetch_and_set_cover(library_id, manga, anilist_for_cover, mangadex_for_cover):
-                    applied.append("cover")
+            values = {f: field_value(c, f) for f, (p, c) in chosen.items() if f != "cover"}
+            stamp = list(values)
+            if "cover" in chosen:
+                p, c = chosen["cover"]
+                if await fetch_and_set_cover(library_id, manga, c if p == "anilist" else None, c if p != "anilist" else None):
+                    stamp.append("cover")
                     covers_changed = True
-            if applied:
-                metadata_fetch.apply_resolved_metadata(
-                    library_id, name, primary, fallback, applied,
-                    load_manga_dims, save_manga_dims,
-                )
-            auto_matched += 1
+            if stamp:
+                metadata_fetch.apply_field_values(library_id, name, values, stamp, load_manga_dims, save_manga_dims)
+                auto_matched += 1
+            else:
+                no_match += 1
             await asyncio.sleep(0.3)
         except Exception:
             errors += 1
@@ -7534,6 +7637,7 @@ async def scan_library_metadata(request: Request, library_id: int):
         "auto_matched": auto_matched,
         "skipped": skipped,
         "no_match": no_match,
+        "ambiguous": ambiguous,
         "errors": errors,
         "total": len(mangas),
     })

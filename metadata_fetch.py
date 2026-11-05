@@ -756,6 +756,20 @@ def score_all_candidates(query: str, candidates: list[dict]) -> list[dict]:
     return scored
 
 
+def is_exact_name(query: str, candidate: dict, include_synonyms: bool = False) -> bool:
+    """True when `query` equals one of the candidate's titles after normalization
+    (a 100% match). include_synonyms also accepts its alternative titles: used
+    for MangaUpdates, whose main title is often the original-language name with
+    the English one among its "associated" names."""
+    q = _normalize_title(query)
+    if not q:
+        return False
+    names = [candidate.get(k) for k in ("title_romaji", "title_english", "title_native")]
+    if include_synonyms:
+        names += list(candidate.get("synonyms") or [])
+    return any(n and _normalize_title(n) == q for n in names)
+
+
 def best_match(query: str, candidates: list[dict], min_score: float = 0.6) -> dict | None:
     """
     Return the single best-scoring candidate for `query` whose match_score
@@ -1079,5 +1093,27 @@ def apply_resolved_metadata(
                 dims[field] = _merge_preserving_manual(dims, field, value)
         mtimes[field] = now
 
+    dims["metadata_mtimes"] = mtimes
+    save_fn(library_id, manga_name, dims)
+
+
+def apply_field_values(library_id: int, manga_name: str, values: dict, stamp_fields, load_fn, save_fn) -> None:
+    """Like apply_resolved_metadata, for the automatic fetch's per-field sources
+    (each field can come from a different provider): `values` maps
+    description/genres/tags to the value already chosen for it; `stamp_fields`
+    are the fields marked as fetched (a cover is written by main.py and only
+    stamped here). Same rules: description replaced, genres/tags merged with the
+    ones added by hand."""
+    dims = load_fn(library_id, manga_name)
+    mtimes = dict(dims.get("metadata_mtimes") or {})
+    now = _datetime.utcnow().isoformat()
+    for field, value in values.items():
+        if field == "description":
+            dims["description"] = value or ""
+            dims["description_manual"] = False
+        elif field in ("genres", "tags"):
+            dims[field] = _merge_preserving_manual(dims, field, value)
+    for field in stamp_fields:
+        mtimes[field] = now
     dims["metadata_mtimes"] = mtimes
     save_fn(library_id, manga_name, dims)

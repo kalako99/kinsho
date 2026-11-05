@@ -250,9 +250,13 @@ createApp({
       metaScanStatus: {},
       comicInfoStatus: {},
       comicInfoPrompt: null,  // { lib, folders, existing } while the overwrite question is open
-      metaScanFields: { description: true, genres: true, tags: true, cover: true },
-      metadataFetchPriority: 'anilist',
-      metadataPriorityStatus: { msg: '', type: '' },
+      // Automatic fetch sources: which provider each detail comes from (one per detail)
+      META_FIELDS: [{ id: 'description', label: 'Description' }, { id: 'genres', label: 'Genres' },
+                    { id: 'tags', label: 'Tags' }, { id: 'cover', label: 'Cover' }],
+      META_PROVIDERS: [{ id: 'anilist', label: 'AniList' }, { id: 'mangadex', label: 'MangaDex' },
+                       { id: 'mangaupdates', label: 'MangaUpdates' }],
+      metadataSources: { description: 'anilist', cover: 'mangadex', genres: 'mangaupdates', tags: 'mangaupdates' },
+      metadataSourcesStatus: { msg: '', type: '' },
       hiddenLibraries: [],
       libraryVisibilityStatus: { msg: '', type: '' },
       pageCounts: {},        // library_id (string) -> {total_pages, total_chapters, total_volumes}
@@ -640,7 +644,7 @@ createApp({
         this.hiddenLibraryRows      = data.hidden_library_rows      || [];
         this.showSimilarRow         = data.show_similar_row         !== false;
         this.hideAdminCollections   = data.hide_admin_collections   === true;
-        this.metadataFetchPriority  = data.metadata_fetch_priority  || 'anilist';
+        if (data.metadata_fetch_sources) this.metadataSources = { ...data.metadata_fetch_sources };
         this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
         this.googleBooksKeySet      = !!data.google_books_key_set;
         this.localAssetsAvailable   = !!data.local_assets_available;
@@ -836,9 +840,9 @@ createApp({
 
     // ── BULK METADATA SCAN FOR ONE LIBRARY ──
     async scanLibraryMetadata(lib) {
-        const fields = Object.entries(this.metaScanFields).filter(([, v]) => v).map(([k]) => k);
-        if (fields.length === 0) {
-            this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Select at least one field to import.', type: 'err' } };
+        // What's fetched, and from where, is the Automatic fetch sources table
+        if (!Object.keys(this.metadataSources).length) {
+            this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Tick at least one box in Automatic fetch sources first.', type: 'err' } };
             return;
         }
         this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: 'Scanning…', type: 'scanning' } };
@@ -846,13 +850,14 @@ createApp({
             const res  = await fetch(apiUrl(`/api/libraries/${lib.id}/scan-metadata`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ fields }),
+                body: JSON.stringify({}),
             });
             const data = await res.json();
             if (data.error) {
                 this.metaScanStatus = { ...this.metaScanStatus, [lib.id]: { msg: data.error, type: 'err' } };
             } else {
                 const parts = [`✓ ${data.auto_matched} matched`];
+                if (data.ambiguous > 0) parts.push(`${data.ambiguous} with several exact matches (fetch those by hand)`);
                 if (data.no_match  > 0) parts.push(`${data.no_match} unresolved`);
                 if (data.skipped   > 0) parts.push(`${data.skipped} skipped`);
                 if (data.errors    > 0) parts.push(`${data.errors} errors`);
@@ -1191,21 +1196,28 @@ createApp({
       setTimeout(() => { this.googleBooksStatus = { msg: '', type: '' }; }, 3000);
     },
 
-    async saveMetadataPriority() {
+    /** Ticks or unticks one box of the Automatic fetch sources table. One provider per
+        detail: ticking a box unticks the same detail on the other providers. */
+    async setMetadataSource(field, provider, checked) {
+      const next = { ...this.metadataSources };
+      if (checked) next[field] = provider;
+      else if (next[field] === provider) delete next[field];
+      const before = this.metadataSources;
+      this.metadataSources = next;
       try {
-        const res  = await fetch(apiUrl('/api/settings/metadata-priority'), {
+        const res  = await fetch(apiUrl('/api/settings/metadata-sources'), {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ priority: this.metadataFetchPriority }),
+          body:    JSON.stringify({ sources: next }),
         });
         const data = await res.json();
-        this.metadataPriorityStatus = data.ok
-          ? { msg: '✓ Saved.', type: 'ok' }
-          : { msg: data.error || 'Something went wrong.', type: 'err' };
+        if (data.ok) this.metadataSourcesStatus = { msg: '✓ Saved.', type: 'ok' };
+        else { this.metadataSources = before; this.metadataSourcesStatus = { msg: data.error || 'Something went wrong.', type: 'err' }; }
       } catch (e) {
-        this.metadataPriorityStatus = { msg: 'Could not reach server.', type: 'err' };
+        this.metadataSources = before;
+        this.metadataSourcesStatus = { msg: 'Could not reach server.', type: 'err' };
       }
-      setTimeout(() => { this.metadataPriorityStatus = { msg: '', type: '' }; }, 3000);
+      setTimeout(() => { this.metadataSourcesStatus = { msg: '', type: '' }; }, 3000);
     },
 
     onCustomThemeClick() {
