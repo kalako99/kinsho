@@ -568,7 +568,20 @@
       flex-wrap: wrap;
     }
     .css-editor-left-btns, .css-editor-right-btns { display: flex; gap: 8px; flex-wrap: wrap; }
-  </style>
+  
+  /* (i) explanations: hover, keyboard focus, or a tap (touch) shows the text */
+  .info-tip { display: inline-flex; align-items: center; justify-content: center; vertical-align: -2px; margin-left: 4px;
+    color: var(--color-muted, #888); cursor: help; border-radius: 50%; outline: none; flex: none; }
+  .info-tip:hover, .info-tip:focus-visible, .info-tip.open { color: var(--color-primary, #e94560); }
+  .info-tip:focus-visible { box-shadow: 0 0 0 2px var(--color-primary, #e94560); }
+  .section-label .info-tip, .field-label .info-tip { text-transform: none; letter-spacing: 0; }
+  #infoTipPop { position: fixed; z-index: 9999; max-width: min(300px, calc(100vw - 24px)); padding: 10px 13px; border-radius: 10px;
+    background: var(--color-text, #f0f0f0); color: var(--color-background, #0f0f0f); font: 400 0.82rem/1.45 'Segoe UI', system-ui, sans-serif;
+    text-transform: none; letter-spacing: 0; box-shadow: 0 8px 24px rgba(0,0,0,.45); pointer-events: none; }
+  #infoTipPop::before { content: ""; position: absolute; left: var(--ax, 50%); width: 10px; height: 10px; background: inherit; transform: translateX(-50%) rotate(45deg); }
+  #infoTipPop.below::before { top: -5px; } #infoTipPop.above::before { bottom: -5px; }
+  .btn-with-tip { display: flex; align-items: center; gap: 6px; }
+</style>
   <script>
     (function () {
       const BUILTIN_THEMES = [
@@ -632,7 +645,6 @@
   <!-- ── SERVER CONNECTION (native app only) ── -->
   <div class="settings-section" v-if="isNativeApp">
     <div class="section-label">Server Connection</div>
-    <div class="section-hint">The address of your KINSHO server. Changing this takes effect immediately.</div>
     <div class="card">
       <div class="field-label">Server URL</div>
       <div class="field-row">
@@ -656,9 +668,8 @@
 
     <!-- NOT LOGGED IN: show login form -->
     <template v-if="!isLoggedIn">
-      <div class="section-hint">You are in local mode. Log in to connect to your server.</div>
       <div class="card">
-        <div class="field-label">Log in</div>
+        <div class="field-label">Log in <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="You&#x27;re using KINSHO without an account right now (local mode). Log in to connect to your server and see its libraries."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
         <div class="field-row" style="margin-bottom:8px;">
           <input
             type="text"
@@ -750,23 +761,19 @@
       <button class="btn" style="width:100%; margin-top: 4px;" @click="logout">
         Log out
       </button>
-      <button class="btn" style="width:100%; margin-top: 4px;" @click="logoutEverywhere">
-        Log out everywhere
-      </button>
-      <div class="section-hint" style="margin-top:6px;">Ends every other logged-in session for this account (other browsers, devices, the native app).</div>
+      <div class="btn-with-tip">
+        <button class="btn" style="width:100%; margin-top: 4px;" @click="logoutEverywhere">
+          Log out everywhere
+        </button>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Also logs this account out on every other browser and device, including the Android app."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
+      </div>
     </template>
   </div>
 
   <template v-if="isAdmin">
   <hr class="divider">
   <div class="settings-section">
-    <div class="section-label">Local Assets</div>
-    <div class="section-hint">
-      By default KINSHO loads its UI framework (Vue.js) and default theme font
-      from the internet (cdnjs.cloudflare.com / fonts.googleapis.com) on every
-      page. Download them once to serve them locally instead — needed for
-      this server to keep working with no internet connection at all.
-    </div>
+    <div class="section-label">Local Assets <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="KINSHO normally loads two of its building blocks (the page framework and the default font) from the internet on every page. Download them once and the server keeps working even without an internet connection."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
     <div class="card">
       <div class="field-row" style="align-items:center; justify-content:space-between;">
         <span style="font-size:0.85rem;">Vue.js and default theme font</span>
@@ -780,9 +787,8 @@
           <template v-else>Download locally</template>
         </button>
       </div>
-      <div class="section-hint" style="margin-top:4px;" v-if="localAssetsAvailable">
-        Loading locally — no internet needed for these anymore. Takes effect on your next page load or navigation (every KINSHO page is a full reload, so this happens automatically).
-        <a href="#" @click.prevent="resetLocalAssets" style="color:var(--color-muted,#888);">Switch back to CDN</a>
+      <div style="margin-top:6px; font-size:0.78rem;" v-if="localAssetsAvailable">
+        <a href="#" @click.prevent="resetLocalAssets" style="color:var(--color-muted,#888);">Load them from the internet again</a>
       </div>
       <div class="status-msg" :class="localAssetsStatus.type" v-text="localAssetsStatus.msg"></div>
     </div>
@@ -800,13 +806,9 @@
 
   <div class="settings-section">
     <div class="section-label">Data Storage</div>
-    <div class="section-hint">
-      This folder is where KINSHO saves your library data (data.json).
-      Set this first — your library paths won't be saved until this is configured.
-    </div>
     <div class="card">
       <div class="path-box">
-      <div class="field-label">Data folder path</div>
+      <div class="field-label">Data folder path <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="The folder where KINSHO keeps its own data: libraries, users and reading progress. Set it first: libraries can&#x27;t be saved until it is."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
       <div class="field-row">
         <input
           type="text"
@@ -832,14 +834,12 @@
 
   <div class="settings-section">
     <div class="section-label">Scanning</div>
-    <div class="section-hint" v-if="isAdmin">Controls the automatic background rescan (runs every 12 hours). The per-library Reload button below, and the corruption self-heal check that runs at startup, both still work regardless of this setting.</div>
     <div class="card">
       <template v-if="isAdmin">
       <div class="field-row" style="align-items:center; justify-content:space-between;">
-        <span style="font-size:0.85rem;">Automatic rescan (every 12 hours)</span>
+        <span style="font-size:0.85rem;">Automatic rescan (every 12 hours) <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Every 12 hours KINSHO looks through your library folders for new, changed or removed manga. Turning this off doesn&#x27;t stop a scan that&#x27;s already running, and each library&#x27;s Reload scan button still works."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
         <input type="checkbox" v-model="autoRescanEnabled" @change="saveAutoRescan" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </div>
-      <div class="section-hint" style="margin-top:4px;">Turning this off never interrupts a scan that's already running — it only stops the next one from starting on its own.</div>
       <div class="status-msg" :class="autoRescanStatus.type" v-text="autoRescanStatus.msg" style="min-height:0; margin:4px 0 0;"></div>
       </template>
 
@@ -866,7 +866,7 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">Libraries</div>
+    <div class="section-label">Libraries <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="A library is one or more folders of manga, webtoons or books. Its name becomes a tab on the home page."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
     <div class="card" v-if="pageCountsGrand" style="margin-bottom:14px; font-size:0.8rem; color:var(--color-muted,#888);">
       <span v-text="pageCountsGrand.pages.toLocaleString()"></span> pages available to you across all libraries
       <template v-if="pageCountsGrand.chapters"> · <span v-text="pageCountsGrand.chapters.toLocaleString()"></span> chapters</template>
@@ -877,12 +877,7 @@
     <template v-if="isAdmin">
 
     <div class="card" style="display:flex; flex-direction:column; gap:10px; margin-bottom:14px;">
-      <div class="field-label">Automatic fetch priority</div>
-      <div class="section-hint" style="margin:0 0 4px;">
-        Which provider the bulk "Fetch metadata" scan below tries first for each manga.
-        The other is used as a fallback when a series isn't found on your chosen one, and to fill in fields it's missing.
-        Doesn't affect the single-manga Fetch Metadata popup on a manga's own page — that always searches both directly.
-      </div>
+      <div class="field-label">Automatic fetch priority <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Which site each library&#x27;s Fetch metadata button asks first. The other one is used when a series isn&#x27;t found there, or to fill in what&#x27;s missing. The Fetch Metadata popup on a manga&#x27;s own page always searches both."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0;">
         <input type="radio" v-model="metadataFetchPriority" value="anilist" @change="saveMetadataPriority" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
         <div style="font-size:0.85rem; font-weight:600;">AniList first</div>
@@ -895,12 +890,7 @@
     </div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:8px; margin-bottom:14px;">
-      <div class="field-label">Google Books API key (optional)</div>
-      <div class="section-hint" style="margin:0;">
-        Book libraries search Google Books and Open Library. Google Books works without a key only while its shared
-        free quota lasts, which often runs out: a free key from the Google Cloud console (enable "Books API", no
-        billing needed) avoids that. <span v-if="googleBooksKeySet">A key is saved.</span>
-      </div>
+      <div class="field-label">Google Books API key (optional) <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Book libraries get their details from Google Books and Open Library. Without a key, Google Books often stops answering once its shared free limit runs out. A free key from the Google Cloud console (turn on &quot;Books API&quot;, no payment needed) avoids that."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
       <div class="field-row">
         <input type="password" v-model="googleBooksKey" :placeholder="googleBooksKeySet ? 'Saved -- type a new one to replace it' : 'Paste the key'" autocomplete="off" />
         <button class="btn btn-primary" @click="saveGoogleBooksKey" v-text="googleBooksKey ? 'Save' : (googleBooksKeySet ? 'Remove' : 'Save')"></button>
@@ -908,10 +898,6 @@
       <div class="status-msg" :class="googleBooksStatus.type" v-text="googleBooksStatus.msg" style="min-height:0; margin:0;"></div>
     </div>
 
-    <div class="section-hint">
-      Each library is a folder on your system containing manga, webtoons, books, etc.
-      Give each one a name — this will become the tab label on the main page.
-    </div>
 
     <div
       v-for="(lib, index) in visibleLibraries"
@@ -944,9 +930,6 @@
       </div>
       <label
         :style="{ display:'flex', alignItems:'center', gap:'6px', fontSize:'0.78rem', color:'var(--color-text,#f0f0f0)', margin:'2px 0 4px', cursor: existingLibraryIds.has(lib.id) ? 'default' : 'pointer' }"
-        :title="existingLibraryIds.has(lib.id)
-          ? 'Only settable when a library is first created -- can\'t be changed on an existing one.'
-          : 'Every top-level folder in this library\'s path becomes its own manga -- no nested chapter/volume detection at all. Turn this on for a library made up of oneshots (folders that are just a pile of loose images), which the standard scan would otherwise misread as volumes of one big manga.'"
       >
         <input
           type="checkbox"
@@ -956,30 +939,21 @@
           :style="{ cursor: existingLibraryIds.has(lib.id) ? 'default' : 'pointer' }"
         >
         Flat scan (for oneshot folders)
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="For a library of oneshots (folders that are just loose images): every folder becomes its own manga, instead of being read as volumes of one big manga. Can only be chosen when the library is created."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
       </label>
-      <div class="section-hint" style="margin:0 0 10px;" v-if="!existingLibraryIds.has(lib.id)">
-        Decide this now -- it can only be set while creating a library, not changed afterward. Off is the standard behavior
-        (chapters/volumes detected however deep they're nested); on treats every top-level folder as its own manga.
-      </div>
       <label
         style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-text,#f0f0f0); margin:2px 0 4px; cursor:pointer;"
-        title="Extracts any CBZ/CBR/ZIP/RAR/PDF file found in this library into a same-named folder of loose images, then deletes the original -- turning any other library type into a loose-image one over time. Safe to turn on or off at any point, including on an already-scanned library. Runs in the background after a scan finds something to convert, then rescans automatically once done."
       >
         <input
           type="checkbox"
           v-model="lib.auto_extract"
           style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
         >
-        Auto-extract archives &amp; PDFs to loose images
+        Auto-extract archives &amp; PDFs to loose images <span style="color:var(--color-primary,#e94560);">(deletes the originals)</span>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Turns every CBZ, CBR, ZIP, RAR or PDF file in this library into a folder of pictures, then permanently deletes the original file. Keep a backup if you want the originals. Can be switched on or off at any time; it works in the background after a scan."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
       </label>
-      <div class="section-hint" style="margin:0 0 10px;">
-        Unlike Flat scan above, this can be turned on or off any time, including on a library you've already scanned.
-        Converted files are permanently deleted after extraction -- make sure you have a backup if you want one, nothing
-        here is recoverable afterward.
-      </div>
       <label
         style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-text,#f0f0f0); margin:2px 0 4px; cursor:pointer;"
-        title="Shortens volume folders (case2 only) to 'Volume NN', keeping a provider name in parentheses when one is present -- e.g. 'Grand Blue Dreaming 19 (danke-Empire)' becomes 'Volume 19 (danke-Empire)'. Only the last volume of a run of consecutive same-provider volumes carries the bracket; adding a new volume from the same provider moves it forward automatically on the next scan. Reading progress and bookmarks are preserved across the rename. A volume name with more than one number is left untouched rather than guessed at; one with several bracket groups is renamed without a provider. Safe to turn on or off any time, including on an already-scanned library."
       >
         <input
           type="checkbox"
@@ -987,10 +961,10 @@
           style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
         >
         Rename volumes (shorten to "Volume NN", keep provider)
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Shortens volume folder names at the next scan, keeping the group that made them in brackets: &quot;Grand Blue Dreaming 19 (danke-Empire)&quot; becomes &quot;Volume 19 (danke-Empire)&quot;. Reading progress and bookmarks are kept. Only manga made of volumes are renamed, not chapters."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
       </label>
       <label
         style="display:flex; align-items:center; gap:6px; font-size:0.78rem; color:var(--color-text,#f0f0f0); margin:2px 0 4px; cursor:pointer;"
-        title="Fetch Metadata in this library searches Google Books and Open Library instead of AniList, MangaDex and MangaUpdates."
       >
         <input
           type="checkbox"
@@ -998,11 +972,8 @@
           style="width:16px; height:16px; accent-color:var(--color-primary,#e94560); cursor:pointer;"
         >
         Book library (metadata from Google Books &amp; Open Library)
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="For libraries of books: Fetch metadata looks them up on Google Books and Open Library instead of the manga sites."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
       </label>
-      <div class="section-hint" style="margin:0 0 10px;">
-        Renames on the very next scan or rescan, including for volumes already in the library. Only volume-type (case2)
-        manga are affected -- chapter-type manga are left alone.
-      </div>
       <div class="path-box">
       <div class="field-label">Folder path</div>
       <div v-for="(p, pi) in lib.paths" :key="pi" class="field-row" style="margin-bottom: 6px;">
@@ -1031,6 +1002,7 @@
         <button class="btn" @click="scanLibrary(lib)" style="font-size:0.78rem; padding: 6px 12px;">
           ↺ Reload scan
         </button>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Looks through this library&#x27;s folders now for new, changed or removed manga."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
         <span
           class="status-msg"
           style="margin: 0;"
@@ -1045,6 +1017,7 @@
           :disabled="metaScanStatus[lib.id] && metaScanStatus[lib.id].type === 'scanning'"
           style="font-size:0.78rem; padding: 6px 12px;"
         >⬇ Fetch metadata</button>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Looks up every manga of this library online and fills in the ticked details that are still missing. Details a manga already has are left alone."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
         <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.description"> Description</label>
         <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.genres"> Genres</label>
         <label style="font-size:0.74rem; color:#bbb; display:flex; align-items:center; gap:4px;"><input type="checkbox" v-model="metaScanFields.tags"> Tags</label>
@@ -1062,8 +1035,8 @@
           @click="startComicInfoExport(lib)"
           :disabled="comicInfoStatus[lib.id] && comicInfoStatus[lib.id].type === 'scanning'"
           style="font-size:0.78rem; padding: 6px 12px;"
-          title="Writes each manga's title, description, genres and tags as ComicInfo.xml in its own folder, so they come back on a new install or after losing the data folder"
         >💾 Save metadata to ComicInfo.xml</button>
+        <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Writes each manga&#x27;s title, description, genres and tags into a small file (ComicInfo.xml) in its folder, so they come back after a reinstall or if the data folder is lost."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
         <span
           class="status-msg"
           style="margin: 0;"
@@ -1140,7 +1113,6 @@
 
   <div class="settings-section">
     <div class="section-label">Accent Colors</div>
-    <div class="section-hint">Choose the accent color palette. Your selection is saved automatically.</div>
 
     <div class="card">
       <div class="field-label">Active accent</div>
@@ -1154,15 +1126,13 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">Theme</div>
-    <div class="section-hint">Choose a visual style. Changes card shapes, spacing, and borders — not colors.</div>
+    <div class="section-label">Theme <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Changes the shape of cards, the spacing and the borders. The colours come from Accent Colors above."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:10px;">
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0;">
         <input type="radio" v-model="activeVisualTheme" value="default" @change="saveVisualTheme" style="accent-color:var(--color-primary,#e94560); width:16px; height:16px; cursor:pointer;">
         <div>
           <div style="font-size:0.88rem; font-weight:600;">Default</div>
-          <div style="font-size:0.75rem; color:var(--color-muted,#888); margin-top:2px;">Frosted glass panels, pill-shaped controls, rounded soft edges.</div>
         </div>
       </label>
       <label style="display:flex; align-items:center; gap:10px; cursor:pointer; padding:6px 0; border-top:1px solid var(--color-border,#2a2a2a);">
@@ -1173,7 +1143,6 @@
             <span v-if="activeCustomThemeName && activeVisualTheme === 'custom'" style="font-size:0.72rem; background:var(--color-primary,#e94560); color:#fff; border-radius:20px; padding:1px 8px;" v-text="activeCustomThemeName"></span>
           </div>
           <div style="font-size:0.75rem; color:var(--color-muted,#888); margin-top:2px;">
-            Write your own CSS.
             <a href="#" @click.prevent="openCssEditor()" style="color:var(--color-primary,#e94560); text-decoration:none; font-weight:600;">Open editor →</a>
           </div>
         </div>
@@ -1186,8 +1155,7 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">Display</div>
-    <div class="section-hint">Toggle the blurred cover backdrop on each page.</div>
+    <div class="section-label">Display <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="The backdrop is the blurred cover picture shown behind a page."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:14px;">
       <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
@@ -1199,7 +1167,7 @@
         <input type="checkbox" v-model="backdropDetail" @change="saveBackdrop('detail')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </label>
       <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
-        <span style="font-size:0.85rem;">Lock Library page backdrop (stop it changing with your last-read manga)</span>
+        <span style="font-size:0.85rem;">Lock Library page backdrop <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Normally the Library page backdrop follows the manga you read last. Locked, it stays as it is now."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
         <input type="checkbox" v-model="lockBackdrop" @change="saveBackdrop('lock')" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </label>
       <div class="status-msg" :class="backdropStatus.type" v-text="backdropStatus.msg" style="min-height:0; margin:0;"></div>
@@ -1210,8 +1178,7 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">Bluetooth Scroller</div>
-    <div class="section-hint">Hide the Bluetooth scroller connection button in the reader (Android app only). On by default for users who don't have the hardware.</div>
+    <div class="section-label">Bluetooth Scroller <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="A button in the reader for connecting a Bluetooth page turner (Android app only). Hidden by default, for people who don&#x27;t have one."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:14px;">
       <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
@@ -1227,7 +1194,6 @@
 
   <div class="settings-section">
     <div class="section-label">Rows</div>
-    <div class="section-hint">Choose which rows show up on the library page and the detail pages.</div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:14px;">
       <label v-for="r in LIBRARY_ROW_CHOICES" :key="r.id" style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
@@ -1251,11 +1217,10 @@
 
   <div class="settings-section">
     <div class="section-label">Collections</div>
-    <div class="section-hint">Personalize how collections show up on the library page.</div>
 
     <div class="card" style="display:flex; flex-direction:column; gap:14px;">
       <label style="display:flex; align-items:center; justify-content:space-between; cursor:pointer; gap:12px;">
-        <span style="font-size:0.85rem;">Hide the admin's shared collections</span>
+        <span style="font-size:0.85rem;">Hide the admin's shared collections <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Collections the admin made for everyone won&#x27;t appear on your Library page. Your own collections still do."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
         <input type="checkbox" v-model="hideAdminCollections" @change="saveCollectionsPrefs" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </label>
       <div class="status-msg" :class="collectionsPrefsStatus.type" v-text="collectionsPrefsStatus.msg" style="min-height:0; margin:0;"></div>
@@ -1355,8 +1320,7 @@
   <template v-if="activeSection === 'permissions' && isAdmin">
 
   <div class="settings-section">
-    <div class="section-label">Create User</div>
-    <div class="section-hint">Accounts are admin-only — there is no public sign-up.</div>
+    <div class="section-label">Create User <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Only an admin can make accounts: nobody can sign up by themselves."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
     <div class="card" style="display:flex; flex-direction:column; gap:10px;">
       <input
         type="text"
@@ -1386,10 +1350,7 @@
   <hr class="divider">
 
   <div class="settings-section">
-    <div class="section-label">User Permissions</div>
-    <div class="section-hint">
-      Control what each user can access. The <strong>Default</strong> row defines permissions for newly created users.
-    </div>
+    <div class="section-label">User Permissions <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Choose what each user may change and which libraries they see. &quot;Default User Settings&quot; are what every new user starts with."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <!-- Search bar -->
     <div style="margin-bottom:10px;">
@@ -1424,15 +1385,15 @@
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions['_default'].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
           </label>
-          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;" title="Whether this user's Fetch Metadata search shows 18+ titles (AniList, MangaDex, MangaUpdates and Google Books mark them).">
-            <span style="flex:none;">18+ results</span>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;">
+            <span style="flex:none;">18+ results <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Whether this user&#x27;s Fetch Metadata searches also show adult (18+) titles."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
             <select class="theme-select" v-model="userPermissions['_default'].metadata_adult" :disabled="!userPermissions['_default'].metadata_fetch" style="width:auto; margin-bottom:0; padding:5px 10px; font-size:0.82rem;">
               <option :value="false">Not permitted</option>
               <option :value="true">Permitted</option>
             </select>
           </label>
-          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
-            <input type="checkbox" v-model="userPermissions['_default'].page_pairing"> Page pairing (two-page reading, saved for everyone)
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions['_default'].page_pairing"> Page pairing <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="In two-page reading, this user&#x27;s blank pages and page-pair shifts are saved for everyone. Without it, they last only until the reader is closed."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
           </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label
@@ -1449,7 +1410,7 @@
         </div>
         <!-- Blocked Tags -->
         <div style="margin-top:12px;">
-          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags</div>
+          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Manga with any of these tags are hidden from this user everywhere. Admins see everything."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
           <div style="position:relative;">
             <input
               type="text"
@@ -1528,15 +1489,15 @@
           <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
             <input type="checkbox" v-model="userPermissions[user.username].metadata_fetch"> Fetch Metadata (AniList / MangaDex)
           </label>
-          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;" title="Whether this user's Fetch Metadata search shows 18+ titles (AniList, MangaDex, MangaUpdates and Google Books mark them).">
-            <span style="flex:none;">18+ results</span>
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem;">
+            <span style="flex:none;">18+ results <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Whether this user&#x27;s Fetch Metadata searches also show adult (18+) titles."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
             <select class="theme-select" v-model="userPermissions[user.username].metadata_adult" :disabled="!userPermissions[user.username].metadata_fetch" style="width:auto; margin-bottom:0; padding:5px 10px; font-size:0.82rem;">
               <option :value="false">Not permitted</option>
               <option :value="true">Permitted</option>
             </select>
           </label>
-          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;" title="Two-page reading: blank pages and pairing shifts are saved for everyone. Without it they last only until the reader is closed.">
-            <input type="checkbox" v-model="userPermissions[user.username].page_pairing"> Page pairing (two-page reading, saved for everyone)
+          <label style="display:flex; align-items:center; gap:8px; font-size:0.82rem; cursor:pointer;">
+            <input type="checkbox" v-model="userPermissions[user.username].page_pairing"> Page pairing <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="In two-page reading, this user&#x27;s blank pages and page-pair shifts are saved for everyone. Without it, they last only until the reader is closed."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span>
           </label>
           <div style="margin-top:4px; font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px;">Libraries</div>
           <label
@@ -1553,7 +1514,7 @@
         </div>
         <!-- Blocked Tags -->
         <div style="margin-top:12px;">
-          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags</div>
+          <div style="font-size:0.72rem; color:var(--color-muted,#888); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px;">Blocked Tags <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Manga with any of these tags are hidden from this user everywhere. Admins see everything."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
           <div style="position:relative;">
             <input
               type="text"
@@ -1595,12 +1556,7 @@
   <!-- ══════════════════════ ISSUES ══════════════════════ -->
   <template v-if="activeSection === 'issues' && isAdmin">
   <div class="settings-section">
-    <div class="section-label">Integrity Issues</div>
-    <div class="section-hint">
-      Corrupt archives found by the automatic idle-time library check (only
-      runs when no one's been active for a while, so it doesn't compete with
-      anyone reading). Fix the file, then Recheck to confirm and clear it.
-    </div>
+    <div class="section-label">Integrity Issues <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="Damaged files found by an automatic check, which only runs while nobody is reading. Fix or replace the file, then press Recheck to clear it."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <div v-if="integrityIssues.length === 0" class="section-hint" style="text-align:center; padding: 30px 0;">
       No issues found.
@@ -1646,8 +1602,7 @@
   <template v-if="activeSection === 'community'">
 
   <div class="settings-section">
-    <div class="section-label">Community</div>
-    <div class="section-hint">See what other users on this server are reading — filtered to only what you yourself have permission to see. Manga in a library or tag you can't access never appears here, even if it genuinely appears in their history.</div>
+    <div class="section-label">Community <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="What the other users of this server are reading. You only see manga you&#x27;re allowed to see yourself."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></div>
 
     <!-- your own stats -- always shown, own card, never collapsed -->
     <div v-if="communitySelf" class="library-card">
@@ -1757,6 +1712,50 @@
 
 </div>
 
+<script>
+/* (i) explanations in Settings: one floating box, placed under (or above) the icon and kept on screen.
+   Mouse/pen: hover. Keyboard: focus. Touch: tap to open, tap again or elsewhere to close. */
+(function () {
+  let pop = null, cur = null, how = '', shownAt = 0;
+  function show(el, by) {
+    hide();
+    cur = el; how = by; shownAt = Date.now(); el.classList.add('open');
+    pop = document.createElement('div'); pop.id = 'infoTipPop'; pop.setAttribute('role', 'tooltip');
+    pop.textContent = el.getAttribute('data-tip');
+    document.body.appendChild(pop);
+    const r = el.getBoundingClientRect(), w = pop.offsetWidth, h = pop.offsetHeight;
+    let x = Math.min(Math.max(12, r.left + r.width / 2 - w / 2), innerWidth - w - 12);
+    let y = r.bottom + 10, below = true;
+    if (y + h > innerHeight - 8 && r.top - h - 10 > 8) { y = r.top - h - 10; below = false; }
+    pop.style.left = x + 'px'; pop.style.top = y + 'px';
+    pop.style.setProperty('--ax', (r.left + r.width / 2 - x) + 'px');
+    pop.classList.add(below ? 'below' : 'above');
+    el.setAttribute('aria-describedby', 'infoTipPop');
+  }
+  function hide() {
+    if (pop) pop.remove(); pop = null;
+    if (cur) { cur.classList.remove('open'); cur.removeAttribute('aria-describedby'); } cur = null;
+  }
+  const tipOf = e => e.target.closest && e.target.closest('.info-tip');
+  document.addEventListener('pointerover', e => { const t = tipOf(e); if (t && e.pointerType !== 'touch' && t !== cur) show(t, 'hover'); });
+  document.addEventListener('pointerout', e => { const t = tipOf(e); if (t && e.pointerType !== 'touch' && how === 'hover' && !t.contains(e.relatedTarget)) hide(); });
+  document.addEventListener('click', e => {
+    const t = tipOf(e);
+    // inside a label the (i) must never tick its checkbox
+    if (t) { e.preventDefault(); e.stopPropagation(); if (t === cur && how === 'click') hide(); else show(t, 'click'); return; }
+    hide();
+  }, true);
+  document.addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('info-tip') && e.target !== cur) show(e.target, 'focus'); });
+  document.addEventListener('focusout', e => { if (e.target === cur && how === 'focus') hide(); });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') hide();
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('info-tip')) { e.preventDefault(); e.target === cur ? hide() : show(e.target, 'focus'); }
+  });
+  // scrolling the page closes it (but not the small scroll that focusing an icon itself causes)
+  addEventListener('scroll', () => { if (Date.now() - shownAt > 400) hide(); }, true);
+  addEventListener('resize', hide);
+})();
+</script>
 <script src="/static/settings.js?v=4"></script>
 </body>
 </html>
