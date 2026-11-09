@@ -2027,11 +2027,89 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     readerInner.style.setProperty('--page-gap', (usePadding ? PAGE_GAP : 0) + 'px');
   }
 
+  // ── BOOKMARKS READ END TO END (rebuilt 2026-11-09) ──
+  // Opening a closed bookmark with End-to-end reading on loads the reader with
+  // ?e2e=<bookmark id>. The reader then holds ONLY the chain's pages, one
+  // bookmark after the other: in long strip the last page of a bookmark is
+  // followed straight by the first page of the next, in page mode the next
+  // turn goes there, and every other part of the reader (loading, progress
+  // bar, two-page pairs) just sees a shorter manga. The chain's end is the
+  // end of the reader ("Bookmarks ended"). The URL keeps the chain across a
+  // reload; switching End-to-end off (or opening a chapter or another
+  // bookmark) reloads the whole manga at that page.
+  //
+  // The chain: the opened bookmark and the rest of its group in number order
+  // (a group = same name without the trailing number, "Luffy fights 01, 02"),
+  // then every other group whole, the groups in the order of their first
+  // bookmark in the manga, even when that's earlier. Only closed bookmarks.
+  // Positions are compared by the chapter's place in chapterList now, not
+  // the chapterIdx saved with the bookmark (stale once chapters are added).
+  function bmChainFrom(list, openId) {
+    const ord = (cid) => chapterList.findIndex(c => c.id === cid);
+    const known = (p) => p && ord(p.chapterId) !== -1;
+    const cmp = (a, b) => (ord(a.chapterId) - ord(b.chapterId)) || (a.pageIdx - b.pageIdx);
+    const base = (n) => n.replace(/\s+\d+$/, '').trim();
+    const num = (n) => { const m = n.match(/\s(\d+)$/); return m ? parseInt(m[1], 10) : 0; };
+    const closed = list.filter(b => b.end && known(b.start) && known(b.end));
+    const opened = closed.find(b => String(b.id) === String(openId));
+    if (!opened) return null;
+    const groups = new Map();
+    for (const b of closed) {
+      const k = base(b.name);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(b);
+    }
+    for (const g of groups.values()) g.sort((a, b) => (num(a.name) - num(b.name)) || cmp(a.start, b.start));
+    const own = groups.get(base(opened.name));
+    const chain = own.slice(own.indexOf(opened));
+    const firstPos = (g) => g.reduce((m, b) => (cmp(b.start, m) < 0 ? b.start : m), g[0].start);
+    [...groups.values()]
+      .filter(g => g !== own)
+      .sort((x, y) => cmp(firstPos(x), firstPos(y)))
+      .forEach(g => chain.push(...g));
+    return chain;
+  }
+
+  const e2eBookmarkId = new URLSearchParams(window.location.search).get('e2e');
+  let bmChain = null;  // the bookmarks being read end to end, in order (null = the whole manga)
+  if (e2eBookmarkId) {
+    try {
+      const data = await apiFetch(apiUrl(`/api/manga/${libraryId}/${mangaId}/bookmarks`));
+      bmChain = bmChainFrom(data.bookmarks || [], e2eBookmarkId);
+    } catch (e) {}
+    if (!bmChain) {  // that bookmark is gone or open again: the whole manga
+      const u = new URL(window.location.href);
+      u.searchParams.delete('e2e');
+      history.replaceState(null, '', u.href);
+    }
+  }
+
   function buildManifest(usePadding, effectiveW) {
     const w = effectiveW ?? viewW;
     manifest.length = 0;
     Object.keys(chapterStart).forEach(k => delete chapterStart[k]);
     cursorY = 0;
+    if (bmChain) {
+      // seg: which bookmark of the chain the page belongs to (two-page mode
+      // pairs pages within one bookmark only).
+      bmChain.forEach((bm, seg) => {
+        const from = chapterList.findIndex(c => c.id === bm.start.chapterId);
+        const to   = chapterList.findIndex(c => c.id === bm.end.chapterId);
+        for (let ci = from; ci <= to; ci++) {
+          const cid    = chapterList[ci].id;
+          const pages  = (isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid])?.pages || [];
+          const first  = ci === from ? bm.start.pageIdx : 0;
+          const last   = ci === to ? Math.min(bm.end.pageIdx, pages.length - 1) : pages.length - 1;
+          if (chapterStart[cid] === undefined && first <= last) chapterStart[cid] = manifest.length;
+          for (let i = first; i <= last; i++) {
+            const scaledH = Math.round((w / pages[i].w) * pages[i].h);
+            manifest.push({ chapterId: cid, localIdx: i, seg, globalY: cursorY, scaledH, url: null, el: null, loaded: false });
+            cursorY += scaledH + (usePadding ? PAGE_GAP : 0);
+          }
+        }
+      });
+      return;
+    }
     for (const ch of chapterList) {
       const cid    = ch.id;
       const chDims = isVolume ? dims.volumes?.[cid] : dims.chapters?.[cid];
@@ -2061,9 +2139,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     Object.keys(chapterStart).forEach(k => delete chapterStart[k]);
     for (let i = 0; i < manifest.length; i++) {
       const entry = manifest[i];
-      if (i === 0 || manifest[i - 1].chapterId !== entry.chapterId) {
-        chapterStart[entry.chapterId] = i;
-      }
+      if (chapterStart[entry.chapterId] === undefined) chapterStart[entry.chapterId] = i;
       const chDims = isVolume ? dims.volumes?.[entry.chapterId] : dims.chapters?.[entry.chapterId];
       if (chDims?.pages?.[entry.localIdx]) {
         const { w: iw, h: ih } = chDims.pages[entry.localIdx];
@@ -3954,7 +4030,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       // end of the whole manifest completes the last chapter directly. Guarded
       // so it only posts once per page load, not on every scroll tick spent
       // sitting at the bottom.
-      if (!finalChapterCompletionSaved) {
+      if (!finalChapterCompletionSaved && !bmChain) {
         finalChapterCompletionSaved = true;
         saveReadingProgress(chapterList[chapterList.length - 1].id);
       }
@@ -4120,7 +4196,12 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // conveyor window centered on it before first paint.
   const startIdx = chapterStart[chapterId];
   let startGlobalIdx = 0;
-  if (startIdx !== undefined) {
+  if (bmChain) {
+    // Reading bookmarks end to end: the URL's page (the opened bookmark's
+    // first page) wherever it sits in the chain.
+    startGlobalIdx = Math.max(0, manifest.findIndex(e => e.chapterId === chapterId && e.localIdx === startPage));
+    if (manifest.length) virtualY = manifest[startGlobalIdx].globalY;
+  } else if (startIdx !== undefined) {
     const targetIdx = startPage > 0 ? Math.min(startIdx + startPage, manifest.length - 1) : startIdx;
     startGlobalIdx = targetIdx;
     virtualY = manifest[targetIdx].globalY;
@@ -5176,12 +5257,14 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     const alone = (i) => spPageAlone(i, commonShape);
     const head = [], tail = [];
     let lo = a, hi = b;  // the pages paired between the covers
-    if (isVolume && n >= 1) {
+    // Only a whole volume: a bookmark read end to end can start or end mid-volume.
+    const volLen = isVolume ? ((dims.volumes?.[cid]?.pages || []).length) : 0;
+    if (isVolume && n >= 1 && spManifest[a].localIdx === 0) {
       // A volume opens on its cover alone, set where it sits in the closed
       // book, and ends on the back cover the same way.
       head.push(alone(a) ? [{ idx: a }] : [{ blank: BLACK }, { idx: a }]);
       lo = a + 1;
-      if (n >= 2) {
+      if (n >= 2 && spManifest[b - 1].localIdx === volLen - 1) {
         tail.push(alone(b - 1) ? [{ idx: b - 1 }] : [{ idx: b - 1 }, { blank: BLACK }]);
         hi = b - 1;
       }
@@ -5252,28 +5335,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     return [...head, ...views, ...tail];
   }
 
-  // The bookmark being read end to end, as [first page, last page] indexes
-  // (see NAVIGATE TO BOOKMARK). A pair reaching across either end is split,
-  // the page outside the bookmark getting a white page beside it, so the
-  // bookmark starts and ends on its own pages and every other pair stays.
-  let spBmRange = null;
-  function _spSplitAtBookmark(views) {
-    if (!spBmRange) return views;
-    const [s, e] = spBmRange;
-    const out = [];
-    for (const v of views) {
-      const real = v.filter(c => c.idx != null);
-      const a = real[0], b = real[1];
-      if (v.length === 2 && b && ((a.idx < s && s <= b.idx) || (a.idx <= e && e < b.idx))) {
-        out.push([a, { blank: 'white', src: 'bookmark' }]);
-        out.push([{ blank: 'white', src: 'bookmark' }, b]);
-      } else {
-        out.push(v);
-      }
-    }
-    return out;
-  }
-
   function spBuildViews() {
     const n = spManifest.length;
     _spCommonShapeCache.clear();
@@ -5284,10 +5345,12 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     } else {
       let a = 0;
       while (a < n) {
-        const cid = spManifest[a].chapterId;
+        // One unit = one chapter/volume, or, reading bookmarks end to end,
+        // one bookmark's pages in it: each bookmark starts on its own pair.
+        const cid = spManifest[a].chapterId, seg = spManifest[a].seg;
         let b = a;
-        while (b < n && spManifest[b].chapterId === cid) b++;
-        for (const v of _spSplitAtBookmark(spBookUnitViews(cid, a, b))) {
+        while (b < n && spManifest[b].chapterId === cid && spManifest[b].seg === seg) b++;
+        for (const v of spBookUnitViews(cid, a, b)) {
           for (const c of v) if (c.idx != null) spViewOfIdx[c.idx] = spViews.length;
           spViews.push(v);
         }
@@ -5761,14 +5824,18 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // Guards the "reached the true end of the manga" completion save in
   // syncScrollPosition (long-strip mode) so it only fires once per page load.
   let finalChapterCompletionSaved = false;
-  let bmEndToEnd = false;
-  let bmEndToEndActive = false;
+  // The End-to-end switch (in the bookmark list) stays on for this tab once
+  // set; bmEndToEndActive = this reader holds a chain (see bmChainFrom).
+  let bmEndToEnd = !!bmChain;
+  try { if (sessionStorage.getItem('kinsho_bm_e2e') === '1') bmEndToEnd = true; } catch (e) {}
+  const bmEndToEndActive = !!bmChain;
   let progressSaveTimer = null;
   let spProgressSaveTimer = null;
 
 
   const lastPagePopupEl = document.getElementById('lastPagePopup');
   let lastPagePopupTimer = null;
+  if (bmChain) lastPagePopupEl.textContent = 'Bookmarks ended';
   function showLastPagePopup() {
     lastPagePopupEl.classList.add('show');
     clearTimeout(lastPagePopupTimer);
@@ -7411,12 +7478,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   applyPreloadRadius(readerSettings.preloadRadius ?? 7);
 
   // ── INITIAL PREFETCH ──
-  {
-    const startGlobalIdx = startIdx !== undefined
-      ? Math.min(startIdx + startPage, manifest.length - 1)
-      : 0;
-    prefetchAroundIndex(startGlobalIdx);
-  }
+  prefetchAroundIndex(startGlobalIdx);
 
   if (readerSettings.mode === 'single-page') {
     // Wait for the opening chapter URL batch before showing the first page,
@@ -7700,6 +7762,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   // the true last chapter as the true last chapter -- the manga never got
   // marked 100% read no matter how far the user actually scrolled.
   function isOnLastChapter() {
+    if (bmChain) return true;  // the chain's end is the reader's end (the callers check the position)
     return chapterList.length > 0 && getVisibleChapterId() === chapterList[chapterList.length - 1].id;
   }
 
@@ -8157,6 +8220,9 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     // handles both (spManifest[spCurrentIdx].chapterId for single-page,
     // scroll-position lookup for long-strip).
     if (_creditingInFlight) return;
+    // Bookmarks end to end: passing a chapter in the chain isn't reading it
+    // all (only the position is saved, at the real page).
+    if (bmChain) return;
     const visibleChapterId = getVisibleChapterId();
 
     if (visibleChapterId !== lastSeenChapterId) {
@@ -8207,7 +8273,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   function scheduleProgressSave() {
     checkChapterCompletion();
-    if (bmEndToEndActive) checkEndToEnd();
     if (progressSaveTimer) return;
     progressSaveTimer = setTimeout(() => {
       progressSaveTimer = null;
@@ -8241,14 +8306,24 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     return { chapterId: cid, chapterIdx: chapIdx, pageIdx };
   }
 
+  // A position's chapter, as its place in chapterList now (the chapterIdx
+  // saved with a bookmark goes stale when chapters are added or removed).
+  function bmChapOrd(pos) {
+    const i = chapterList.findIndex(c => c.id === pos.chapterId);
+    return i !== -1 ? i : pos.chapterIdx;
+  }
+
+  function bmComparePos(a, b) {
+    return (bmChapOrd(a) - bmChapOrd(b)) || (a.pageIdx - b.pageIdx);
+  }
+
   function positionBefore(a, b) {
     // Returns true if position a is strictly before position b
-    if (a.chapterIdx !== b.chapterIdx) return a.chapterIdx < b.chapterIdx;
-    return a.pageIdx < b.pageIdx;
+    return bmComparePos(a, b) < 0;
   }
 
   function positionEqual(a, b) {
-    return a.chapterIdx === b.chapterIdx && a.pageIdx === b.pageIdx;
+    return bmComparePos(a, b) === 0;
   }
 
   function chapterName(cid) {
@@ -8282,10 +8357,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   // ── SORT bookmarks by start position (chapter then page) ──
   function sortBookmarks() {
-    bookmarks.sort((a, b) => {
-      if (a.start.chapterIdx !== b.start.chapterIdx) return a.start.chapterIdx - b.start.chapterIdx;
-      return a.start.pageIdx - b.start.pageIdx;
-    });
+    bookmarks.sort((a, b) => bmComparePos(a.start, b.start));
   }
 
   // ── AUTO-NUMBERING ──
@@ -8305,10 +8377,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       return;
     }
     // Sort by position
-    group.sort((a, b) => {
-      if (a.start.chapterIdx !== b.start.chapterIdx) return a.start.chapterIdx - b.start.chapterIdx;
-      return a.start.pageIdx - b.start.pageIdx;
-    });
+    group.sort((a, b) => bmComparePos(a.start, b.start));
     group.forEach((b, i) => {
       b.name = `${baseName} ${String(i + 1).padStart(2, '0')}`;
     });
@@ -8679,7 +8748,12 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       const toggleInput = document.createElement('input');
       toggleInput.type = 'checkbox';
       toggleInput.checked = bmEndToEnd;
-      toggleInput.addEventListener('change', () => { bmEndToEnd = toggleInput.checked; });
+      toggleInput.addEventListener('change', () => {
+        bmEndToEnd = toggleInput.checked;
+        try { sessionStorage.setItem('kinsho_bm_e2e', bmEndToEnd ? '1' : '0'); } catch (e) {}
+        // Switched off while reading a chain: the whole manga, at this page.
+        if (!bmEndToEnd && bmChain) goToChapter(bmReaderUrl(getCurrentPosition()));
+      });
       const toggleSlider = document.createElement('span');
       toggleSlider.className = 'settings-toggle-slider';
       toggleWrap.appendChild(toggleInput);
@@ -8842,124 +8916,48 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   }
 
   // ── NAVIGATE TO BOOKMARK ──
+  function bmReaderUrl(pos, e2eId = null) {
+    return `/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${pos.chapterId}?page=${pos.pageIdx}` +
+      (e2eId != null ? `&e2e=${encodeURIComponent(e2eId)}` : '');
+  }
+
   function navigateToBookmark(bm) {
-    if (bmEndToEnd && bm.end) {
-      bmEndToEndActive = true;
-      bmCurrentGroup   = bmBaseName(bm.name);
-      bmCurrentGroupIdx = bookmarks
-        .filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup)
-        .findIndex(b => b.id === bm.id);
-    } else {
-      bmEndToEndActive = false;
-    }
-    bmSetReadRange(bmEndToEndActive ? bm : null);
     // The read this lands in doesn't count toward the average reading time
-    // (PER-PAGE READING TIME); another chapter's bookmark reloads the reader.
+    // (PER-PAGE READING TIME); a reload carries that over in kinsho_pt_bm.
     ptBmPending = true;
-    if (bm.start.chapterId !== chapterId) { try { sessionStorage.setItem('kinsho_pt_bm', mangaId); } catch (e) {} }
+    const markReload = () => { try { sessionStorage.setItem('kinsho_pt_bm', mangaId); } catch (e) {} };
+    if (bmEndToEnd && bm.end) {
+      // Read end to end: the reader reloads holding only the chain (bmChainFrom).
+      markReload();
+      goToChapter(bmReaderUrl(bm.start, bm.id));
+      return;
+    }
+    if (bmChain || bm.start.chapterId !== chapterId) {
+      // Leaving a chain (its reader lacks the other pages), or another chapter.
+      markReload();
+      goToChapter(bmReaderUrl(bm.start));
+      return;
+    }
     jumpToPosition(bm.start);
   }
 
-  // Two-page mode: the bookmark read end to end starts/ends on its own pages
-  // (spBmRange); takes effect at the next jumpToPosition/relayout.
-  function bmSetReadRange(bm) {
-    const find = (p) => spManifest.findIndex(e => e.chapterId === p.chapterId && e.localIdx === p.pageIdx);
-    const range = bm && bm.end ? [find(bm.start), find(bm.end)] : null;
-    spBmRange = range && range[0] !== -1 && range[1] !== -1 ? range : null;
-  }
-
+  // Same chapter as the URL's: jump within the reader.
   function jumpToPosition(pos) {
-    if (pos.chapterId === chapterId) {
-      if (readerSettings.mode === 'single-page') {
-        // Must match chapterId too now that spManifest spans the whole manga
-        // -- every chapter has its own localIdx 0, 1, 2..., so matching on
-        // localIdx alone (safe back when spManifest was one chapter's own
-        // slice) could land on some other chapter's page sharing the same
-        // number, landing earlier in the flat array.
-        const idx = spManifest.findIndex(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
-        if (idx !== -1) spIsBook() ? spRelayout(idx) : spGotoIdx(idx);  // relayout: spBmRange may have changed
-      } else {
-        const entry = manifest.find(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
-        if (entry) setVirtualY(entry.globalY);
-      }
+    if (readerSettings.mode === 'single-page') {
+      // Must match chapterId too now that spManifest spans the whole manga
+      // -- every chapter has its own localIdx 0, 1, 2..., so matching on
+      // localIdx alone (safe back when spManifest was one chapter's own
+      // slice) could land on some other chapter's page sharing the same
+      // number, landing earlier in the flat array.
+      const idx = spManifest.findIndex(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
+      if (idx !== -1) spGotoIdx(idx);
     } else {
-      goToChapter(`/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${pos.chapterId}?page=${pos.pageIdx}`);
+      const entry = manifest.find(e => e.chapterId === pos.chapterId && e.localIdx === pos.pageIdx);
+      if (entry) setVirtualY(entry.globalY);
     }
   }
 
-  // ── END-TO-END: check if we've reached the end of the current bookmark ──
-  let bmCurrentGroup    = null;
-  let bmCurrentGroupIdx = 0;
-
-  function checkEndToEnd() {
-    if (!bmEndToEndActive) return;
-
-    const pos = getCurrentPosition();
-    // Find the active bookmark in the current group
-    const group = bookmarks.filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup);
-    const activeBm = group[bmCurrentGroupIdx];
-    if (!activeBm || !activeBm.end) return;
-
-    const end = activeBm.end;
-    // Check if we've reached or passed the end position
-    if (!positionBefore(pos, end) && !positionEqual(pos, end)) return;
-    if (positionEqual(pos, end) || (!positionBefore(pos, end))) {
-      // Move to next bookmark in chain
-      advanceEndToEnd();
-    }
-  }
-
-  function advanceEndToEnd() {
-    // Try next in same group
-    const group = bookmarks.filter(b => b.end && bmBaseName(b.name) === bmCurrentGroup);
-    if (bmCurrentGroupIdx + 1 < group.length) {
-      bmCurrentGroupIdx++;
-      bmSetReadRange(group[bmCurrentGroupIdx]);
-      jumpToPosition(group[bmCurrentGroupIdx].start);
-      return;
-    }
-
-    // Group exhausted — find next group by lowest start position
-    const doneGroups = new Set();
-    // Collect all groups that have been started
-    // (current group and all groups whose base name equals bmCurrentGroup or comes before)
-    bookmarks
-      .filter(b => b.end)
-      .forEach(b => {
-        const base = bmBaseName(b.name);
-        if (base === bmCurrentGroup) doneGroups.add(base);
-      });
-
-    // Find all remaining groups (not done), sorted by the position of their first bookmark
-    const remaining = [];
-    const seen = new Set(doneGroups);
-    for (const bm of bookmarks) {
-      if (!bm.end) continue;
-      const base = bmBaseName(bm.name);
-      if (seen.has(base)) continue;
-      seen.add(base);
-      remaining.push({ base, firstBm: bm });
-    }
-    // bookmarks are already sorted by position so the first occurrence of each group
-    // is the one nearest the start of the manga
-
-    if (remaining.length === 0) {
-      bmEndToEndActive = false;
-      bmSetReadRange(null);
-      if (spIsBook()) spRelayout(spCurrentIdx);
-      showToast('Bookmarks ended');
-      return;
-    }
-
-    // Move to the next group
-    const next = remaining[0];
-    bmCurrentGroup    = next.base;
-    bmCurrentGroupIdx = 0;
-    bmSetReadRange(next.firstBm);
-    jumpToPosition(next.firstBm.start);
-  }
-
-  // Hook chapter-completion + end-to-end checks into single-page mode's own
+  // Hook chapter-completion checks into single-page mode's own
   // page changes. scheduleProgressSave (called by setVirtualY) already
   // covers long-strip; single-page mode has no equivalent scroll event to
   // hang this off, so it's wrapped here instead.
@@ -8978,7 +8976,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   spGotoIdx = function(...args) {
     _origSpGotoIdxE2E(...args);
     checkChapterCompletion();
-    if (bmEndToEndActive) checkEndToEnd();
     // Choosing a page and the pair changed (a swipe): choose on the new one.
     if (spPicking() && !_spCurrentCells().some(c => c.classList.contains('sp-selected'))) {
       spSelectCell(null);
@@ -8989,7 +8986,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     // only once reading went on two pages into the next, so closing the
     // reader on a volume's last spread, or opening the next volume from the
     // dropdown, left it unread.
-    for (const i of spPagesAt(spPosOf(spCurrentIdx))) {
+    for (const i of (bmChain ? [] : spPagesAt(spPosOf(spCurrentIdx)))) {  // the chain: see checkChapterCompletion
       const e = spManifest[i], next = spManifest[i + 1];
       if (!e || (next && next.chapterId === e.chapterId) || _spEndCredited.has(e.chapterId)) continue;
       _spEndCredited.add(e.chapterId);

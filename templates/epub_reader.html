@@ -1216,10 +1216,44 @@
   // volumes/chapters).
 
   let bookmarks = [];
-  let bmEndToEnd       = false; // "end-to-end reading" toggle -- session-local, not persisted, matching the original
+  // End to end (rebuilt 2026-11-09, same chain as chapter_reader.html's
+  // bmChainFrom): the opened bookmark and the rest of its name group in
+  // number order, then every other group whole, the groups in the order of
+  // their first bookmark. Text has no pages to leave out, so the jump comes
+  // when reading goes past a bookmark's end point (not on reaching it). The
+  // switch stays on for this tab; a jump into another volume reloads with
+  // ?e2e=<opened bookmark>&e2eAt=<current one>, which keeps the chain going.
+  const _e2eParams = new URLSearchParams(window.location.search);
+  let bmEndToEnd = false;
+  try { bmEndToEnd = sessionStorage.getItem('kinsho_bm_e2e') === '1'; } catch (e) {}
   let bmEndToEndActive = false;
-  let bmCurrentGroup    = null;
-  let bmCurrentGroupIdx = 0;
+  let bmChain = [];       // the bookmarks being read end to end, in order
+  let bmChainOpenId = null;
+  let bmChainAt = 0;      // index of the one being read
+
+  function bmChainFrom(list, openId) {
+    const known = (p) => p && volumesList.some((v) => v.id === p.volumeId);
+    const base = (n) => n.replace(/\s+\d+$/, '').trim();
+    const num = (n) => { const m = n.match(/\s(\d+)$/); return m ? parseInt(m[1], 10) : 0; };
+    const closed = list.filter((b) => b.end && known(b.start) && known(b.end));
+    const opened = closed.find((b) => String(b.id) === String(openId));
+    if (!opened) return [];
+    const groups = new Map();
+    for (const b of closed) {
+      const k = base(b.name);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(b);
+    }
+    for (const g of groups.values()) g.sort((a, b) => (num(a.name) - num(b.name)) || bmComparePos(a.start, b.start));
+    const own = groups.get(base(opened.name));
+    const chain = own.slice(own.indexOf(opened));
+    const firstPos = (g) => g.reduce((m, b) => (bmComparePos(b.start, m) < 0 ? b.start : m), g[0].start);
+    [...groups.values()]
+      .filter((g) => g !== own)
+      .sort((x, y) => bmComparePos(firstPos(x), firstPos(y)))
+      .forEach((g) => chain.push(...g));
+    return chain;
+  }
 
   function getCurrentPosition() {
     return {
@@ -1230,16 +1264,28 @@
     };
   }
 
+  // The volume's place in volumesList now (volumeIdx saved with a bookmark
+  // goes stale when volumes are added or removed).
+  function bmVolOrd(pos) {
+    const i = volumesList.findIndex((v) => v.id === pos.volumeId);
+    return i !== -1 ? i : pos.volumeIdx;
+  }
+  function bmComparePos(a, b) {
+    return (bmVolOrd(a) - bmVolOrd(b)) || (a.spineIndex - b.spineIndex) || (a.scrollFraction - b.scrollFraction);
+  }
   function positionBefore(a, b) {
-    if (a.volumeIdx !== b.volumeIdx) return a.volumeIdx < b.volumeIdx;
+    if (bmVolOrd(a) !== bmVolOrd(b)) return bmVolOrd(a) < bmVolOrd(b);
     if (a.spineIndex !== b.spineIndex) return a.spineIndex < b.spineIndex;
     return a.scrollFraction < b.scrollFraction - 0.01;
   }
-  function positionAtOrPast(a, b) {
-    return !positionBefore(a, b);
+  // Read past b (not just reached it).
+  function positionPast(a, b) {
+    if (bmVolOrd(a) !== bmVolOrd(b)) return bmVolOrd(a) > bmVolOrd(b);
+    if (a.spineIndex !== b.spineIndex) return a.spineIndex > b.spineIndex;
+    return a.scrollFraction > b.scrollFraction + 0.01;
   }
   function positionEqual(a, b) {
-    return a.volumeIdx === b.volumeIdx && a.spineIndex === b.spineIndex &&
+    return bmVolOrd(a) === bmVolOrd(b) && a.spineIndex === b.spineIndex &&
       Math.abs(a.scrollFraction - b.scrollFraction) < 0.01;
   }
 
@@ -1269,11 +1315,7 @@
   }
 
   function sortBookmarks() {
-    bookmarks.sort((a, b) => {
-      if (a.start.volumeIdx !== b.start.volumeIdx) return a.start.volumeIdx - b.start.volumeIdx;
-      if (a.start.spineIndex !== b.start.spineIndex) return a.start.spineIndex - b.start.spineIndex;
-      return a.start.scrollFraction - b.start.scrollFraction;
-    });
+    bookmarks.sort((a, b) => bmComparePos(a.start, b.start));
   }
 
   // Strip a trailing auto-number suffix, e.g. "Favorite scene 03" -> "Favorite scene"
@@ -1286,11 +1328,7 @@
       if (group.length === 1 && group[0].name !== baseName) group[0].name = baseName;
       return;
     }
-    group.sort((a, b) => {
-      if (a.start.volumeIdx !== b.start.volumeIdx) return a.start.volumeIdx - b.start.volumeIdx;
-      if (a.start.spineIndex !== b.start.spineIndex) return a.start.spineIndex - b.start.spineIndex;
-      return a.start.scrollFraction - b.start.scrollFraction;
-    });
+    group.sort((a, b) => bmComparePos(a.start, b.start));
     group.forEach((b, i) => { b.name = `${baseName} ${String(i + 1).padStart(2, '0')}`; });
   }
 
@@ -1489,7 +1527,11 @@
       const toggleInput = document.createElement('input');
       toggleInput.type = 'checkbox';
       toggleInput.checked = bmEndToEnd;
-      toggleInput.addEventListener('change', () => { bmEndToEnd = toggleInput.checked; });
+      toggleInput.addEventListener('change', () => {
+        bmEndToEnd = toggleInput.checked;
+        try { sessionStorage.setItem('kinsho_bm_e2e', bmEndToEnd ? '1' : '0'); } catch (e) {}
+        if (!bmEndToEnd) bmEndToEndActive = false;
+      });
       const toggleSlider = document.createElement('span');
       toggleSlider.className = 'settings-toggle-slider';
       toggleWrap.appendChild(toggleInput);
@@ -1640,14 +1682,12 @@
 
   // ── NAVIGATE TO BOOKMARK ──
   function navigateToBookmark(bm) {
+    bmEndToEndActive = false;
     if (bmEndToEnd && bm.end) {
-      bmEndToEndActive  = true;
-      bmCurrentGroup    = bmBaseName(bm.name);
-      bmCurrentGroupIdx = bookmarks
-        .filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup)
-        .findIndex((b) => b.id === bm.id);
-    } else {
-      bmEndToEndActive = false;
+      bmChain = bmChainFrom(bookmarks, bm.id);
+      bmChainOpenId = bm.id;
+      bmChainAt = 0;
+      bmEndToEndActive = bmChain.length > 0;
     }
     jumpToPosition(bm.start);
   }
@@ -1656,7 +1696,8 @@
   // handled in place (same chapter just scrolls, a different one loads
   // fresh); a different volume needs a real page navigation, carrying the
   // target position through as `page`/`frac` query params the same way
-  // `?page=` already resumes at a spine index on a fresh load.
+  // `?page=` already resumes at a spine index on a fresh load (and the
+  // chain being read end to end as e2e/e2eAt).
   async function jumpToPosition(pos) {
     if (pos.volumeId === volumeId) {
       if (pos.spineIndex === currentIndex) {
@@ -1665,50 +1706,28 @@
         await loadSpineChapter(pos.spineIndex, { land: 'fraction', fraction: pos.scrollFraction });
       }
     } else {
-      goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${pos.volumeId}?page=${pos.spineIndex}&frac=${pos.scrollFraction}`);
+      const e2e = bmEndToEndActive
+        ? `&e2e=${encodeURIComponent(bmChainOpenId)}&e2eAt=${encodeURIComponent(bmChain[bmChainAt].id)}` : '';
+      goToVolume(`/manga/${libraryId}/${mangaId}/${unitKind}/${pos.volumeId}?page=${pos.spineIndex}&frac=${pos.scrollFraction}${e2e}`);
     }
   }
 
-  // ── END-TO-END: jump from one bookmark's end straight to the next
-  // bookmark in the same named group, then the next group, while reading ──
+  // ── END-TO-END: past the current bookmark's end, on to the next one ──
   function checkEndToEnd() {
     if (!bmEndToEndActive) return;
-    const pos = getCurrentPosition();
-    const group = bookmarks.filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup);
-    const activeBm = group[bmCurrentGroupIdx];
-    if (!activeBm || !activeBm.end) return;
-    if (positionAtOrPast(pos, activeBm.end)) advanceEndToEnd();
+    const activeBm = bmChain[bmChainAt];
+    if (!activeBm) return;
+    if (positionPast(getCurrentPosition(), activeBm.end)) advanceEndToEnd();
   }
 
   function advanceEndToEnd() {
-    const group = bookmarks.filter((b) => b.end && bmBaseName(b.name) === bmCurrentGroup);
-    if (bmCurrentGroupIdx + 1 < group.length) {
-      bmCurrentGroupIdx++;
-      jumpToPosition(group[bmCurrentGroupIdx].start);
-      return;
-    }
-    // Group exhausted -- find the next not-yet-visited group, by the
-    // position of its first bookmark (bookmarks are already sorted by
-    // position, so the first occurrence of each group is the one nearest
-    // the start of the book).
-    const seen = new Set([bmCurrentGroup]);
-    const remaining = [];
-    for (const bm of bookmarks) {
-      if (!bm.end) continue;
-      const base = bmBaseName(bm.name);
-      if (seen.has(base)) continue;
-      seen.add(base);
-      remaining.push({ base, firstBm: bm });
-    }
-    if (remaining.length === 0) {
+    if (bmChainAt + 1 >= bmChain.length) {
       bmEndToEndActive = false;
       showToast('Bookmarks ended');
       return;
     }
-    const next = remaining[0];
-    bmCurrentGroup    = next.base;
-    bmCurrentGroupIdx = 0;
-    jumpToPosition(next.firstBm.start);
+    bmChainAt++;
+    jumpToPosition(bmChain[bmChainAt].start);
   }
 
   // ── INIT ──
@@ -1721,6 +1740,14 @@
     topbarTitle.textContent = mangaData.name || 'KINSHO';
     startReadingSession(mangaData.name || 'Unknown');
     volumesList = volumesData[`${unitKind}s`] || [];
+    // A chain read end to end that jumped into this volume (see jumpToPosition).
+    if (_e2eParams.get('e2e')) {
+      bmChain = bmChainFrom(bookmarks, _e2eParams.get('e2e'));
+      bmChainOpenId = _e2eParams.get('e2e');
+      bmChainAt = Math.max(0, bmChain.findIndex((b) => String(b.id) === _e2eParams.get('e2eAt')));
+      bmEndToEndActive = bmChain.length > 0;
+      if (bmEndToEndActive) bmEndToEnd = true;
+    }
     buildVolumeMenu();
     const land = startFraction > 0 ? 'fraction' : 'start';
     await loadSpineChapter(Math.max(0, startIndex), { land, fraction: startFraction, saveProgress: false });

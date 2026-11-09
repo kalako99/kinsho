@@ -1,3 +1,4 @@
+# Feature map: see CLAUDE.md
 from fastapi import FastAPI, Request, Query, Depends, HTTPException
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
