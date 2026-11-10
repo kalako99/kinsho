@@ -1,10 +1,16 @@
 """Watches library folders for changes and asks for a scan (like Jellyfin's
 real-time monitoring), using Linux inotify directly (no extra package).
 
-What is watched: each library path and every folder directly inside it (the
-manga folders). That catches a new manga, and a new/renamed/removed chapter
-or volume (folder or file) inside a manga, which is what matters; changes
-deeper down (pages inside a chapter folder) are left to manual/periodic scans.
+What is watched: each library path, every folder directly inside it, and
+every manga folder the last scan recorded (nested manga included). That
+catches a new manga, and a new/renamed/removed chapter or volume (folder or
+file) inside a manga; changes deeper down (pages inside a chapter folder) are
+left to manual/periodic scans.
+
+What gets rescanned (2026-11-10, user's idea): only the folder that changed --
+the watched folder the change happened in, or for a change directly in a
+library path the new/renamed/removed folder itself. A file added directly in a
+library path, or lost events, ask for the whole library.
 Watching every folder would need ~46,000 inotify watches on the NAS, over the
 per-user limit (60,132, shared with Jellyfin which runs as the same uid); this
 needs ~700 for both instances. Measured 2026-11-10; a copy made over the SMB
@@ -12,8 +18,9 @@ share from a PC is reported inside the container.
 
 Only write events are asked for (no open/read events), so reading manga never
 triggers anything. A library's changes are collected until SETTLE_SECONDS
-pass without a new one, then on_change(library_id, path) is called; when it
-returns False (that library is scanning right now) it is asked again later.
+pass without a new one, then on_change(library_id, roots, path) is called
+(roots = set of folders, or None for the whole library); when it returns False
+(that library is scanning right now) it is asked again later.
 """
 import ctypes
 import ctypes.util
@@ -57,17 +64,19 @@ _EVENT = struct.Struct("iIII")
 
 
 class LibraryWatcher:
-    def __init__(self, get_libraries, on_change, is_enabled):
-        """get_libraries() -> list of library dicts (id, paths); on_change(id, path)
-        -> bool; is_enabled() -> bool (switch in Settings)."""
+    def __init__(self, get_libraries, on_change, is_enabled, get_manga_dirs=None):
+        """get_libraries() -> list of library dicts (id, paths); on_change(id,
+        roots, path) -> bool; is_enabled() -> bool (switch in Settings);
+        get_manga_dirs(library_id) -> the library's recorded manga folders."""
         self.get_libraries = get_libraries
+        self.get_manga_dirs = get_manga_dirs or (lambda _lib_id: [])
         self.on_change = on_change
         self.is_enabled = is_enabled
         self.fd = -1
         self.libc = None
-        self.wds = {}     # wd -> (library_id, path, depth 0 = library path, 1 = manga folder)
+        self.wds = {}     # wd -> (library_id, path, depth 0 = library path, 1 = a folder in it)
         self.by_path = {}  # path -> wd
-        self.dirty = {}   # library_id -> [last event time, a changed path]
+        self.dirty = {}   # library_id -> [last event time, set of folders or None = all, a changed path]
         self.limit_warned = False
         self.status = "off"
 
@@ -129,6 +138,10 @@ class LibraryWatcher:
                                 wanted.setdefault(os.path.normpath(e.path), (lib.get("id"), 1))
                 except OSError:
                     pass
+            for d in self.get_manga_dirs(lib.get("id")):
+                d = os.path.normpath(d)
+                if d not in wanted and os.path.isdir(d):
+                    wanted[d] = (lib.get("id"), 1)
         return wanted
 
     def _sync(self):
@@ -143,10 +156,11 @@ class LibraryWatcher:
         if self.by_path:
             print(f"[Watch] Watching {len(self.by_path)} library and manga folders.")
 
-    @staticmethod
-    def _signature(libraries, enabled) -> tuple:
-        return (enabled,) + tuple(sorted((str(l.get("id")), tuple(l.get("paths", []) or []))
-                                         for l in libraries))
+    def _signature(self, libraries, enabled) -> tuple:
+        return (enabled,) + tuple(sorted(
+            (str(l.get("id")), tuple(l.get("paths", []) or []),
+             hash(frozenset(self.get_manga_dirs(l.get("id")))))
+            for l in libraries))
 
     # ── loop ──
     def _run(self):
@@ -184,7 +198,7 @@ class LibraryWatcher:
             if mask & IN_Q_OVERFLOW:
                 # Events were lost: every watched library may have changed.
                 for lib_id, _p, _d in set(self.wds.values()):
-                    self.dirty[lib_id] = [now, "(event queue overflow)"]
+                    self.dirty[lib_id] = [now, None, "(event queue overflow)"]
                 continue
             info = self.wds.get(wd)
             if info is None:
@@ -197,22 +211,35 @@ class LibraryWatcher:
                 continue
             if name and not mask & IN_ISDIR and _OWN_FILE_RE.match(name):
                 continue
-            full = os.path.join(path, name) if name else path
+            full = os.path.normpath(os.path.join(path, name) if name else path)
             if depth == 0 and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
-                self._add(os.path.normpath(full), lib_id, 1)  # a new manga folder
+                self._add(full, lib_id, 1)  # a new manga folder
             elif depth == 0 and mask & IN_ISDIR and mask & IN_MOVED_FROM:
-                self._remove(os.path.normpath(full))
-            self.dirty[lib_id] = [now, full]
+                self._remove(full)
+            if depth == 0:
+                # In a library path: the folder itself; a file there (or the
+                # library path itself going away) -> the whole library.
+                root = full if (mask & IN_ISDIR and name) else None
+            else:
+                root = path
+            entry = self.dirty.get(lib_id)
+            if entry is None:
+                self.dirty[lib_id] = [now, None if root is None else {root}, full]
+            else:
+                entry[0] = now
+                entry[2] = full
+                if entry[1] is not None:
+                    entry[1] = None if root is None else entry[1] | {root}
 
     def _flush(self):
         now = time.time()
-        for lib_id, (last, path) in list(self.dirty.items()):
+        for lib_id, (last, roots, path) in list(self.dirty.items()):
             if now - last < SETTLE_SECONDS:
                 continue
             if not self.is_enabled():
                 self.dirty.pop(lib_id, None)
                 continue
-            if self.on_change(lib_id, path):
+            if self.on_change(lib_id, roots, path):
                 self.dirty.pop(lib_id, None)
             else:
-                self.dirty[lib_id] = [now, path]  # busy: ask again after another settle
+                self.dirty[lib_id][0] = now  # busy: ask again after another settle

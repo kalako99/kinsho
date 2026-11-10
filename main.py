@@ -413,13 +413,17 @@ _scan_queued_ids: set = set()  # library_ids waiting in line OR actively running
 # library_id -> time it started waiting for a file transfer to finish (see
 # _library_recently_written); shown as phase "wait" at 0% in Settings.
 _scan_waiting: dict = {}
+# library_id -> set of folders to rescan, or None = the whole library (folder
+# watching asks for folders; every other trigger for the whole library).
+# Read and cleared by the worker when the scan starts.
+_scan_pending_roots: dict = {}
 # Held while run_scan() runs; "Save metadata to ComicInfo.xml" takes it too, so
 # it never writes into manga folders (and updates their saved folder dates)
 # in the middle of a scan.
 _scan_exec_lock = threading.Lock()
 
 
-def enqueue_library_scan(library_id: int, wait_for_quiet: bool = True) -> bool:
+def enqueue_library_scan(library_id: int, wait_for_quiet: bool = True, roots=None) -> bool:
     """Adds library_id to the shared scan queue unless it's already queued
     or running. Returns False for a no-op duplicate (several triggers for
     the same library collapse into a single run instead of queuing a
@@ -428,21 +432,32 @@ def enqueue_library_scan(library_id: int, wait_for_quiet: bool = True) -> bool:
     wait_for_quiet: hold the scan while files are still being copied into
     the library (manual Reload, automatic rescan, Save Libraries). False only
     for Kinsho's own follow-up scan after auto-extraction, whose fresh files
-    Kinsho wrote itself."""
+    Kinsho wrote itself.
+
+    roots: only these folders (folder watching); None = the whole library. A
+    library already waiting in line gets the folders added to its pending scan
+    (a whole-library request wins), and True is returned; while it is
+    scanning, False."""
     with _scan_queue_lock:
         if library_id in _scan_queued_ids:
-            return False
+            if library_id in _scan_running or library_id not in _scan_pending_roots:
+                return False
+            pending = _scan_pending_roots[library_id]
+            if pending is not None:
+                _scan_pending_roots[library_id] = None if roots is None else pending | set(roots)
+            return True
         _scan_queued_ids.add(library_id)
+        _scan_pending_roots[library_id] = None if roots is None else set(roots)
     _scan_queue.put((library_id, wait_for_quiet))
     return True
 
 
-def _scan_should_wait(library_id: int) -> str:
+def _scan_should_wait(library_id: int, roots=None) -> str:
     """"go" when the library is quiet, "wait" while it's being written to,
     "skip" after AUTOSCAN_MAX_WAIT_SECONDS of waiting (never scan mid-copy).
     Records the wait in _scan_waiting."""
     lib = next((l for l in load_app_data_cached().get("libraries", []) if l.get("id") == library_id), None)
-    busy = _library_recently_written(lib) if lib else None
+    busy = _library_recently_written(lib, roots) if lib else None
     if not busy:
         if _scan_waiting.pop(library_id, None) is not None:
             print(f"[ScanQueue] Library {library_id}: file transfer finished, scanning.")
@@ -471,7 +486,8 @@ def _scan_worker():
     while True:
         library_id, wait_for_quiet = _scan_queue.get()
         try:
-            decision = _scan_should_wait(library_id) if wait_for_quiet else "go"
+            decision = (_scan_should_wait(library_id, _scan_pending_roots.get(library_id))
+                        if wait_for_quiet else "go")
             if decision == "wait":
                 # Back of the line: other libraries scan meanwhile; when it's
                 # the only one waiting, recheck once a minute.
@@ -480,20 +496,28 @@ def _scan_worker():
                 _scan_queue.put((library_id, wait_for_quiet))
                 continue
             if decision == "go":
+                with _scan_queue_lock:
+                    # Marked running here, under the lock: a folder change
+                    # reported from now on is asked again after this scan.
+                    roots = _scan_pending_roots.pop(library_id, None)
+                    _scan_running.add(library_id)
                 with _scan_exec_lock:
-                    run_scan(library_id)
+                    run_scan(library_id, roots=roots)
         except Exception as e:
             print(f"[ScanQueue] library {library_id} raised: {e!r}")
             _scan_waiting.pop(library_id, None)
+            _scan_running.discard(library_id)
         finally:
             _scan_queue.task_done()
         with _scan_queue_lock:
             _scan_queued_ids.discard(library_id)
+            _scan_pending_roots.pop(library_id, None)
 
 # ── FOLDER WATCHING ──
-# library_watch.py reports a library whose folders changed (a new manga, a
-# new chapter/volume in a manga, 2026-11-10); it goes into the same scan queue
-# as a Reload, so the "wait until the copy has finished" rule applies.
+# library_watch.py reports the folders that changed in a library (a new manga,
+# a new chapter/volume in a manga, 2026-11-10); only those folders are
+# rescanned (run_scan roots), through the same scan queue as a Reload, so the
+# "wait until the copy has finished" rule applies (to those folders only).
 def _watch_folders_enabled() -> bool:
     return load_app_data_cached().get("watch_folders_enabled", True)
 
@@ -502,20 +526,31 @@ def _watch_libraries() -> list:
     return load_app_data_cached().get("libraries", [])
 
 
-def _watched_library_changed(library_id, path: str) -> bool:
-    """False = try again later (this library is scanning now, so a change made
-    after the scan walked past it would be missed)."""
+def _watch_manga_dirs(library_id) -> list:
+    """The library's recorded manga folders (nested manga included)."""
+    mangas = load_app_data_cached().get("manga_data", {}).get(str(library_id), {}).get("mangas", [])
+    # A manga that is one archive file has a file path; the watcher skips
+    # anything that isn't a folder.
+    return [m["path"] for m in mangas if m.get("path")]
+
+
+def _watched_library_changed(library_id, roots, path: str) -> bool:
+    """roots: folders to rescan, None = the whole library. False = try again
+    later (this library is scanning now, so a change made after the scan walked
+    past it would be missed)."""
     if library_id in _scan_running:
         return False
     if library_id in _extraction_running:
         return True  # auto-extraction queues its own follow-up scan
-    if enqueue_library_scan(library_id):
-        print(f"[Watch] Library {library_id} changed ({path}): scan queued.")
+    if not enqueue_library_scan(library_id, roots=roots):
+        return False
+    what = "whole library" if roots is None else f"{len(roots)} folder(s)"
+    print(f"[Watch] Library {library_id} changed ({path}): scan queued ({what}).")
     return True
 
 
 _library_watcher = library_watch.LibraryWatcher(
-    _watch_libraries, _watched_library_changed, _watch_folders_enabled)
+    _watch_libraries, _watched_library_changed, _watch_folders_enabled, _watch_manga_dirs)
 
 templates = Jinja2Templates(directory="templates")
 
@@ -2931,8 +2966,14 @@ def relocate_dims_paths(library_id: int, manga_name: str, old_manga_path: str, n
 
         save_manga_dims(library_id, manga_name, dims)
 
-def scan_library(library: dict, progress_cb=None) -> tuple:
+def scan_library(library: dict, progress_cb=None, roots=None) -> tuple:
     """Returns (mangas, comicinfo_changed, pending_extractions) —
+
+    roots (2026-11-10, folder watching): rescan only these folders (manga
+    folders, or a new/removed folder in a library path) instead of the whole
+    library: the walks start there, only manga under them are rescanned or
+    removed, and every other manga is returned unchanged from data.json. A root
+    that no longer exists removes the manga that were under it.
     comicinfo_changed is True if any manga's genres/tags were filled in from
     ComicInfo.xml during this scan, telling the caller to rebuild
     all_tags/all_genres once manga_data is saved. pending_extractions is a
@@ -2969,6 +3010,20 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
         if progress_cb:
             progress_cb(_scan_processed, _scan_total)
     existing_by_id = {m["id"]: m for m in existing_mangas if "id" in m}
+
+    # Where the walks start: the library paths, or only the given roots.
+    if roots is not None:
+        roots = [os.path.normpath(r) for r in roots]
+        walk_roots = [r for r in roots if os.path.isdir(r)]
+        _scan_total = max(len(roots), 1)
+    else:
+        walk_roots = lib_paths
+
+    def _under_roots(path: str) -> bool:
+        if roots is None:
+            return True
+        path = os.path.normpath(path or "")
+        return any(path == r or path.startswith(r + os.sep) for r in roots)
 
     # ── PASS 1: loose folders (recursive classification) ──
     # We do a single os.walk and for every folder that _classify_loose_folder
@@ -3496,13 +3551,17 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 continue
             for entry in children:
                 manga_path = entry.path
+                if roots is not None and not any(
+                        os.path.normpath(manga_path) == r or r.startswith(os.path.normpath(manga_path) + os.sep)
+                        for r in roots):
+                    continue
                 classification = _classify_loose_folder(manga_path)
                 if classification["is_manga"]:
                     _register_loose_manga(manga_path, classification)
                 else:
                     _register_oneshot_manga(manga_path)
 
-    for lib_path in lib_paths:
+    for lib_path in walk_roots:
         for dirpath, dirnames, filenames in os.walk(lib_path):
             dirnames.sort(key=natural_sort_key)
             if library.get("flat_scan"):
@@ -3517,7 +3576,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
             # _loose_registered prevents double-processing.
 
     # ── PASS 2: scan folders for archive/pdf/epub files ──
-    for lib_path in lib_paths:
+    for lib_path in walk_roots:
         for dirpath, dirnames, filenames in os.walk(lib_path):
             dirnames.sort(key=natural_sort_key)
             if library.get("flat_scan"):
@@ -3927,7 +3986,7 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
     found_ids = {m["id"] for m in mangas.values()}
     covers_dir = get_covers_dir()
     for manga_id, existing_manga in existing_by_id.items():
-        if manga_id not in found_ids:
+        if manga_id not in found_ids and _under_roots(existing_manga.get("path", "")):
             print(f"[ScanLib] Manga deleted: {existing_manga['name']}")
             if covers_dir:
                 manga_covers_dir = os.path.join(covers_dir, str(library_id), existing_manga["name"])
@@ -3999,6 +4058,10 @@ def scan_library(library: dict, progress_cb=None) -> tuple:
                 save_manga_dims(library_id, manga_name, dims)
 
     result = list(mangas.values())
+    if roots is not None:
+        # Every manga outside the rescanned folders stays exactly as it was.
+        result += [m for m in existing_mangas
+                   if m.get("id") not in found_ids and not _under_roots(m.get("path", ""))]
     result.sort(key=lambda m: natural_sort_key(m["name"]))
     print(f"[ScanLib] Total mangas found: {len(result)}")
     if pending_extractions:
@@ -4021,10 +4084,11 @@ AUTOSCAN_QUIET_SECONDS  = 3 * 60
 AUTOSCAN_RECHECK_SECONDS = 60
 AUTOSCAN_MAX_WAIT_SECONDS = 6 * 60 * 60
 
-def _library_recently_written(lib: dict) -> str | None:
-    """The first path found changed in the last AUTOSCAN_QUIET_SECONDS, or None."""
+def _library_recently_written(lib: dict, roots=None) -> str | None:
+    """The first path found changed in the last AUTOSCAN_QUIET_SECONDS, or None.
+    roots: look only inside these folders (a folder scan), not the whole library."""
     now = time.time()
-    for root_path in lib.get("paths", []):
+    for root_path in (roots if roots is not None else lib.get("paths", [])):
         if not root_path or not os.path.isdir(root_path):
             continue
         for dirpath, _dirnames, filenames in os.walk(root_path):
@@ -4804,10 +4868,15 @@ def run_auto_extraction(library_id: int, pending_paths: list):
         _extraction_running.discard(library_id)
 
 
-def run_scan(library_id: int):
+def run_scan(library_id: int, roots=None):
+    """roots: rescan only these folders (folder watching, see scan_library);
+    None = the whole library."""
     _scan_running.add(library_id)
     _scan_progress[library_id] = {"processed": 0, "total": 1}
-    print(f"[Scan] Starting scan for library {library_id}...")
+    if roots is not None:
+        print(f"[Scan] Starting scan of {len(roots)} folder(s) in library {library_id}: {sorted(roots)[:5]}")
+    else:
+        print(f"[Scan] Starting scan for library {library_id}...")
     data = load_app_data()
     libraries = data.get("libraries", [])
     lib = next((l for l in libraries if l["id"] == library_id), None)
@@ -4828,8 +4897,16 @@ def run_scan(library_id: int):
         _scan_progress[library_id] = {"processed": processed, "total": total}
 
     try:
-        auto_organize_library_root(lib)
-        mangas, comicinfo_changed, pending_extractions = scan_library(lib, progress_cb=_progress_cb)
+        if roots is not None and not all(os.path.isdir(p) for p in raw_paths if p):
+            # A missing library path (drive not mounted) would look like
+            # "everything under these folders was deleted".
+            print(f"[Scan] Library {library_id}: a library path is unreachable -- folder scan skipped.")
+            _scan_running.discard(library_id)
+            _scan_progress.pop(library_id, None)
+            return
+        if roots is None:
+            auto_organize_library_root(lib)
+        mangas, comicinfo_changed, pending_extractions = scan_library(lib, progress_cb=_progress_cb, roots=roots)
     except Exception as e:
         # A single manga/folder that scan_library's own per-manga resilience
         # doesn't already catch (see _safe_load_manga_dims) shouldn't leave
