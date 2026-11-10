@@ -265,6 +265,9 @@ createApp({
       // ── AUTO-RESCAN + SCAN ACTIVITY (admin) ──
       autoRescanEnabled: true,
       autoRescanStatus:  { msg: '', type: '' },
+      watchFoldersEnabled: true,
+      watchFoldersStatus:  '',
+      watchFoldersSave:    { msg: '', type: '' },
       googleBooksKey:    '',
       googleBooksKeySet: false,
       googleBooksStatus: { msg: '', type: '' },
@@ -646,6 +649,8 @@ createApp({
         this.hideAdminCollections   = data.hide_admin_collections   === true;
         if (data.metadata_fetch_sources) this.metadataSources = { ...data.metadata_fetch_sources };
         this.autoRescanEnabled      = data.auto_rescan_enabled      !== false;
+        this.watchFoldersEnabled    = data.watch_folders_enabled    !== false;
+        this.watchFoldersStatus     = data.watch_folders_status ? 'Now: ' + data.watch_folders_status : '';
         this.googleBooksKeySet      = !!data.google_books_key_set;
         this.localAssetsAvailable   = !!data.local_assets_available;
         this.activeVisualTheme      = data.active_visual_theme      || 'default';
@@ -777,6 +782,24 @@ createApp({
         this.autoRescanStatus = { msg: 'Failed to save.', type: 'err' };
       }
       setTimeout(() => { this.autoRescanStatus = { msg: '', type: '' }; }, 3000);
+    },
+
+    // Folder watching (library_watch.py): a change in a library or manga
+    // folder queues that library's scan.
+    async saveWatchFolders() {
+      try {
+        const r = await fetch(apiUrl('/api/admin/settings/watch-folders'), {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: this.watchFoldersEnabled }),
+        });
+        if (!r.ok) throw new Error(r.status);
+        this.watchFoldersSave = { msg: '✓ Saved.', type: 'ok' };
+        this.watchFoldersStatus = '';
+      } catch (e) {
+        this.watchFoldersSave = { msg: 'Failed to save.', type: 'err' };
+      }
+      setTimeout(() => { this.watchFoldersSave = { msg: '', type: '' }; }, 3000);
     },
 
     // ── SCAN ACTIVITY (any library currently scanning, with progress) ──

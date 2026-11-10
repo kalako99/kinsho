@@ -29,6 +29,7 @@ from urllib.parse import quote, urlparse
 import auth
 import httpx
 import metadata_fetch
+import library_watch
 import opds
 import comicinfo
 import integrity
@@ -99,6 +100,7 @@ async def lifespan(app):
     ip = get_local_ip()
     print(f"\n  Kinsho running at: http://{ip}:8000\n")
     threading.Thread(target=_scan_worker, daemon=True).start()
+    _library_watcher.start()
     debug_log.start_sampler()
     task = asyncio.create_task(periodic_library_rescan())
     integrity_task = asyncio.create_task(run_integrity_check_loop())
@@ -487,6 +489,33 @@ def _scan_worker():
             _scan_queue.task_done()
         with _scan_queue_lock:
             _scan_queued_ids.discard(library_id)
+
+# ── FOLDER WATCHING ──
+# library_watch.py reports a library whose folders changed (a new manga, a
+# new chapter/volume in a manga, 2026-11-10); it goes into the same scan queue
+# as a Reload, so the "wait until the copy has finished" rule applies.
+def _watch_folders_enabled() -> bool:
+    return load_app_data_cached().get("watch_folders_enabled", True)
+
+
+def _watch_libraries() -> list:
+    return load_app_data_cached().get("libraries", [])
+
+
+def _watched_library_changed(library_id, path: str) -> bool:
+    """False = try again later (this library is scanning now, so a change made
+    after the scan walked past it would be missed)."""
+    if library_id in _scan_running:
+        return False
+    if library_id in _extraction_running:
+        return True  # auto-extraction queues its own follow-up scan
+    if enqueue_library_scan(library_id):
+        print(f"[Watch] Library {library_id} changed ({path}): scan queued.")
+    return True
+
+
+_library_watcher = library_watch.LibraryWatcher(
+    _watch_libraries, _watched_library_changed, _watch_folders_enabled)
 
 templates = Jinja2Templates(directory="templates")
 
@@ -4940,6 +4969,8 @@ def get_settings(request: Request):
         "metadata_fetch_priority":  data.get("metadata_fetch_priority", "anilist"),
         "metadata_fetch_sources":   _metadata_sources(data),
         "auto_rescan_enabled":      data.get("auto_rescan_enabled", True),
+        "watch_folders_enabled":    data.get("watch_folders_enabled", True),
+        "watch_folders_status":     _library_watcher.status,
         "google_books_key_set":     bool(data.get("google_books_api_key")),
         "local_assets_available":   local_assets_available(),
     })
@@ -4980,6 +5011,20 @@ async def set_auto_rescan(request: Request):
     body = await request.json()
     data = load_app_data()
     data["auto_rescan_enabled"] = bool(body.get("enabled", True))
+    save_app_data(data)
+    return JSONResponse({"ok": True})
+
+@app.post("/api/admin/settings/watch-folders")
+async def set_watch_folders(request: Request):
+    """Admin-only switch for folder watching (library_watch.py): a change in a
+    library or manga folder queues that library's scan. Off removes every watch
+    within a few seconds."""
+    err = auth.require_admin(request)
+    if err:
+        return err
+    body = await request.json()
+    data = load_app_data()
+    data["watch_folders_enabled"] = bool(body.get("enabled", True))
     save_app_data(data)
     return JSONResponse({"ok": True})
 

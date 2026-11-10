@@ -850,6 +850,12 @@
         <input type="checkbox" v-model="autoRescanEnabled" @change="saveAutoRescan" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
       </div>
       <div class="status-msg" :class="autoRescanStatus.type" v-text="autoRescanStatus.msg" style="min-height:0; margin:4px 0 0;"></div>
+      <div class="field-row" style="align-items:center; justify-content:space-between; margin-top:10px;">
+        <span style="font-size:0.85rem;">Watch folders for changes <span class="info-tip" tabindex="0" role="button" aria-label="What is this?" data-tip="KINSHO watches each library folder and the manga folders inside it. When a manga, chapter or volume is added, renamed or removed, that library is scanned by itself, once the copy has finished (about 3 minutes after the last file arrives). Changes inside a chapter folder still need a Reload scan."><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="11" x2="12" y2="16.5"/><circle cx="12" cy="7.6" r="0.9" fill="currentColor" stroke="none"/></svg></span></span>
+        <input type="checkbox" v-model="watchFoldersEnabled" @change="saveWatchFolders" style="width:18px; height:18px; cursor:pointer; accent-color:var(--color-primary,#e94560);">
+      </div>
+      <div style="font-size:0.75rem; color:var(--color-muted); margin-top:2px;" v-text="watchFoldersStatus"></div>
+      <div class="status-msg" :class="watchFoldersSave.type" v-text="watchFoldersSave.msg" style="min-height:0; margin:4px 0 0;"></div>
       </template>
 
       <div v-if="scanActivity.scanning" :style="{ marginTop: isAdmin ? '14px' : '0' }">
