@@ -18,6 +18,7 @@ returns False (that library is scanning right now) it is asked again later.
 import ctypes
 import ctypes.util
 import os
+import re
 import select
 import struct
 import threading
@@ -41,8 +42,16 @@ WATCH_MASK = (IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELE
 SETTLE_SECONDS = 30          # quiet time before a library's changes are handed on
 FULL_SYNC_SECONDS = 30 * 60  # re-list manga folders now and then (missed adds/moves)
 
-# Files Kinsho writes into manga folders itself (Save metadata to ComicInfo.xml).
-_OWN_FILES = {"ComicInfo.xml", ".ComicInfo.xml.kinsho-tmp"}
+# Files Kinsho writes into manga folders itself: Save metadata to ComicInfo.xml,
+# and a Fetch Metadata cover (main.fetch_and_set_cover: "{provider}_{id}.ext",
+# written through ".{name}.kinsho-tmp"; also deleted from the cover picker).
+# Neither needs a scan: both move the manga's saved folder date along, so Last
+# Updated doesn't change, and skipping them saves a whole-library scan per fetch.
+_OWN_FILE_RE = re.compile(
+    r"^(?:ComicInfo\.xml"
+    r"|\..*\.kinsho-tmp"
+    r"|(?:(?:anilist|mangadex|mangaupdates|googlebooks|openlibrary)_[A-Za-z0-9_-]+|metadata_cover_\d+)"
+    r"\.(?:jpg|jpeg|png|webp))$")
 
 _EVENT = struct.Struct("iIII")
 
@@ -186,7 +195,7 @@ class LibraryWatcher:
                 if self.by_path.get(path) == wd:
                     self.by_path.pop(path, None)
                 continue
-            if name in _OWN_FILES:
+            if name and not mask & IN_ISDIR and _OWN_FILE_RE.match(name):
                 continue
             full = os.path.join(path, name) if name else path
             if depth == 0 and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
