@@ -368,6 +368,45 @@ def tick_reading_session(username: str):
         data["reading_sessions"] = sessions
         save_user_data(username, data)
 
+def record_reading_time(username: str, entries: list) -> int:
+    """Reading time reported by an app, one entry per reading session of the app: {sid, start, manga_name, library_id, seconds}.
+    `seconds` is the session's running TOTAL, not an addition: the session's minutes are set to the larger of the stored and
+    the reported total, so a resend (lost answer, offline for days) never counts twice and never loses time. The session keeps
+    the app's own start time, so late reports still land on the day they were read. Returns how many entries were taken."""
+    data     = load_user_data(username)
+    sessions = data.get("reading_sessions", [])
+    by_sid   = {s.get("sid"): s for s in sessions if s.get("sid")}
+    taken    = 0
+    for e in entries[:100]:
+        try:
+            sid  = str(e["sid"])[:40]
+            secs = max(0, min(int(float(e.get("seconds", 0))), 86400))
+            start = datetime.fromisoformat(str(e["start"]).replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            start = start.astimezone(timezone.utc).isoformat(timespec="seconds")
+        except Exception:
+            continue
+        if not sid:
+            continue
+        s = by_sid.get(sid)
+        if s is None:
+            if secs <= 0:
+                taken += 1
+                continue
+            s = {"start": start, "manga_name": str(e.get("manga_name") or "Unknown"), "library_id": str(e.get("library_id", "")),
+                 "minutes": 0, "sid": sid}
+            sessions.append(s)
+            by_sid[sid] = s
+        if secs > int(s.get("seconds", 0)):
+            s["seconds"] = secs
+        s["minutes"] = max(int(s.get("minutes", 0)), (int(s.get("seconds", 0)) + 30) // 60)
+        taken += 1
+    sessions.sort(key=lambda s: s.get("start", ""))
+    data["reading_sessions"] = sessions
+    save_user_data(username, data)
+    return taken
+
 # ── PERMISSIONS ──────────────────────────────────────────────────────────────
 
 def _permissions_file() -> Optional[str]:

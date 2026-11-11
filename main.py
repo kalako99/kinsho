@@ -9698,6 +9698,19 @@ async def reading_session_tick(request: Request):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/reading/time-log")
+async def reading_time_log(request: Request):
+    """The apps' reading time: running totals per session id (see auth.record_reading_time). Safe to resend."""
+    username = auth.get_current_user(request)
+    if not username:
+        return JSONResponse({"ok": False, "error": "Not authenticated"}, status_code=401)
+    body = await request.json()
+    entries = body.get("entries", [])
+    if not isinstance(entries, list):
+        return JSONResponse({"ok": False, "error": "entries must be a list"}, status_code=400)
+    return JSONResponse({"ok": True, "taken": auth.record_reading_time(username, entries)})
+
+
 @app.get("/api/reading/stats")
 def reading_stats_route(request: Request, manga_name: str = None, user: str = None):
     requester = auth.get_current_user(request)
