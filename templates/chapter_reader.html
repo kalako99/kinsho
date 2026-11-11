@@ -131,6 +131,18 @@
     .scroller-status.scanning  { color: #e0a030; }
     .scroller-status.connected { color: #4caf50; }
     .scroller-status.error     { color: #e94560; }
+    .scroller-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .scroller-gear { display: none; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; cursor: pointer;
+      background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; color: #ccc; }
+    .scroller-gear.on { color: var(--theme-primary, #e94560); border-color: var(--theme-primary, #e94560); }
+    .scroller-tune { display: none; flex-direction: column; gap: 11px; width: 270px; padding: 10px 4px 2px; margin-top: 2px; border-top: 1px solid rgba(255,255,255,0.09); }
+    .scroller-tune.open { display: flex; }
+    .sc-line { display: flex; justify-content: space-between; font-family: 'Segoe UI', sans-serif; font-size: 0.76rem; color: #ddd; }
+    .sc-line b { color: #fff; font-weight: 600; }
+    .sc-hint { font-family: 'Segoe UI', sans-serif; font-size: 0.66rem; color: #777; margin-top: 2px; }
+    .sc-range { width: 100%; accent-color: var(--theme-primary, #e94560); }
+    .sc-reset { align-self: flex-start; background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; color: #ccc;
+      font-family: 'Segoe UI', sans-serif; font-size: 0.74rem; padding: 6px 12px; cursor: pointer; }
 
     /*
      * ── READER (CONVEYOR BELT) ──
@@ -1347,7 +1359,30 @@
 <!-- Scroller connect popup -->
 <div class="scroller-panel" id="scrollerPanel">
   <div class="scroller-panel-title">Scroller Device</div>
-  <div class="scroller-status" id="scrollerStatusText">Not connected</div>
+  <div class="scroller-row">
+    <div class="scroller-status" id="scrollerStatusText">Not connected</div>
+    <button type="button" class="scroller-gear" id="scrollerGearBtn" aria-label="Scroller settings" title="Scroller settings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </div>
+  <div class="scroller-tune" id="scrollerTune">
+    <div>
+      <div class="sc-line"><span>Sensitivity</span><b id="scSensVal">100%</b></div>
+      <input class="sc-range" type="range" id="scSens" min="25" max="300" step="5" value="100">
+      <div class="sc-hint">How far the page moves for the same turn of the wheel.</div>
+    </div>
+    <div>
+      <div class="sc-line"><span>Acceleration</span><b id="scAccelVal">100%</b></div>
+      <input class="sc-range" type="range" id="scAccel" min="20" max="400" step="5" value="100">
+      <div class="sc-hint">How fast the speed follows the wheel. Lower = softer starts and stops.</div>
+    </div>
+    <div>
+      <div class="sc-line"><span>Smoothing</span><b id="scSmoothVal">off</b></div>
+      <input class="sc-range" type="range" id="scSmooth" min="0" max="500" step="10" value="0">
+      <div class="sc-hint">Evens out a jittery wheel; adds a little lag.</div>
+    </div>
+    <button type="button" class="sc-reset" id="scReset">Reset to default</button>
+  </div>
   <button class="bm-panel-btn" id="scrollerConnectBtn">Connect</button>
   <button class="bm-panel-btn" id="scrollerDisconnectBtn" style="display:none">Disconnect</button>
 </div>
@@ -7534,6 +7569,33 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     let kinshoLastRateTime = 0;  // performance.now() of the last notification received
     let kinshoScrollPos    = null;  // fractional mirror of reader.scrollTop while kinsho is actively driving it; null when idle
 
+      // ── scroller feel: sensitivity / acceleration / smoothing (the gear shows only while a scroller is connected) ──
+      const SC_DEF = { sens: 100, accel: 100, smooth: 0 };
+      let scSet = Object.assign({}, SC_DEF);
+      try { Object.assign(scSet, JSON.parse(window.KinshoBLE.getScrollSettings())); } catch (e) {}   // the app's saved feel (older app: defaults)
+      const scStoreSettings = () => { try { window.KinshoBLE.setScrollSettings(JSON.stringify(scSet)); } catch (e) {} };
+      const scEls = { sens: document.getElementById('scSens'), accel: document.getElementById('scAccel'), smooth: document.getElementById('scSmooth') };
+      const scVals = { sens: document.getElementById('scSensVal'), accel: document.getElementById('scAccelVal'), smooth: document.getElementById('scSmoothVal') };
+      const scText = (k, v) => (k === 'smooth' ? (v > 0 ? v + ' ms' : 'off') : v + '%');
+      function scFill() { for (const k of Object.keys(scEls)) { scEls[k].value = scSet[k]; scVals[k].textContent = scText(k, scSet[k]); } }
+      for (const k of Object.keys(scEls)) {
+        scEls[k].addEventListener('input', () => { scVals[k].textContent = scText(k, +scEls[k].value); });
+        scEls[k].addEventListener('change', () => { scSet[k] = +scEls[k].value; scStoreSettings(); });
+      }
+      document.getElementById('scReset').addEventListener('click', () => { scSet = Object.assign({}, SC_DEF); scFill(); scStoreSettings(); });
+      document.getElementById('scrollerGearBtn').addEventListener('click', e => {
+        e.stopPropagation();
+        const open = !document.getElementById('scrollerTune').classList.contains('open');
+        document.getElementById('scrollerTune').classList.toggle('open', open);
+        document.getElementById('scrollerGearBtn').classList.toggle('on', open);
+        (0);
+      });
+      function scConnected(on) {
+        document.getElementById('scrollerGearBtn').style.display = on ? 'flex' : 'none';
+        if (!on) { document.getElementById('scrollerTune').classList.remove('open'); document.getElementById('scrollerGearBtn').classList.remove('on'); }
+      }
+    scFill();
+
     function scrollerSetStatus(cssClass, text) {
       scrollerStatusText.className = 'scroller-status' + (cssClass ? ' ' + cssClass : '');
       scrollerStatusText.textContent = text;
@@ -7557,6 +7619,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
           scrollerSetStatus('connected', 'Connected');
           scrollerConnectBtn.style.display = 'none';
           scrollerDisconnectBtn.style.display = '';
+          scConnected(true);
           localStorage.setItem(KINSHO_AUTOCONNECT_KEY, '1');
           // Close the popup once a connection actually succeeds -- the user
           // opened it to connect, not to keep watching it; the small topbar
@@ -7571,12 +7634,14 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
           scrollerSetStatus('', 'Not connected');
           scrollerConnectBtn.style.display = '';
           scrollerDisconnectBtn.style.display = 'none';
+          scConnected(false);
           kinshoRate = 0;
         } else if (state.startsWith('error:')) {
           const reason = state.slice(6);
           scrollerSetStatus('error', KINSHO_ERROR_MESSAGES[reason] || ('Error: ' + reason));
           scrollerConnectBtn.style.display = '';
           scrollerDisconnectBtn.style.display = 'none';
+          scConnected(false);
           kinshoRate = 0;
         }
       };
@@ -7620,6 +7685,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
         scrollerSetStatus('connected', 'Connected');
         scrollerConnectBtn.style.display = 'none';
         scrollerDisconnectBtn.style.display = '';
+        scConnected(true);
       } else if (localStorage.getItem(KINSHO_AUTOCONNECT_KEY) === '1') {
         window.KinshoBLE.connect();
       }
@@ -7644,6 +7710,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       // kinks. See CLAUDE.md's scroller tuning table for what to adjust if
       // this still isn't smooth enough, or feels laggy to respond.
       let kinshoDisplayRate = 0;
+      let kinshoFilt = 0;   // the smoothing filter's output
       // notches/sec² — how fast the displayed speed can ramp up/down. kinshoRate/
       // kinshoDisplayRate are in raw 1/120-notch units (KINSHO_UNITS_PER_NOTCH), so
       // this gets multiplied by that factor below before comparing against them —
@@ -7683,10 +7750,19 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
         // percentage-of-gap exponential chase) — also gives a real BLE
         // disconnect (kinshoRate forced to 0 above) a smooth, bounded-time
         // decel to a stop instead of an abrupt freeze.
-        const rateDiff  = kinshoRate - kinshoDisplayRate;
-        const maxChange = KINSHO_MAX_ACCEL * KINSHO_UNITS_PER_NOTCH * dt;
+        // Scroller feel (popup gear): smoothing = an extra low-pass on the incoming rate (0 = off), before the ramp.
+        let kinshoTarget = kinshoRate;
+        if (scSet.smooth > 0) {
+          kinshoFilt += (kinshoRate - kinshoFilt) * (1 - Math.exp(-dt * 1000 / scSet.smooth));
+          if (kinshoRate === 0 && Math.abs(kinshoFilt) < 1) kinshoFilt = 0;
+          kinshoTarget = kinshoFilt;
+        } else {
+          kinshoFilt = kinshoRate;
+        }
+        const rateDiff  = kinshoTarget - kinshoDisplayRate;
+        const maxChange = KINSHO_MAX_ACCEL * (scSet.accel / 100) * KINSHO_UNITS_PER_NOTCH * dt;
         if (Math.abs(rateDiff) <= maxChange) {
-          kinshoDisplayRate = kinshoRate;
+          kinshoDisplayRate = kinshoTarget;
         } else {
           kinshoDisplayRate += Math.sign(rateDiff) * maxChange;
         }
@@ -7703,7 +7779,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
           if (kinshoScrollPos === null || Math.abs(reader.scrollTop - kinshoScrollPos) > 3) {
             kinshoScrollPos = reader.scrollTop;
           }
-          const pxPerSec = (kinshoDisplayRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH;
+          const pxPerSec = (kinshoDisplayRate / KINSHO_UNITS_PER_NOTCH) * KINSHO_PX_PER_NOTCH * (scSet.sens / 100);
           kinshoScrollPos += pxPerSec * dt;
           // A fractional assignment here (not whole-pixel accumulation) is
           // what makes slow scrolling glide instead of stutter — at low
@@ -7717,7 +7793,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
           kinshoScrollPos = null;
         }
 
-        if ((kinshoRate === 0 && kinshoDisplayRate === 0) || readerSettings.mode !== 'long-strip') {
+        if ((kinshoRate === 0 && kinshoDisplayRate === 0 && kinshoFilt === 0) || readerSettings.mode !== 'long-strip') {
           kinshoLoopRunning = false;
           window.__kinshoBleMoving = false;
           kinshoScrollPos = null;
