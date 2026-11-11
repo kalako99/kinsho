@@ -12,6 +12,7 @@ import time
 import random
 import shutil
 import zipfile
+import tempfile
 import io
 import uuid
 import secrets
@@ -9335,6 +9336,54 @@ def get_chapter_pages(request: Request, library_id: int, manga_id: str, chapter_
         )
         pages = [f"{base_url}/{fname}" for fname in files]
         return JSONResponse({"pages": pages, "count": len(pages)})
+
+# OFFLINE DOWNLOAD: a chapter or volume as ONE stored ZIP (pages 0001.ext, 0002.ext...), for the Android app's
+# tablet library. The pages come from the same page routes the readers use, so archives, loose folders, PDF and EPUB
+# all work; the app keeps the result as a CBZ. Feature map: CLAUDE.md.
+def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id: str, volume: bool):
+    kind_pages = get_volume_pages if volume else get_chapter_pages
+    page_fn = get_volume_page if volume else get_chapter_page
+    listing = kind_pages(request, library_id, manga_id, unit_id)
+    if getattr(listing, "status_code", 200) != 200:
+        return listing
+    count = json.loads(listing.body).get("count", 0)
+    if not count:
+        return JSONResponse({"error": "No pages"}, status_code=404)
+    tmp = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
+    ext_of = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif"}
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+        for i in range(count):
+            r = page_fn(request, library_id, manga_id, unit_id, str(i))
+            if getattr(r, "status_code", 200) != 200:
+                return JSONResponse({"error": "Page %d failed" % i}, status_code=502)
+            if hasattr(r, "path"):
+                with open(r.path, "rb") as f:
+                    data = f.read()
+            else:
+                data = r.body
+            z.writestr("%04d.%s" % (i + 1, ext_of.get(r.media_type, "jpg")), data)
+    size = tmp.tell()
+    tmp.seek(0)
+
+    def gen():
+        try:
+            while True:
+                b = tmp.read(1 << 20)
+                if not b:
+                    break
+                yield b
+        finally:
+            tmp.close()
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(gen(), media_type="application/zip", headers={"Content-Length": str(size), "X-Page-Count": str(count)})
+
+@app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/download")
+def download_chapter(request: Request, library_id: int, manga_id: str, chapter_id: str):
+    return _unit_zip_response(request, library_id, manga_id, chapter_id, False)
+
+@app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/download")
+def download_volume(request: Request, library_id: int, manga_id: str, volume_id: str):
+    return _unit_zip_response(request, library_id, manga_id, volume_id, True)
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
 def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str, scale: float = 1.5):
