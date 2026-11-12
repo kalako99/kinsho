@@ -8513,6 +8513,48 @@ def _reading_timing_summary(dims: dict, entry: dict, is_volume_manga: bool, comp
         "last_read":          last_read,
     }
 
+# A read that started in one place and went on in another (2026-11-12): read on the web, then continued offline on the app, whose
+# copy of the chapter has none of the web's page times (no sync yet) -- the user skims from the first page to where they were, so the
+# app's times for those pages are tiny. Rules (the user's spec):
+#  - the pages' times of the other device are merged in (the per-page maximum): from the read in progress the server holds
+#    (reads) and from the half an overwrite of it kept aside (side_reads, see post_reads);
+#  - a read that still opens with a run of skimmed pages (>= READ_TIME_PLACE_MIN pages and >= READ_TIME_PLACE_SHARE of the chapter)
+#    was skimming to find the place: it never counts toward the average (the average comes from the first full read);
+#  - a read that needed the other device's times (half and half) counts only when its total is within READ_TIME_HALF_TOLERANCE of
+#    this manga's average per chapter/volume (the mean of the OTHER units' averages); no average yet, or too far off: not counted.
+READ_TIME_PLACE_MIN       = 3
+READ_TIME_PLACE_SHARE     = 0.15
+READ_TIME_HALF_TOLERANCE  = 0.25
+SIDE_READS_KEEP_DAYS      = 30
+
+def _numeric_times(src) -> dict:
+    """{page index: seconds} from a read state's t map (keys are strings)."""
+    out = {}
+    for k, v in (src or {}).items():
+        try:
+            i = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
+            out[i] = float(v)
+    return out
+
+def _stash_other_half(entry: dict, cid: str, old: dict, new: dict):
+    """post_reads is about to replace `old` by `new`: pages that `old` really read (>= the skim time) and `new` only skimmed or never
+    timed are the other device's half: kept aside for the chapter-time report."""
+    old_t, new_t = _numeric_times(old.get("t")), _numeric_times(new.get("t"))
+    extra = {i: v for i, v in old_t.items() if v >= READ_TIME_SKIM_SECS and new_t.get(i, 0.0) < READ_TIME_SKIM_SECS}
+    if not extra:
+        return
+    side = entry.setdefault("side_reads", {})
+    cur = side.setdefault(cid, {"t": {}})
+    for i, v in extra.items():
+        cur["t"][str(i)] = max(float(cur["t"].get(str(i), 0)), v)
+    cur["u"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    limit = (datetime.now(timezone.utc) - timedelta(days=SIDE_READS_KEEP_DAYS)).isoformat(timespec="seconds")
+    for k in [k for k, v in side.items() if (v.get("u") or "") < limit]:
+        side.pop(k, None)
+
 @app.post("/api/reading/chapter-time")
 async def post_chapter_time(request: Request):
     username = auth.get_current_user(request)
@@ -8541,14 +8583,45 @@ async def post_chapter_time(request: Request):
         return JSONResponse({"ok": False, "reason": "page count mismatch"})
 
     n = len(times)
-    timed = [i for i in range(n) if i in paused or isinstance(times[i], (int, float))]
-    if len(timed) < READ_TIME_MIN_COVERAGE * n:
-        return JSONResponse({"ok": False, "reason": "incomplete", "timed": len(timed), "pages": n})
-
     user_data = auth.load_user_data(username)
     entry = user_data.get("reading_history", {}).get(str(library_id), {}).get(manga_id)
     if entry is None:
         return JSONResponse({"ok": False, "reason": "no reading history"})
+    # The other device's page times (see "A read that started in one place" above): where this report skimmed or never timed a page
+    # that the held read in progress / the half kept aside really read, take their time.
+    times = list(times)
+    held = (entry.get("reads") or {}).get(unit_id) or {}
+    side = (entry.get("side_reads") or {}).get(unit_id) or {}
+    other = {}
+    for src in (held.get("t"), side.get("t")):
+        for i, v in _numeric_times(src).items():
+            if i < n:
+                other[i] = max(other.get(i, 0.0), v)
+    composite = False
+    for i, v in other.items():
+        mine = times[i] if isinstance(times[i], (int, float)) and not isinstance(times[i], bool) else None
+        if v >= READ_TIME_SKIM_SECS and (mine is None or mine < READ_TIME_SKIM_SECS):
+            times[i] = v
+            paused.discard(i)
+            composite = True
+    for src in (held.get("p"), side.get("p")):
+        for k in (src or {}):
+            try:
+                j = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= j < n and not isinstance(times[j], (int, float)):
+                paused.add(j)
+    side_used = bool((entry.get("side_reads") or {}).pop(unit_id, None))
+
+    def _reject(reason, **more):
+        if side_used:
+            auth.save_user_data(username, user_data)       # the half kept aside is used up
+        return JSONResponse({"ok": False, "reason": reason, **more})
+
+    timed = [i for i in range(n) if i in paused or isinstance(times[i], (int, float))]
+    if len(timed) < READ_TIME_MIN_COVERAGE * n:
+        return _reject("incomplete", timed=len(timed), pages=n)
     # report_id: the reader resends a report whose answer it never got, so
     # one that already counted must not count twice.
     report_id = body.get("report_id")
@@ -8560,6 +8633,14 @@ async def post_chapter_time(request: Request):
     judged_times = [max(0.0, float(times[i])) for i in judged]
     weights = _page_weights(unit.get("pages") or [])  # a joined spread = 2 pages
     judged_weight = sum(weights[i] for i in judged)
+    lead = 0                                                 # leading run of skimmed pages: the user was looking for their place
+    for i in range(n):
+        if i in judged and float(times[i]) < READ_TIME_SKIM_SECS * weights[i]:
+            lead += weights[i]
+        else:
+            break
+    if lead >= max(READ_TIME_PLACE_MIN, READ_TIME_PLACE_SHARE * sum(weights)):
+        return _reject("place-finding", lead=lead, pages=n)
     if judged:
         fast = sum(weights[i] for i, t in zip(judged, judged_times) if t < READ_TIME_SKIM_SECS * weights[i])
         if fast > READ_TIME_MAX_SKIM_SHARE * judged_weight:
@@ -8569,6 +8650,13 @@ async def post_chapter_time(request: Request):
     fill = page_avg if page_avg else (sum(judged_times) / judged_weight if judged_weight else 0.0)
     chapter_secs = sum(judged_times) + sum(weights[i] for i in range(n) if i not in judged) * fill
     avg_times = entry.setdefault("avg_times", {})
+    if composite:
+        others = [v for k, v in avg_times.items() if k != unit_id and isinstance(v, (int, float)) and v > 0]
+        if not others:
+            return _reject("half-and-half: no average yet")
+        mean = sum(others) / len(others)
+        if abs(chapter_secs - mean) > READ_TIME_HALF_TOLERANCE * mean:
+            return _reject("half-and-half: far from the average", seconds=round(chapter_secs), average=round(mean))
     prev = avg_times.get(unit_id)
     avg_times[unit_id] = chapter_secs if prev is None else (prev + chapter_secs) / 2
     page_time["total"] += sum(judged_times)
@@ -8629,6 +8717,8 @@ async def post_reads(request: Request):
         if state is None:
             stored.pop(cid, None)
         else:
+            if isinstance(stored.get(cid), dict):
+                _stash_other_half(entry, cid, stored[cid], state)       # what the overwritten copy really read goes aside
             stored[cid] = state
     if len(json.dumps(stored)) > READS_MAX_BYTES:
         return JSONResponse({"ok": False, "error": "Too large"}, status_code=400)
