@@ -1909,12 +1909,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   // ── READING SESSION TRACKING ──
   const _readingMangaName = manga.name || manga.title || 'Unknown';
-  fetch(apiUrl('/api/reading/session/start'), {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ manga_name: _readingMangaName, library_id: String(libraryId) }),
-  }).catch(() => {});
-
   // A tick only counts toward reading time if there was real activity
   // (scroll/tap/key) at some point in that minute -- previously this fired
   // on a blind 60s timer regardless of whether anyone was actually reading,
@@ -1957,78 +1951,67 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     return limit * spScreenPageCount();  // two-page mode: doubled while two pages are shown
   }
 
-  // Anchor for how long it's been since a minute was actually credited --
-  // starts at session mount, not just at the first successful tick, so a
-  // visit that ends before ever reaching 60s has a real elapsed-time figure
-  // to be measured against rather than defaulting to "uncredited = 0 = always
-  // looks overdue." MIN_CREDIT_INTERVAL_MS gates BOTH of the exit-time partial-
-  // minute credits below on this anchor: it stops a brief open-and-close from
-  // rounding up to a full minute it didn't earn, and -- because visibilitychange
-  // -> 'hidden' and beforeunload fire back-to-back on an ordinary tab close --
-  // it doubles as the de-dupe between them, since the second call's elapsed-
-  // since-last-credit is ~0ms and can never clear the bar the first call just
-  // reset. (Previously each exit handler had its own independent "am I idle"
-  // check with no shared anchor, so both could -- and did -- fire a full
-  // minute each for the exact same few seconds of real time.)
-  const MIN_CREDIT_INTERVAL_MS = 60000;
-  let _lastCreditedTs = Date.now();
-
-  let _tickSent = false;
-  const _tickInterval = setInterval(() => {
-    if (Date.now() - _lastActivityTs > idleLimitMs()) return; // paused -- don't count this minute
-    _lastCreditedTs = Date.now();
-    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST' }).catch(() => {});
-  }, 60000);
-
-  // keepalive fetch, not sendBeacon -- sendBeacon can't carry the apiUrl()
-  // server base (this call was a bare relative path before, which only
-  // ever worked in browser-served mode; on the native app, whose WebView
-  // runs on its own separate local origin, it silently went nowhere) and
-  // can't carry whatever auth the native app relies on either. keepalive
-  // fetch behaves like a normal authenticated request but is guaranteed to
-  // survive the page unloading -- same fix already used for
-  // saveReadingProgress()'s own true-last-chapter completion save.
-  //
-  // Shared by both exit paths below -- only credits a trailing partial
-  // minute if there was real recent activity AND at least MIN_CREDIT_INTERVAL_MS
-  // has actually elapsed since the last credited tick (session start counts
-  // as the first anchor).
-  function _creditPartialMinute() {
+  // READING TIME (2026-11-12, same idea as the Android app's ReadingTimer): the seconds of real reading (page visible + activity
+  // within the idle limit above) are counted in the browser, kept in localStorage and sent as the session's running TOTAL to
+  // POST /api/reading/time-log every 10 s and when leaving. The server keeps the larger total per session id, so a resend (lost
+  // answer, tab killed, no network for a while) never counts twice and never loses time; unsent totals of earlier page loads go out
+  // the next time a reader opens. Replaces the old /session/start + 60 s /session/tick counter (still on the server for epub_reader).
+  const RT_KEY = 'kinsho_readtime';
+  const _rtSid = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const _rtStart = new Date().toISOString();
+  let _rtSecs = 0, _rtSent = 0, _rtLast = Date.now(), _rtN = 0;
+  function _rtLoad() { try { return JSON.parse(localStorage.getItem(RT_KEY) || '{}'); } catch (e) { return {}; } }
+  function _rtOwn() { return { start: _rtStart, manga: _readingMangaName, lib: String(libraryId), secs: _rtSecs, sent: _rtSent }; }
+  function _rtStore() {
+    try {
+      const all = _rtLoad();
+      if (_rtSecs > 0 || all[_rtSid]) all[_rtSid] = _rtOwn();
+      localStorage.setItem(RT_KEY, JSON.stringify(all));
+    } catch (e) {}
+  }
+  function _rtSend(keepalive) {
+    const all = _rtLoad();
+    if (_rtSecs > 0) all[_rtSid] = _rtOwn();
+    const entries = [], totals = {};
+    Object.keys(all).forEach(k => {
+      const o = all[k];
+      const secs = k === _rtSid ? _rtSecs : (o.secs || 0);
+      if (Math.floor(secs) <= (o.sent || 0)) return;
+      entries.push({ sid: k, start: o.start, manga_name: o.manga, library_id: o.lib, seconds: Math.floor(secs) });
+      totals[k] = secs;
+    });
+    if (!entries.length) return;
+    fetch(apiUrl('/api/reading/time-log'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: !!keepalive,
+      body: JSON.stringify({ entries }),
+    }).then(r => (r.ok ? r.json() : null)).then(j => {
+      if (!j || !j.ok) return;                                  // not logged in / offline: stays stored, goes out next time
+      Object.keys(totals).forEach(k => { if (k === _rtSid) _rtSent = Math.max(_rtSent, Math.floor(totals[k])); });
+      try {
+        const now = _rtLoad();
+        Object.keys(totals).forEach(k => {
+          if (k === _rtSid) return;
+          if (now[k] && (now[k].secs || 0) <= totals[k] + 0.001) delete now[k];   // an earlier session, fully taken
+        });
+        if (_rtSecs > 0) now[_rtSid] = _rtOwn();
+        localStorage.setItem(RT_KEY, JSON.stringify(now));
+      } catch (e) {}
+    }).catch(() => {});
+  }
+  const _rtInterval = setInterval(() => {
     const now = Date.now();
-    if (now - _lastActivityTs > idleLimitMs()) return; // already idle when leaving -- nothing to credit
-    if (now - _lastCreditedTs < MIN_CREDIT_INTERVAL_MS) return; // hasn't been open long enough to earn a minute yet
-    _lastCreditedTs = now;
-    fetch(apiUrl('/api/reading/session/tick'), { method: 'POST', keepalive: true }).catch(() => {});
-  }
-  function _sendFinalTick() {
-    if (_tickSent) return;
-    _tickSent = true;
-    clearInterval(_tickInterval);
-    _creditPartialMinute();
-  }
-  // A courtesy tick for merely being BACKGROUNDED (screen lock, switching
-  // apps briefly), as opposed to _sendFinalTick's "actually leaving for
-  // good" -- deliberately does NOT clear _tickInterval or set _tickSent.
-  // visibilitychange -> 'hidden' also fires on a plain screen lock, not
-  // just on really leaving; wiring it to _sendFinalTick (as this used to)
-  // permanently killed the 60s tick loop the FIRST time the screen was
-  // ever locked during a reading session, silently freezing both the
-  // manga's and the overall reading-time totals for the rest of that page
-  // load even though the user came right back and kept reading for many
-  // more minutes -- confirmed live (2026-08-11): 13+ minutes of real
-  // reading, including crossing two chapters, credited zero additional
-  // minutes after the first lock. Still worth sending a real tick here
-  // (not just skipping it) -- on mobile, backgrounding can end in the OS
-  // killing the process outright with no clean beforeunload ever firing,
-  // which would otherwise lose up to a minute of genuine reading credited
-  // to nothing.
-  function _sendHiddenTick() {
-    _creditPartialMinute();
-  }
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') _sendHiddenTick();
-  });
-  window.addEventListener('beforeunload', _sendFinalTick);
+    const dt = Math.min(now - _rtLast, 2000);              // a throttled / frozen timer never credits the gap
+    _rtLast = now;
+    if (document.visibilityState === 'visible' && now - _lastActivityTs <= idleLimitMs()) _rtSecs += dt / 1000;
+    _rtN++;
+    if (_rtN % 5 === 0) _rtStore();
+    if (_rtN % 10 === 0) _rtSend(false);
+  }, 1000);
+  function _rtLeave() { _rtStore(); _rtSend(true); }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') _rtLeave(); });
+  window.addEventListener('pagehide', _rtLeave);
+  window.addEventListener('beforeunload', _rtLeave);
+  _rtSend(false);                                           // unsent totals of earlier page loads (tab killed, offline)
 
   // ── BUILD MANIFEST ──
   // manifest[i] = {
