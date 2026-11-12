@@ -7884,7 +7884,9 @@ async def get_bookmarks(request: Request, library_id: int, manga_id: str):
     user_data = auth.load_user_data(username)
     key       = f"{library_id}:{manga_id}"
     bookmarks = user_data.get("bookmarks", {}).get(key, [])
-    return JSONResponse({"bookmarks": bookmarks})
+    # updated: when this list was last saved (UTC ISO, null for lists saved before 2026-11-12). The Android app keeps its own copy of a
+    # downloaded manga and keeps whichever side is newer.
+    return JSONResponse({"bookmarks": bookmarks, "updated": (user_data.get("bookmarks_updated") or {}).get(key)})
 
 @app.post("/api/manga/{library_id}/{manga_id}/bookmarks")
 async def save_bookmarks(request: Request, library_id: int, manga_id: str):
@@ -7899,6 +7901,7 @@ async def save_bookmarks(request: Request, library_id: int, manga_id: str):
     if "bookmarks" not in user_data:
         user_data["bookmarks"] = {}
     user_data["bookmarks"][key] = body.get("bookmarks", [])
+    user_data.setdefault("bookmarks_updated", {})[key] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     auth.save_user_data(username, user_data)
     return JSONResponse({"ok": True})
 
@@ -8411,6 +8414,14 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
         if ch.get("completed")
     ]
     timing = _reading_timing_summary(dims_for_check, entry, is_volume_manga, completed_ids)
+    # last_read_at: the last position save as UTC ISO (last_read is the server's local time), null if never read. The Android app compares
+    # it with its own copy of a downloaded manga (newest wins).
+    last_read_at = None
+    if entry.get("last_read"):
+        try:
+            last_read_at = datetime.fromisoformat(entry["last_read"]).astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
 
     if is_volume_manga:
         # Pages read per volume for the detail page's bars: a finished volume
@@ -8429,6 +8440,7 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
             "completed_volume_ids": completed_ids,
             "last_volume_id":       entry.get("last_volume_id"),
             "last_page":            entry.get("last_page", 0),
+            "last_read_at":         last_read_at,
             "volume_pages":         volume_pages,
             **timing,
         })
@@ -8437,6 +8449,7 @@ def get_manga_reading_history(request: Request, library_id: int, manga_id: str):
             "completed_chapter_ids": completed_ids,
             "last_chapter_id":       entry.get("last_chapter_id"),
             "last_page":             entry.get("last_page", 0),
+            "last_read_at":          last_read_at,
             **timing,
         })
 
