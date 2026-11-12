@@ -95,6 +95,7 @@ window.kinshoDLMixin = {
   },
   mounted() {
     if (!window.KinshoDL) return;
+    try { KinshoDL.warm(String(this.libraryId), String(this.mangaId)); } catch (e) { /* an older app */ }
     this.dlPoll();
     this.dlTimer = setInterval(() => this.dlPoll(), 1000);
   },
