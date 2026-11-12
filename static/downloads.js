@@ -18,6 +18,7 @@ window.kinshoDLMixin = {
   computed: {
     dlAvailable() { return !!window.KinshoDL; },
     dlLabel() { return this.dlKind === 'volume' ? 'volumes' : 'chapters'; },
+    dlOne() { return this.dlKind === 'volume' ? 'volume' : 'chapter'; },
     dlIds() { return (this.dlList() || []).map(u => u.id); },
     dlDoneCount() { return this.dlIds.filter(id => (this.dlSt.rows[id] || {}).s === 'done').length; },
     dlMissingCount() { return this.dlIds.length - this.dlDoneCount; },
@@ -57,7 +58,7 @@ window.kinshoDLMixin = {
       const n = this.dlMissingCount;
       this.dlConfirm = {
         title: 'Download',
-        text: 'Download ' + (n === this.dlIds.length ? 'all ' + n : 'the ' + n + ' missing') + ' ' + this.dlLabel + ' to this tablet?',
+        text: 'Download ' + (n === this.dlIds.length ? (n === 1 ? '' : 'all ') + n : 'the ' + n + ' missing') + ' ' + this.dlName(n) + ' to this tablet?',
         ok: 'Download', danger: false, run: () => this.dlStart(null),
       };
     },
@@ -67,7 +68,7 @@ window.kinshoDLMixin = {
       if (!n) return;
       this.dlConfirm = {
         title: 'Delete downloads',
-        text: 'Delete the ' + n + ' downloaded ' + this.dlLabel + ' from this tablet? They stay on the server.',
+        text: 'Delete the ' + n + ' downloaded ' + this.dlName(n) + ' from this tablet? They stay on the server.',
         ok: 'Delete', danger: true, run: () => { KinshoDL.remove(String(this.libraryId), String(this.mangaId), 'null'); this.dlSt.rows = {}; setTimeout(() => this.dlPoll(), 1500); },
       };
     },
@@ -83,12 +84,13 @@ window.kinshoDLMixin = {
       if (!ids.length) { this.cancelSelection(); return; }
       this.dlConfirm = {
         title: 'Delete downloads',
-        text: 'Delete ' + ids.length + ' downloaded ' + this.dlLabel + ' from this tablet? They stay on the server.',
+        text: 'Delete ' + ids.length + ' downloaded ' + this.dlName(ids.length) + ' from this tablet? They stay on the server.',
         ok: 'Delete', danger: true,
         run: () => { KinshoDL.remove(String(this.libraryId), String(this.mangaId), JSON.stringify(ids)); this.cancelSelection(); setTimeout(() => this.dlPoll(), 1500); },
       };
     },
     dlConfirmRun() { const c = this.dlConfirm; this.dlConfirm = null; if (c && c.run) c.run(); },
+    dlName(n) { return n === 1 ? this.dlOne : this.dlLabel; },
     dlPickFolder() { this.dlNoFolder = false; try { KinshoDL.selectFolder(); } catch (e) { /* no bridge */ } },
   },
   mounted() {
