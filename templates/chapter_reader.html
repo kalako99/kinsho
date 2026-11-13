@@ -1245,77 +1245,6 @@
       white-space: nowrap;
     }
 
-    /* ── PDF QUALITY SLIDER ── */
-    .settings-pdf-quality {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .settings-pdf-quality-track {
-      position: relative;
-      height: 4px;
-      border-radius: 2px;
-      background: rgba(255,255,255,0.15);
-      margin: 8px 10px 0;
-    }
-    .settings-pdf-quality-fill {
-      position: absolute;
-      left: 0; top: 0; bottom: 0;
-      border-radius: 2px;
-      background: var(--theme-primary, #e94560);
-      transition: width 0.15s;
-    }
-    .settings-pdf-quality-input {
-      position: absolute;
-      top: 50%;
-      left: 0;
-      transform: translateY(-50%);
-      width: 100%;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 4px;
-      background: transparent;
-      outline: none;
-      cursor: pointer;
-      margin: 0;
-    }
-    .settings-pdf-quality-input::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #fff;
-      border: 2px solid var(--theme-primary, #e94560);
-      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
-      cursor: pointer;
-    }
-    .settings-pdf-quality-input::-moz-range-thumb {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #fff;
-      border: 2px solid var(--theme-primary, #e94560);
-      box-shadow: 0 0 0 2px #000, 0 0 6px rgba(0,0,0,0.7);
-      cursor: pointer;
-    }
-    .settings-pdf-quality-labels {
-      display: flex;
-      justify-content: space-between;
-      padding: 0 2px;
-    }
-    .settings-pdf-quality-label {
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 0.68rem;
-      color: #666;
-      cursor: pointer;
-      transition: color 0.15s;
-      user-select: none;
-    }
-    .settings-pdf-quality-label.active {
-      color: var(--theme-primary, #e94560);
-      font-weight: 700;
-    }
 
   </style>
 </head>
@@ -1551,21 +1480,6 @@
         <input type="checkbox" id="settingsDarkPagesToggle">
         <span class="settings-toggle-slider"></span>
       </label>
-    </div>
-  </div>
-  <!-- PDF quality (only shown for PDF sources) -->
-  <div id="settingsPdfQualityWrap" style="display:none">
-    <div class="settings-section-title">Page quality</div>
-    <div class="settings-pdf-quality">
-      <div class="settings-pdf-quality-track">
-        <div class="settings-pdf-quality-fill" id="pdfQualityFill"></div>
-        <input class="settings-pdf-quality-input" type="range" min="0" max="2" step="1" value="1" id="pdfQualityRange">
-      </div>
-      <div class="settings-pdf-quality-labels">
-        <span class="settings-pdf-quality-label" data-val="0" id="pdfQLabel0">Low</span>
-        <span class="settings-pdf-quality-label" data-val="1" id="pdfQLabel1">Normal</span>
-        <span class="settings-pdf-quality-label" data-val="2" id="pdfQLabel2">High</span>
-      </div>
     </div>
   </div>
 </div>
@@ -2171,7 +2085,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   // ── READER SETTINGS (loaded from admin, keyed by library tab) ──
   const readerSettings = Object.assign(
-    { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100, pdfScale: 1,
+    { mode: 'long-strip', padding: false, direction: 'ltr', stripWidth: 100,
       canvasBufferEnabled: false, canvasBufferMB: 500 },
     (adminData.reader_settings_by_tab || {})[libraryId] || {}
   );
@@ -2466,9 +2380,9 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
   }, true);
   dpApply();
 
-  const PDF_SCALES = [1.0, 1.5, 2.0];
-  function pdfScaleParam() {
-    return `?scale=${PDF_SCALES[readerSettings.pdfScale ?? 1]}`;
+  // No quality setting: the server draws a PDF page at the width this screen can show (1.5x for zooming) and keeps a few sizes around.
+  function pdfWidthParam() {
+    return `w=${Math.round(Math.max(window.innerWidth, 320) * (window.devicePixelRatio || 1) * 1.5)}`;
   }
 
   function ensureChapterUrls(cid) {
@@ -2494,7 +2408,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       const count  = chDims.page_count ?? chDims.pages?.length;
       if (count != null) {
         const params = [];
-        if (source === 'pdf') params.push(`scale=${PDF_SCALES[readerSettings.pdfScale ?? 1]}`);
+        if (source === 'pdf') params.push(pdfWidthParam());
         if (v) params.push(v);
         const suffix = params.length ? `?${params.join('&')}` : '';
         const urls   = Array.from({ length: count }, (_, i) => `${base}/${i}${suffix}`);
@@ -2511,7 +2425,7 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     }
 
     // Fallback: old dims.json without page_count/filenames — fetch from server.
-    const suffix = isPdf ? pdfScaleParam() : '';
+    const suffix = isPdf ? '?' + pdfWidthParam() : '';
     urlCache[cid] = apiFetch(
       `/api/manga/${libraryId}/${mangaId}/${isVolume ? 'volume' : 'chapter'}/${cid}/pages${suffix}`
     ).then(d => d.pages || []);
@@ -2726,11 +2640,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
 
   function thumbUrl(entry) {
     return `/api/manga/${libraryId}/${mangaId}/thumb/${entry.chapterId}/${entry.localIdx}`;
-  }
-
-  function pdfScaleParam() {
-    const scales = [1.0, 1.5, 2.0];
-    return `?scale=${scales[readerSettings.pdfScale ?? 1]}`;
   }
 
   // Assign a URL to a manifest entry (populates entry.url, sets img src via slot if assigned)
@@ -4918,12 +4827,8 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
       readerSettings.canvasBufferEnabled ? '' : 'none';
     document.getElementById('settingsCanvasBufferRange').value = cbBudgetMB();
     cbUpdateBufferLabel();
-    // PDF quality: only show for PDF sources
-    const pdfQualityWrap = document.getElementById('settingsPdfQualityWrap');
-    if (pdfQualityWrap) pdfQualityWrap.style.display = isPdf ? '' : 'none';
     document.getElementById('settingsDarkPagesWrap').style.display = isDocSource ? '' : 'none';
     document.getElementById('settingsDarkPagesToggle').checked = darkPages;
-    syncPdfQualityUI(readerSettings.pdfScale ?? 1);
   }
 
   bbSettingsBtn.addEventListener('click', (e) => {
@@ -5018,47 +4923,6 @@ window.__DARK_PAGES__ = {{ dark_pages | default(false) | tojson }};
     applyCanvasBufferMB(Number(e.target.value));
     saveReaderSettings();
   });
-
-  // ── PDF QUALITY ──
-
-  function syncPdfQualityUI(val) {
-    const pct = val / 2 * 100;
-    const fill = document.getElementById('pdfQualityFill');
-    if (fill) fill.style.width = pct + '%';
-    document.getElementById('pdfQualityRange').value = val;
-    for (let i = 0; i <= 2; i++) {
-      const lbl = document.getElementById(`pdfQLabel${i}`);
-      if (lbl) lbl.classList.toggle('active', i === val);
-    }
-  }
-
-  document.getElementById('pdfQualityRange').addEventListener('input', (e) => {
-    const val = Number(e.target.value);
-    readerSettings.pdfScale = val;
-    syncPdfQualityUI(val);
-    Object.keys(urlCache).forEach(k => delete urlCache[k]);
-    for (let i = 0; i < manifest.length; i++) {
-      manifest[i].url    = null;
-      manifest[i].loaded = false;
-    }
-    applyManifestToSlots();
-    saveReaderSettings();
-  });
-
-  // Clicking a label snaps slider to that value
-  for (let i = 0; i <= 2; i++) {
-    document.getElementById(`pdfQLabel${i}`).addEventListener('click', () => {
-      readerSettings.pdfScale = i;
-      syncPdfQualityUI(i);
-      Object.keys(urlCache).forEach(k => delete urlCache[k]);
-      for (let j = 0; j < manifest.length; j++) {
-        manifest[j].url    = null;
-        manifest[j].loaded = false;
-      }
-      applyManifestToSlots();
-      saveReaderSettings();
-    });
-  }
 
   function applyPaddingSetting() {
     let anchorEntry = manifest[0];

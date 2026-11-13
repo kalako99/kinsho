@@ -1831,8 +1831,18 @@ def _get_open_pdf(pdf_path: str):
         print(f"[PDF] Failed to open {pdf_path}: {e}")
         return None
 
-def _cached_pdf_page(pdf_path: str, page_index: int, scale: float = 1.5) -> bytes | None:
-    key = (pdf_path, page_index, scale)
+# PDF pages are drawn at the width the reading screen can show (the reader asks with ?w=<pixels>, there is no quality
+# setting): the request is rounded UP to one of a few sizes so the same render serves many screens and the cache stays small.
+_PDF_WIDTHS = (1000, 1400, 1800, 2200, 2800)
+
+def _pdf_bucket(w: int) -> int:
+    for b in _PDF_WIDTHS:
+        if w <= b:
+            return b
+    return _PDF_WIDTHS[-1]
+
+def _cached_pdf_page(pdf_path: str, page_index: int, scale: float = 1.5, width: int = 0) -> bytes | None:
+    key = (pdf_path, page_index, scale if not width else ("w", width))
     if key in _pdf_page_cache:
         return _pdf_page_cache[key]
     if not PDF_SUPPORT:
@@ -1842,6 +1852,8 @@ def _cached_pdf_page(pdf_path: str, page_index: int, scale: float = 1.5) -> byte
         if doc is None:
             return None
         page = doc.load_page(page_index)
+        if width:
+            scale = width / max(1.0, page.rect.width)
         mat  = pymupdf.Matrix(scale, scale)
         pix  = page.get_pixmap(matrix=mat, alpha=False)
         data = pix.tobytes("jpeg", jpg_quality=88)
@@ -7962,7 +7974,7 @@ async def save_reader_settings(request: Request):
     if not library_id:
         return JSONResponse({"ok": False, "error": "Missing library_id"}, status_code=400)
     user_data    = auth.load_user_data(username)
-    allowed_keys = {"mode", "padding", "direction", "stripWidth", "preloadRadius", "pdfScale",
+    allowed_keys = {"mode", "padding", "direction", "stripWidth", "preloadRadius",
                      "canvasBufferEnabled", "canvasBufferMB", "twoPage"}
     by_tab       = user_data.get("reader_settings_by_tab", {})
     current      = by_tab.get(library_id, {})
@@ -9184,8 +9196,14 @@ async def abort_if_disconnected(request: Request):
         raise HTTPException(status_code=499, detail="Client disconnected")
 
 def _serve_doc_page(library_id: int, manga: dict, unit_id: str, unit: dict, source: str,
-                    page_index: int, scale: float):
-    """One page of a PDF/EPUB volume or chapter, as an image."""
+                    page_index: int, scale: float, w: int = 0):
+    """One page of a PDF/EPUB volume or chapter, as an image. w = the pixel width the screen wants (PDF only)."""
+    if source == "pdf" and w > 0:
+        width = _pdf_bucket(max(w, 1))
+        img_bytes = _cached_pdf_page(unit["path"], page_index, width=width)
+        if img_bytes is None:
+            return JSONResponse({"error": "Failed to render PDF page"}, status_code=500)
+        return Response(content=img_bytes, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=480"})
     if source == "pdf":
         # Clamp scale to valid presets
         scale = min(max(scale, 1.0), 2.0)
@@ -9239,7 +9257,7 @@ def _serve_doc_page(library_id: int, manga: dict, unit_id: str, unit: dict, sour
     return JSONResponse({"error": "Unknown source type"}, status_code=500)
 
 @app.get("/api/manga/{library_id}/{manga_id}/volume/{volume_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
-def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, filename_or_index: str, scale: float = 1.5):
+def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id: str, filename_or_index: str, scale: float = 1.5, w: int = 0):
     username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
         return JSONResponse({"error": "Library not found"}, status_code=404)
@@ -9311,7 +9329,7 @@ def get_volume_page(request: Request, library_id: int, manga_id: str, volume_id:
         )
 
     elif vol_type in ("pdf", "epub"):
-        return _serve_doc_page(library_id, manga, volume_id, volume, vol_type, page_index, scale)
+        return _serve_doc_page(library_id, manga, volume_id, volume, vol_type, page_index, scale, w)
 
     return JSONResponse({"error": "Unknown volume type"}, status_code=500)
 
@@ -9456,7 +9474,7 @@ def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id
     ext_of = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif"}
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
         for i in range(count):
-            r = page_fn(request, library_id, manga_id, unit_id, str(i))
+            r = page_fn(request, library_id, manga_id, unit_id, str(i), w=2200)       # a PDF page for the app's folder: sharp enough to zoom
             if getattr(r, "status_code", 200) != 200:
                 return JSONResponse({"error": "Page %d failed" % i}, status_code=502)
             if hasattr(r, "path"):
@@ -9489,7 +9507,7 @@ def download_volume(request: Request, library_id: int, manga_id: str, volume_id:
     return _unit_zip_response(request, library_id, manga_id, volume_id, True)
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/page/{filename_or_index}", dependencies=[Depends(abort_if_disconnected)])
-def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str, scale: float = 1.5):
+def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_id: str, filename_or_index: str, scale: float = 1.5, w: int = 0):
     from fastapi.responses import FileResponse
     username = auth.get_opds_user(request)
     if not auth.can_access_library(username, library_id):
@@ -9513,7 +9531,7 @@ def get_chapter_page(request: Request, library_id: int, manga_id: str, chapter_i
     if source in ("pdf", "epub"):
         if not filename_or_index.isdigit():
             return JSONResponse({"error": "Invalid page index"}, status_code=400)
-        return _serve_doc_page(library_id, manga, chapter_id, chapter, source, int(filename_or_index), scale)
+        return _serve_doc_page(library_id, manga, chapter_id, chapter, source, int(filename_or_index), scale, w)
     if source == "archive":
         try:
             page_index = int(filename_or_index)
