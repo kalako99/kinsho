@@ -149,9 +149,12 @@
     <div id="auth-step">
       <div class="login-card">
         <div class="form_details">Login</div>
-        <input type="text"     class="input" placeholder="Username" autocomplete="username">
-        <input type="password" class="input" placeholder="Password" autocomplete="current-password">
-        <button class="btn" type="button">Login</button>
+        <!-- A real form (display: contents keeps the card's layout): browsers and the Android autofill service only offer to save a password for a submitted form -->
+        <form id="login-form" method="post" action="/api/auth/login" style="display:contents">
+          <input type="text"     class="input" name="username" id="login-username" placeholder="Username" autocomplete="username" autocapitalize="none">
+          <input type="password" class="input" name="password" id="login-password" placeholder="Password" autocomplete="current-password">
+          <button class="btn" type="submit">Login</button>
+        </form>
       </div>
       <!-- Tap to change server -->
       <div class="server-indicator" id="server-indicator" title="Change server">
@@ -249,7 +252,8 @@
   }
 
   // ── LOGIN ─────────────────────────────────────────────────────────
-  document.querySelector('.login-card .btn').addEventListener('click', async () => {
+  document.getElementById('login-form').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
     const inputs   = document.querySelectorAll('.login-card .input');
     const username = inputs[0].value.trim();
     const password = inputs[1].value;
@@ -294,10 +298,7 @@
     }
   });
 
-  // ── ENTER KEY ─────────────────────────────────────────────────────
-  document.querySelectorAll('.login-card .input').forEach(i =>
-    i.addEventListener('keyup', e => { if (e.key === 'Enter') document.querySelector('.login-card .btn').click(); })
-  );
+  // Enter submits the form natively.
 </script>
 </body>
 </html>
