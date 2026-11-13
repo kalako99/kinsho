@@ -816,6 +816,9 @@
 
   function attachContentGestures(doc) {
     const el = doc.getElementById('pg-outer');
+    if (!el || el.__kinshoGestures) return;          // once per chapter document
+    el.__kinshoGestures = true;
+    let lastTouchAt = 0;                              // a tap also fires the browser's compatibility mouse events: they must not count a second time
     let startX = 0, startY = 0, tracking = false, horizontal = null;
 
     function onStart(x, y) {
@@ -840,13 +843,13 @@
       }
     }
 
-    el.addEventListener('touchstart', (e) => { const t = e.touches[0]; onStart(t.clientX, t.clientY); }, { passive: true });
+    el.addEventListener('touchstart', (e) => { lastTouchAt = Date.now(); const t = e.touches[0]; onStart(t.clientX, t.clientY); }, { passive: true });
     el.addEventListener('touchmove',  (e) => { const t = e.touches[0]; onMove(t.clientX, t.clientY, e); }, { passive: false });
-    el.addEventListener('touchend',   (e) => { const t = e.changedTouches[0]; onEnd(t.clientX, t.clientY); });
+    el.addEventListener('touchend',   (e) => { lastTouchAt = Date.now(); const t = e.changedTouches[0]; onEnd(t.clientX, t.clientY); });
 
-    el.addEventListener('mousedown', (e) => onStart(e.clientX, e.clientY));
-    el.addEventListener('mousemove', (e) => onMove(e.clientX, e.clientY, null));
-    el.addEventListener('mouseup',   (e) => onEnd(e.clientX, e.clientY));
+    el.addEventListener('mousedown', (e) => { if (Date.now() - lastTouchAt < 800) return; onStart(e.clientX, e.clientY); });
+    el.addEventListener('mousemove', (e) => { if (Date.now() - lastTouchAt < 800) return; onMove(e.clientX, e.clientY, null); });
+    el.addEventListener('mouseup',   (e) => { if (Date.now() - lastTouchAt < 800) return; onEnd(e.clientX, e.clientY); });
 
     // End-to-end bookmark reading (see the BOOKMARKS section) needs to know
     // when the reader has scrolled past the active bookmark's end point --
