@@ -111,7 +111,7 @@ const DonutChart = {
     onSliceLeave() { this.hoverIndex = null; },
   },
   template: `
-    <div class="donut-chart-wrap" style="position:relative; min-width:170px;">
+    <div class="donut-chart-wrap" style="position:relative; min-width:0;">
       <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-muted,#888); margin-bottom:6px;" v-text="title"></div>
       <div v-if="categories.length === 0" style="font-size:0.78rem; color:var(--color-muted,#888);">No data visible to you.</div>
       <template v-else>
@@ -168,7 +168,7 @@ const CommunityUserPanel = {
         </div>
       </div>
 
-      <div style="display:flex; flex-wrap:wrap; gap:24px; margin-top:16px;">
+      <div class="community-donuts">
         <donut-chart title="Genres" :categories="stats.genre_categories"></donut-chart>
         <donut-chart title="Tags" :categories="stats.tag_categories"></donut-chart>
       </div>
