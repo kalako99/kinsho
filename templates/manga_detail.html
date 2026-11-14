@@ -474,7 +474,8 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      flex-wrap: wrap;
+      gap: 8px 12px;
       padding: 12px 18px calc(12px + env(safe-area-inset-bottom, 0px));
       background: color-mix(in srgb, var(--color-secondary, #1a1a1a) 92%, transparent);
       backdrop-filter: blur(16px);
@@ -487,7 +488,14 @@
       font-weight: 600;
       color: var(--color-text, #f0f0f0);
     }
-    .selection-bar-actions { display: flex; align-items: center; gap: 10px; }
+    .selection-bar-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px 10px; }
+    /* narrow portrait phone: the count and Cancel stay on top, the action buttons (Download, Delete,
+       Check as Read in the app) get their own full row so none is pushed off the screen edge */
+    @media (max-width: 560px) {
+      .selection-bar { padding-left: 12px; padding-right: 12px; }
+      .selection-bar-actions { width: 100%; }
+      .selection-bar-mark-read { padding: 9px 12px; gap: 6px; font-size: 0.8rem; }
+    }
     .selection-bar-cancel {
       background: none;
       border: none;
@@ -1640,6 +1648,9 @@
 
   <div v-else class="state-msg">Manga not found.</div>
 
+  <!-- room under the last row so it can be dragged over while the action bar is up -->
+  <div v-if="selectionMode" style="height:120px"></div>
+
   <!-- SELECTION MODE ACTION BAR -->
   <div class="selection-bar" v-if="selectionMode">
     <span class="selection-bar-count">{{ selectedItemIds.size }} selected</span>
@@ -2092,6 +2103,11 @@ createApp({
       clearTimeout(this._selHoldTimer);
       this._selDragTouched = null;
     });
+    window.addEventListener('mousemove', (e) => {
+      if (!this._selDragTouched || !this.selectionMode) return;
+      this._selLastTouch = { x: e.clientX, y: e.clientY };
+      this.startSelAutoScroll();
+    });
 
     // The collection this manga is in, if any the user can see (the same
     // map the library pages use), for the top bar's Collection button.
@@ -2260,13 +2276,48 @@ createApp({
       // handles the rest) so ordinary page scroll is untouched before this.
       e.preventDefault();
       this._selSuppressClick = true;
-      const el  = document.elementFromPoint(t.clientX, t.clientY);
+      this._selLastTouch = { x: t.clientX, y: t.clientY };
+      this.selPaintAt(t.clientX, t.clientY);
+      this.startSelAutoScroll();
+    },
+
+    // Selects the row under a point (kept above the action bar, which would otherwise
+    // be the element found when the finger is at the very bottom of the screen).
+    selPaintAt(x, y) {
+      const bar = document.querySelector('.selection-bar');
+      const maxY = window.innerHeight - (bar ? bar.offsetHeight : 0) - 4;
+      const el  = document.elementFromPoint(x, Math.min(y, maxY));
       const row = el && el.closest('.mchap-item');
       const id  = row && row.dataset.chId;
       if (id && this._selDragTouched && !this._selDragTouched.has(id)) {
         this._selDragTouched.add(id);
         this.toggleChapterSelected(id, true);
       }
+    },
+
+    // Drag-select near the top or bottom edge scrolls the page by itself, faster the closer
+    // the finger gets to the edge, and keeps selecting the rows that slide past the finger.
+    startSelAutoScroll() {
+      if (this._selRaf) return;
+      const step = () => {
+        if (!this._selDragTouched || !this.selectionMode || !this._selLastTouch) { this._selRaf = null; return; }
+        const { x, y } = this._selLastTouch;
+        const h = window.innerHeight, zone = Math.min(140, h * 0.22);
+        let v = 0;
+        if (y > h - zone) v = Math.min(1, (y - (h - zone)) / zone);
+        else if (y < zone) v = -Math.min(1, (zone - y) / zone);
+        if (v) {
+          const before = window.scrollY;
+          window.scrollBy(0, Math.sign(v) * (3 + v * v * 46));
+          const moved = window.scrollY - before;
+          if (moved) {
+            const n = Math.max(1, Math.ceil(Math.abs(moved) / 20));
+            for (let i = 0; i <= n; i++) this.selPaintAt(x, y - moved * (i / n));
+          }
+        }
+        this._selRaf = requestAnimationFrame(step);
+      };
+      this._selRaf = requestAnimationFrame(step);
     },
 
     onChapterTouchEnd(e) {
