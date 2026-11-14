@@ -163,6 +163,7 @@ const CommunityUserPanel = {
         <div style="font-size:0.68rem; text-transform:uppercase; letter-spacing:1.5px; color:var(--color-primary,#e94560); margin-bottom:6px;" v-text="lib.library_name"></div>
         <div style="display:flex; gap:16px; flex-wrap:wrap; font-size:0.8rem; color:var(--color-text,#f0f0f0);">
           <span>Time: <strong v-text="formatMinutes(lib.total_minutes)"></strong></span>
+          <span v-if="lib.total_pages">Read: <strong v-text="lib.read_pct + '%'"></strong> <span style="color:var(--color-muted,#888);" v-text="'(' + lib.pages_read.toLocaleString() + ' of ' + lib.total_pages.toLocaleString() + ' pages)'"></span></span>
           <span v-if="lib.chapters_read > 0">Chapters read: <strong v-text="lib.chapters_read"></strong></span>
           <span v-if="lib.volumes_read > 0">Volumes read: <strong v-text="lib.volumes_read"></strong></span>
         </div>

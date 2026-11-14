@@ -9983,6 +9983,31 @@ def _community_stats_for_user(viewer: str, target_username: str, libraries: dict
         bucket = by_library.setdefault(lib_id, {"total_minutes": 0, "chapters_read": 0, "volumes_read": 0})
         bucket["total_minutes"] += s.get("minutes", 0)
 
+    # ── share of each library this user has read: pages read / pages in the library,
+    # ── counted over the libraries and manga BOTH the viewer and the target may see
+    page_totals: dict = {}
+    for lib_id_str in libraries:
+        lib_id = int(lib_id_str)
+        if not auth.can_access_library(viewer, lib_id) or not auth.can_access_library(target_username, lib_id):
+            continue
+        lib_hist = target_data.get("reading_history", {}).get(str(lib_id), {})
+        total = read = 0
+        for manga_id, manga in mangas_by_lib.get(lib_id, {}).items():
+            dims = _dims_for(lib_id, manga["name"])
+            tags = dims.get("tags", [])
+            if auth.is_manga_blocked(viewer, tags) or auth.is_manga_blocked(target_username, tags):
+                continue
+            total += manga_content_counts(dims)[0]
+            entry = lib_hist.get(manga_id)
+            if entry:
+                read += manga_pages_read(dims, entry, is_volume_manga_type(manga, dims))
+        page_totals[lib_id] = (total, read)
+        by_library.setdefault(lib_id, {"total_minutes": 0, "chapters_read": 0, "volumes_read": 0})
+    for lib_id, (total, read) in page_totals.items():
+        by_library[lib_id]["total_pages"] = total
+        by_library[lib_id]["pages_read"]  = read
+        by_library[lib_id]["read_pct"]    = round(read / total * 100) if total else 0
+
     libraries_out = [
         {"library_id": lib_id, "library_name": libraries.get(str(lib_id), f"Library {lib_id}"), **stats}
         for lib_id, stats in sorted(by_library.items())

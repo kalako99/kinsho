@@ -1693,6 +1693,7 @@
   <!-- SELECTION MODE ACTION BAR -->
   <div class="selection-bar" v-if="selectionMode">
     <span class="selection-bar-count">{{ selectedItemIds.size }} selected</span>
+    <button class="selection-bar-cancel selection-bar-all" @click="toggleSelectAll">{{ allSelected() ? 'Deselect all' : 'Select all' }}</button>
     <div class="selection-bar-actions">
       <button class="selection-bar-cancel" @click="cancelSelection">Cancel</button>
       <button class="selection-bar-mark-read" v-if="dlAvailable" @click="dlSelectedDownload">
@@ -2420,6 +2421,17 @@ createApp({
       else if (s.has(id)) s.delete(id);
       else s.add(id);
       if (s.size === 0) this.selectionMode = false;
+    },
+
+    // Bottom-bar "Select all" / "Deselect all" for every volume of this manga.
+    allSelected() {
+      const l = (this.manga && this.manga.volumes) || [];
+      return l.length > 0 && l.every(v => this.selectedItemIds.has(v.id));
+    },
+    toggleSelectAll() {
+      if (this.allSelected()) { this.cancelSelection(); return; }
+      for (const v of ((this.manga && this.manga.volumes) || [])) this.selectedItemIds.add(v.id);
+      this.selectionMode = true;
     },
 
     cancelSelection() {
