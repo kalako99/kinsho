@@ -237,6 +237,9 @@ createApp({
       serverUrl:       localStorage.getItem('kinsho_server_url') || '',
       serverUrlStatus: { msg: '', type: '' },
       isNativeApp:     !!(window.__TAURI__ || (window.Capacitor && window.Capacitor.isNative)),
+      // Android app bridge (window.KinshoLocal): the tablet's own download folder.
+      tabletBridge:    !!window.KinshoLocal && !!window.KinshoLocal.pickFolder,
+      tabletFolder:    '',
       isLoggedIn:      false,
       loginUsername:   '',
       loginPassword:   '',
@@ -440,6 +443,12 @@ createApp({
   },
 
   async mounted() {
+    if (this.tabletBridge) {
+      const readFolder = () => { try { this.tabletFolder = window.KinshoLocal.folder() || ''; } catch (e) {} };
+      readFolder();
+      document.addEventListener('visibilitychange', readFolder);   // back from the folder picker
+      window.addEventListener('focus', readFolder);
+    }
     await this.$nextTick();
     this.loadSettings();
     this.loadPageCounts();
@@ -447,6 +456,7 @@ createApp({
   },
 
   methods: {
+    pickTabletFolder() { try { window.KinshoLocal.pickFolder(); } catch (e) {} },
 
     goBack() {
       window.kinshoGoBack('/');
