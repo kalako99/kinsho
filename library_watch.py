@@ -11,6 +11,10 @@ What gets rescanned (2026-11-10, user's idea): only the folder that changed --
 the watched folder the change happened in, or for a change directly in a
 library path the new/renamed/removed folder itself. A file added directly in a
 library path, or lost events, ask for the whole library.
+Flat-scan libraries (one folder = one manga, e.g. one-shots; 2026-11-15, user's
+idea) get ONE watch for the library path only: a new, renamed or removed folder
+there is a new/removed manga and is rescanned alone, and the folders inside
+never change after they are added, so watching each one would waste watches.
 Watching every folder would need ~46,000 inotify watches on the NAS, over the
 per-user limit (60,132, shared with Jellyfin which runs as the same uid); this
 needs ~700 for both instances. Measured 2026-11-10; a copy made over the SMB
@@ -78,6 +82,7 @@ class LibraryWatcher:
         self.by_path = {}  # path -> wd
         self.dirty = {}   # library_id -> [last event time, set of folders or None = all, a changed path]
         self.limit_warned = False
+        self.flat = set()  # ids of flat-scan libraries: only their library path is watched
         self.status = "off"
 
     # ── setup ──
@@ -123,14 +128,20 @@ class LibraryWatcher:
     def _wanted(self) -> dict:
         """path -> (library_id, depth) for every folder that should be watched."""
         wanted = {}
+        self.flat = set()
         if not self.is_enabled():
             return wanted
         for lib in self.get_libraries():
+            flat = bool(lib.get("flat_scan"))
+            if flat:
+                self.flat.add(lib.get("id"))
             for root in lib.get("paths", []) or []:
                 if not root or not os.path.isdir(root):
                     continue
                 root = os.path.normpath(root)
                 wanted[root] = (lib.get("id"), 0)
+                if flat:
+                    continue
                 try:
                     with os.scandir(root) as it:
                         for e in it:
@@ -138,6 +149,8 @@ class LibraryWatcher:
                                 wanted.setdefault(os.path.normpath(e.path), (lib.get("id"), 1))
                 except OSError:
                     pass
+            if flat:
+                continue
             for d in self.get_manga_dirs(lib.get("id")):
                 d = os.path.normpath(d)
                 if d not in wanted and os.path.isdir(d):
@@ -158,8 +171,8 @@ class LibraryWatcher:
 
     def _signature(self, libraries, enabled) -> tuple:
         return (enabled,) + tuple(sorted(
-            (str(l.get("id")), tuple(l.get("paths", []) or []),
-             hash(frozenset(self.get_manga_dirs(l.get("id")))))
+            (str(l.get("id")), tuple(l.get("paths", []) or []), bool(l.get("flat_scan")),
+             0 if l.get("flat_scan") else hash(frozenset(self.get_manga_dirs(l.get("id")))))
             for l in libraries))
 
     # ── loop ──
@@ -212,7 +225,9 @@ class LibraryWatcher:
             if name and not mask & IN_ISDIR and _OWN_FILE_RE.match(name):
                 continue
             full = os.path.normpath(os.path.join(path, name) if name else path)
-            if depth == 0 and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
+            if lib_id in self.flat:
+                pass  # flat-scan library: the library path is the only watch
+            elif depth == 0 and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO):
                 self._add(full, lib_id, 1)  # a new manga folder
             elif depth == 0 and mask & IN_ISDIR and mask & IN_MOVED_FROM:
                 self._remove(full)
