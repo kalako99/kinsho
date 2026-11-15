@@ -1744,7 +1744,7 @@ createApp({
     },
 
     async deleteCollection() {
-      if (!confirm('Delete this collection? This cannot be undone.')) return;
+      if (!await kinshoConfirm('Delete this collection? This cannot be undone.', { ok: 'Delete' })) return;
       try {
         const res = await fetch(apiUrl(`/api/collections/${this.collectionId}`), { method: 'DELETE' });
         const data = await res.json();

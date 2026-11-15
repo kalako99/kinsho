@@ -114,3 +114,73 @@
     setInterval(checkAuthState, PERMISSION_POLL_MS);
   }
 })();
+
+
+/**
+ * Themed pop-ups: kinshoConfirm(message, {ok, cancel, danger}) -> Promise<boolean>
+ * and kinshoAlert(message) -> Promise. They replace the browser's confirm() /
+ * alert(), which look like plain system dialogs, and take the page's theme
+ * colours (--color-*). Await them; a click outside or Escape = Cancel.
+ */
+(function () {
+  if (window.kinshoConfirm) return;
+  function css() {
+    if (document.getElementById('kdlg-css')) return;
+    const s = document.createElement('style');
+    s.id = 'kdlg-css';
+    s.textContent = `
+.kdlg-back{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.6);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.kdlg{box-sizing:border-box;width:100%;max-width:420px;background:var(--color-secondary,#1a1a1a);color:var(--color-text,#f0f0f0);border:1px solid color-mix(in srgb,var(--color-text,#f0f0f0) 14%,transparent);border-radius:14px;padding:20px 20px 16px;box-shadow:0 12px 40px rgba(0,0,0,.55);font-family:inherit}
+.kdlg-msg{font-size:15px;line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:0 0 18px}
+.kdlg-row{display:flex;justify-content:flex-end;gap:10px}
+.kdlg-btn{font:inherit;font-size:14px;font-weight:600;padding:9px 18px;border-radius:9px;cursor:pointer;border:1px solid color-mix(in srgb,var(--color-text,#f0f0f0) 22%,transparent);background:transparent;color:var(--color-text,#f0f0f0)}
+.kdlg-btn.ok{background:var(--color-primary,#e94560);border-color:var(--color-primary,#e94560);color:#fff}
+.kdlg-btn:focus-visible{outline:2px solid var(--color-primary,#e94560);outline-offset:2px}`;
+    document.head.appendChild(s);
+  }
+  function ask(message, opts, single) {
+    opts = opts || {};
+    css();
+    return new Promise(resolve => {
+      const back = document.createElement('div');
+      back.className = 'kdlg-back';
+      const box = document.createElement('div');
+      box.className = 'kdlg';
+      box.setAttribute('role', single ? 'alertdialog' : 'dialog');
+      box.setAttribute('aria-modal', 'true');
+      const msg = document.createElement('p');
+      msg.className = 'kdlg-msg';
+      msg.textContent = String(message);
+      const row = document.createElement('div');
+      row.className = 'kdlg-row';
+      const prevFocus = document.activeElement;
+      function done(v) {
+        document.removeEventListener('keydown', onKey, true);
+        back.remove();
+        try { prevFocus && prevFocus.focus && prevFocus.focus(); } catch (e) {}
+        resolve(v);
+      }
+      function mk(label, cls, v) {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'kdlg-btn ' + cls; b.textContent = label;
+        b.addEventListener('click', () => done(v));
+        return b;
+      }
+      if (!single) row.appendChild(mk(opts.cancel || 'Cancel', '', false));
+      const okBtn = mk(opts.ok || 'OK', 'ok', true);
+      row.appendChild(okBtn);
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(single); }
+        else if (e.key === 'Enter' && document.activeElement && document.activeElement.tagName !== 'BUTTON') { e.preventDefault(); done(true); }
+      }
+      document.addEventListener('keydown', onKey, true);
+      back.addEventListener('mousedown', e => { if (e.target === back) done(single); });
+      box.append(msg, row);
+      back.appendChild(box);
+      document.body.appendChild(back);
+      okBtn.focus();
+    });
+  }
+  window.kinshoConfirm = (m, o) => ask(m, o, false);
+  window.kinshoAlert = m => ask(m, {}, true);
+})();

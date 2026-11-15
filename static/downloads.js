@@ -47,7 +47,7 @@ window.kinshoDLMixin = {
       let r = 'nofolder';
       try { r = KinshoDL.download(String(this.libraryId), String(this.mangaId), ids ? JSON.stringify(ids) : 'null'); } catch (e) { /* below */ }
       if (r === 'nofolder') { this.dlNoFolder = true; return false; }
-      if (r === 'noserver') { alert('The app does not know your server yet: open it once while connected.'); return false; }
+      if (r === 'noserver') { kinshoAlert('The app does not know your server yet: open it once while connected.'); return false; }
       this.dlPoll();
       return true;
     },

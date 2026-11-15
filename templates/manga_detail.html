@@ -2974,7 +2974,7 @@ createApp({
         ? `
 
 This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '';
-      if (!confirm('Delete this cover file? This removes it for every user.' + inFolder)) return;
+      if (!await kinshoConfirm('Delete this cover file? This removes it for every user.' + inFolder)) return;
       try {
         const res = await fetch(apiUrl(`/api/manga/${this.libraryId}/${this.mangaId}/covers/delete`), {
           method:  'POST',
@@ -2982,7 +2982,7 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
           body:    JSON.stringify({ filename: cover.filename }),
         });
         const data = await res.json();
-        if (!data.ok) { if (data.error) alert(data.error); return; }
+        if (!data.ok) { if (data.error) kinshoAlert(data.error); return; }
         await this.openCoverPicker();   // reload the list; server recomputed the selection
         const sel = this.availableCovers.find(c => c.is_selected);
         if (sel) {
@@ -3125,7 +3125,7 @@ This also deletes ${cover.folder_files.join(', ')} from the manga's folder.` : '
       let overwriteManualDescription = false;
       if (this.manga && this.manga.description_manual && this.manga.description
           && entries.some(e => e.fields.includes('description'))) {
-        overwriteManualDescription = confirm('This description was written by hand. Replace it with the fetched one?\n\nOK = replace it, Cancel = keep yours (everything else is still applied).');
+        overwriteManualDescription = await kinshoConfirm('This description was written by hand. Replace it with the fetched one?\n\nKeeping yours still applies everything else that was ticked.', { ok: 'Replace', cancel: 'Keep mine' });
         if (!overwriteManualDescription) {
           entries.forEach(e => { e.fields = e.fields.filter(f => f !== 'description'); });
           for (let i = entries.length - 1; i >= 0; i--) if (entries[i].fields.length === 0) entries.splice(i, 1);

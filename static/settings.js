@@ -616,7 +616,7 @@ createApp({
     },
 
     async logoutEverywhere() {
-      if (!confirm('End every other logged-in session for this account?')) return;
+      if (!await kinshoConfirm('End every other logged-in session for this account?')) return;
       await fetch(apiUrl('/api/auth/logout-everywhere'), { method: 'POST' });
       window.location.href = '/login';
     },
@@ -1079,7 +1079,7 @@ createApp({
     },
 
     async resetLocalAssets() {
-      if (!confirm('Switch Vue.js and the theme font back to loading from the internet? The downloaded local copies will be deleted.')) {
+      if (!await kinshoConfirm('Switch Vue.js and the theme font back to loading from the internet? The downloaded local copies will be deleted.')) {
         return;
       }
       this.localAssetsDownloading = true;
@@ -1817,7 +1817,7 @@ createApp({
     },
 
     async dismissAllIssues() {
-      if (!confirm(`Dismiss all ${this.integrityIssues.length} issue(s)? This just clears the list — it doesn't fix anything.`)) return;
+      if (!await kinshoConfirm(`Dismiss all ${this.integrityIssues.length} issue(s)? This just clears the list — it doesn't fix anything.`)) return;
       try {
         const res  = await fetch(apiUrl('/api/admin/integrity/dismiss-all'), { method: 'POST' });
         const data = await res.json();
@@ -1888,7 +1888,7 @@ createApp({
 
     // ── CHANGE A USER'S ROLE (promote/demote admin) ──
     async changeUserRole(username, role) {
-      if (!confirm(`Change ${username}'s role to ${role}?`)) {
+      if (!await kinshoConfirm(`Change ${username}'s role to ${role}?`)) {
         await this.loadUserPermissions();   // resets the <select>'s displayed value
         return;
       }
@@ -1911,7 +1911,7 @@ createApp({
 
     // ── DELETE A USER ──
     async deleteUser(username) {
-      if (!confirm(`Permanently delete ${username}? This removes their account, reading history, favourites, and permissions. This can't be undone.`)) return;
+      if (!await kinshoConfirm(`Permanently delete ${username}? This removes their account, reading history, favourites, and permissions. This can't be undone.`)) return;
       try {
         const res  = await fetch(apiUrl(`/api/admin/users/${encodeURIComponent(username)}`), { method: 'DELETE' });
         const data = await res.json();
