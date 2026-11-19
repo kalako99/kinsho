@@ -992,6 +992,14 @@ const app = createApp({
     openSettings()   { window.location.href = '/settings'; },
 
     switchTab(id) {
+      // Clicking the library you are already on = "home" for that library:
+      // back to page 1 of Last Updated, scrolled to the top (like clicking a
+      // site's logo). loadLastUpdated() scrolls to the top by itself.
+      if (id === this.activeTab) {
+        if (this.lastUpdatedPage > 1) this.loadLastUpdated(id, 1);
+        else window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
       this.activeTab = id;
       const cached = this.tabCache[id];
       if (cached) {
