@@ -565,18 +565,12 @@ const app = createApp({
       this.$nextTick(() => { if (this.$refs.ctxCollectionSearchRef) this.$refs.ctxCollectionSearchRef.focus(); });
       if (!this.ctxManga) { this.ctxCollections = []; return; }
       try {
-        const res = await fetch(apiUrl('/api/collections'));
+        const res = await fetch(apiUrl(`/api/collections?library_id=${this.activeTab}&manga_id=${encodeURIComponent(this.ctxManga.id)}`));
         const data = await res.json();
-        const editable = (data.collections || []).filter(c => c.can_edit);
-        const details = await Promise.all(
-          editable.map(c => fetch(apiUrl(`/api/collections/${c.id}`)).then(r => r.json()))
-        );
-        this.ctxCollections = editable.map((c, i) => ({
+        this.ctxCollections = (data.collections || []).filter(c => c.can_edit).map(c => ({
           id:        c.id,
           name:      c.name,
-          has_manga: (details[i].members || []).some(
-            m => m.library_id === this.activeTab && m.manga_id === this.ctxManga.id
-          ),
+          has_manga: !!c.has_manga,
         }));
       } catch (e) { this.ctxCollections = []; }
     },

@@ -2448,18 +2448,12 @@ createApp({
 
     async loadCollections() {
       try {
-        const res = await fetch(apiUrl('/api/collections'));
+        const res = await fetch(apiUrl(`/api/collections?library_id=${this.libraryId}&manga_id=${encodeURIComponent(this.mangaId)}`));
         const data = await res.json();
-        const editable = (data.collections || []).filter(c => c.can_edit);
-        const details = await Promise.all(
-          editable.map(c => fetch(apiUrl(`/api/collections/${c.id}`)).then(r => r.json()))
-        );
-        this.allCollections = editable.map((c, i) => ({
+        this.allCollections = (data.collections || []).filter(c => c.can_edit).map(c => ({
           id:        c.id,
           name:      c.name,
-          has_manga: (details[i].members || []).some(
-            m => m.library_id === this.libraryId && m.manga_id === this.mangaId
-          ),
+          has_manga: !!c.has_manga,
         }));
       } catch (e) { this.allCollections = []; }
     },

@@ -32,11 +32,17 @@ RESERVED_USERNAMES = {"data", "bootstrap", "sessions", "users", "permissions"}
 
 # ── FILE HELPERS ─────────────────────────────────────────────────────────────
 
+_DATA_PATH_CACHE = {}   # read bootstrap.json once (cleared by main.set_data_path)
+
 def _get_data_path() -> Optional[str]:
+    if "v" in _DATA_PATH_CACHE:
+        return _DATA_PATH_CACHE["v"]
     if not os.path.exists("bootstrap.json"):
         return None
     with open("bootstrap.json", "r") as f:
-        return json.load(f).get("data_path")
+        v = json.load(f).get("data_path")
+    _DATA_PATH_CACHE["v"] = v
+    return v
 
 
 def _users_file() -> str:

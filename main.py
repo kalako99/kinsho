@@ -628,11 +628,17 @@ class AppData(BaseModel):
 # data_path is stored separately in a bootstrap file so we know where to find data.json
 BOOTSTRAP_FILE = "bootstrap.json"
 
+_DATA_PATH_CACHE = {}   # bootstrap.json is read once, not on every call (2026-11-19: ~20 disk reads per page load hit the swap stall)
+
 def get_data_path() -> Optional[str]:
+    if "v" in _DATA_PATH_CACHE:
+        return _DATA_PATH_CACHE["v"]
     if not os.path.exists(BOOTSTRAP_FILE):
         return None
     with open(BOOTSTRAP_FILE, "r") as f:
-        return json.load(f).get("data_path")
+        v = json.load(f).get("data_path")
+    _DATA_PATH_CACHE["v"] = v
+    return v
 
 def get_data_file() -> Optional[str]:
     data_path = get_data_path()
@@ -5211,6 +5217,8 @@ async def set_data_path(request: Request):
     # Save to bootstrap file
     with open(BOOTSTRAP_FILE, "w") as f:
         json.dump({"data_path": new_path}, f, indent=2)
+    _DATA_PATH_CACHE.clear()
+    auth._DATA_PATH_CACHE.clear()
     # Migrate existing data.json if there is one
     existing = load_app_data()
     existing["data_path"] = new_path
@@ -6165,8 +6173,17 @@ def _collection_summary(username: str, cid: str, record: dict, is_shared: bool, 
         "cover_url_large": cover_url_large,
     }
 
+def _with_has_manga(summary, visible, library_id, manga_id):
+    """When the caller passes library_id + manga_id (the 'add to collection' menus), mark whether that manga
+    is already a member, so the page needs ONE request instead of one GET per collection (2026-11-19)."""
+    if library_id is not None and manga_id is not None:
+        summary["has_manga"] = any(m["library_id"] == library_id and m["manga_id"] == manga_id for m in visible)
+    return summary
+
 @app.get("/api/collections")
-def get_collections(request: Request, lib: Optional[int] = Query(default=None)):
+def get_collections(request: Request, lib: Optional[int] = Query(default=None),
+                    library_id: Optional[int] = Query(default=None),
+                    manga_id: Optional[str] = Query(default=None)):
     """`lib`, when given, scopes the result to collections that have at
     least one VISIBLE member in that specific library -- a collection
     that only contains manga from other libraries is omitted entirely,
@@ -6184,7 +6201,7 @@ def get_collections(request: Request, lib: Optional[int] = Query(default=None)):
         visible = _visible_members(username, rec.get("members", []))
         if lib is not None and not any(m["library_id"] == lib for m in visible):
             continue
-        result.append(_collection_summary(username, cid, rec, False, visible))
+        result.append(_with_has_manga(_collection_summary(username, cid, rec, False, visible), visible, library_id, manga_id))
     if not user_data.get("hide_admin_collections", False):
         for cid, rec in load_shared_collections().items():
             visible = _visible_members(username, rec.get("members", []))
@@ -6196,7 +6213,7 @@ def get_collections(request: Request, lib: Optional[int] = Query(default=None)):
                 continue
             if lib is not None and not any(m["library_id"] == lib for m in visible):
                 continue
-            result.append(_collection_summary(username, cid, rec, True, visible))
+            result.append(_with_has_manga(_collection_summary(username, cid, rec, True, visible), visible, library_id, manga_id))
     return JSONResponse({"collections": result})
 
 @app.post("/api/collections")
