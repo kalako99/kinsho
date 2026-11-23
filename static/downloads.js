@@ -98,6 +98,9 @@ window.kinshoDLMixin = {
     try { KinshoDL.warm(String(this.libraryId), String(this.mangaId)); } catch (e) { /* an older app */ }
     this.dlPoll();
     this.dlTimer = setInterval(() => this.dlPoll(), 1000);
+    // polling pauses while the page is hidden (another app on top); look at once when it comes back
+    this._dlVis = () => { if (!document.hidden) this.dlPoll(); };
+    document.addEventListener('visibilitychange', this._dlVis);
   },
-  beforeUnmount() { if (this.dlTimer) clearInterval(this.dlTimer); },
+  beforeUnmount() { if (this.dlTimer) clearInterval(this.dlTimer); if (this._dlVis) document.removeEventListener('visibilitychange', this._dlVis); },
 };

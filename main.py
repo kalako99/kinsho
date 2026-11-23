@@ -9489,6 +9489,20 @@ def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id
         return JSONResponse({"error": "No pages"}, status_code=404)
     ext_of = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif"}
 
+    # A PDF unit: its pages are scans (JPEG2000 layers the tablet can't show), so each page is drawn again. Drawn
+    # like the reader does (JPEG q88, 2200 px) a 328-page scan of a 10.7 MB PDF came to 180 MB; for the tablet's
+    # folder a WebP at 1800 px (q75) is about 4x smaller with the text just as sharp (2026-11-23).
+    pdf_path = None
+    try:
+        mdata = load_app_data().get("manga_data", {}).get(str(library_id)) or {}
+        man = next((m for m in mdata.get("mangas", []) if m.get("id") == manga_id), None)
+        if man and PDF_SUPPORT:
+            u = (load_manga_dims_cached(library_id, man["name"]).get("volumes" if volume else "chapters", {}) or {}).get(unit_id)
+            if u and u.get("source") == "pdf" and u.get("path") and os.path.isfile(u["path"]):
+                pdf_path = u["path"]
+    except Exception as e:
+        print(f"[Download] PDF check failed, using the page routes: {e}")
+
     class _Sink:
         # write-only, no seek/tell: zipfile then streams (data descriptors) and we can send each page as soon as
         # it is rendered. A 328-page PDF takes ~20 min to render; building the whole zip first made the app's
@@ -9505,8 +9519,20 @@ def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id
 
     def gen():
         sink = _Sink()
+        pdoc = pymupdf.open(pdf_path) if pdf_path else None
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
             for i in range(count):
+                if pdoc is not None and i < len(pdoc):
+                    page = pdoc.load_page(i)
+                    sc = 1800 / max(1.0, page.rect.width)
+                    pix = page.get_pixmap(matrix=pymupdf.Matrix(sc, sc), alpha=False)
+                    buf = io.BytesIO()
+                    Image.frombytes("RGB", (pix.width, pix.height), pix.samples).save(buf, format="WEBP", quality=75, method=4)
+                    z.writestr("%04d.webp" % (i + 1), buf.getvalue())
+                    chunk = sink.take()
+                    if chunk:
+                        yield chunk
+                    continue
                 r = page_fn(request, library_id, manga_id, unit_id, str(i), w=2200)       # a PDF page for the app's folder: sharp enough to zoom
                 if getattr(r, "status_code", 200) != 200:
                     raise RuntimeError("Page %d failed" % i)                              # cuts the stream: the app sees a failed download
@@ -9519,6 +9545,8 @@ def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id
                 chunk = sink.take()
                 if chunk:
                     yield chunk
+        if pdoc is not None:
+            pdoc.close()
         tail = sink.take()
         if tail:
             yield tail
