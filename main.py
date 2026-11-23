@@ -9487,33 +9487,43 @@ def _unit_zip_response(request: Request, library_id: int, manga_id: str, unit_id
     count = json.loads(listing.body).get("count", 0)
     if not count:
         return JSONResponse({"error": "No pages"}, status_code=404)
-    tmp = tempfile.SpooledTemporaryFile(max_size=64 * 1024 * 1024)
     ext_of = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif", "image/avif": "avif"}
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-        for i in range(count):
-            r = page_fn(request, library_id, manga_id, unit_id, str(i), w=2200)       # a PDF page for the app's folder: sharp enough to zoom
-            if getattr(r, "status_code", 200) != 200:
-                return JSONResponse({"error": "Page %d failed" % i}, status_code=502)
-            if hasattr(r, "path"):
-                with open(r.path, "rb") as f:
-                    data = f.read()
-            else:
-                data = r.body
-            z.writestr("%04d.%s" % (i + 1, ext_of.get(r.media_type, "jpg")), data)
-    size = tmp.tell()
-    tmp.seek(0)
+
+    class _Sink:
+        # write-only, no seek/tell: zipfile then streams (data descriptors) and we can send each page as soon as
+        # it is rendered. A 328-page PDF takes ~20 min to render; building the whole zip first made the app's
+        # read timeout (5 min) fire before the first byte (2026-11-23).
+        def __init__(self): self.parts = []
+        def write(self, b):
+            self.parts.append(bytes(b))
+            return len(b)
+        def flush(self): pass
+        def take(self):
+            out = b"".join(self.parts)
+            self.parts = []
+            return out
 
     def gen():
-        try:
-            while True:
-                b = tmp.read(1 << 20)
-                if not b:
-                    break
-                yield b
-        finally:
-            tmp.close()
+        sink = _Sink()
+        with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+            for i in range(count):
+                r = page_fn(request, library_id, manga_id, unit_id, str(i), w=2200)       # a PDF page for the app's folder: sharp enough to zoom
+                if getattr(r, "status_code", 200) != 200:
+                    raise RuntimeError("Page %d failed" % i)                              # cuts the stream: the app sees a failed download
+                if hasattr(r, "path"):
+                    with open(r.path, "rb") as f:
+                        data = f.read()
+                else:
+                    data = r.body
+                z.writestr("%04d.%s" % (i + 1, ext_of.get(r.media_type, "jpg")), data)
+                chunk = sink.take()
+                if chunk:
+                    yield chunk
+        tail = sink.take()
+        if tail:
+            yield tail
     from fastapi.responses import StreamingResponse
-    return StreamingResponse(gen(), media_type="application/zip", headers={"Content-Length": str(size), "X-Page-Count": str(count)})
+    return StreamingResponse(gen(), media_type="application/zip", headers={"X-Page-Count": str(count)})
 
 @app.get("/api/manga/{library_id}/{manga_id}/chapter/{chapter_id}/download")
 def download_chapter(request: Request, library_id: int, manga_id: str, chapter_id: str):
