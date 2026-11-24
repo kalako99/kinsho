@@ -5037,6 +5037,20 @@ def get_theme_css(username: str = None) -> str:
         f"{custom_block}"
     )
 
+BOOK_LIBRARY_NAME_RE = re.compile(r"\b(books?|ebooks?|libri|libro|libr[ae]ry)\b", re.I)
+
+def _is_book_library(lib: dict) -> bool:
+    """Book libraries get Google Books + Open Library in Fetch Metadata instead
+    of the manga sources. The Settings box "Book library" decides when it was
+    ever ticked or unticked; a library where it was never set counts as a book
+    library when its name says so ("Books", "Ebooks", "Libri"...). 2026-11-24:
+    the library "Books" had no flag, so the popup showed AniList / MangaDex /
+    MangaUpdates."""
+    flag = lib.get("book_library")
+    if flag is not None:
+        return bool(flag)
+    return bool(BOOK_LIBRARY_NAME_RE.search(lib.get("name") or ""))
+
 @app.get("/api/settings")
 def get_settings(request: Request):
     username = auth.get_current_user(request)
@@ -5044,7 +5058,7 @@ def get_settings(request: Request):
     user_data = auth.load_user_data(username)
     return JSONResponse({
         "data_path":           get_data_path() or "",
-        "libraries":           data.get("libraries", []),
+        "libraries":           [dict(l, book_library=_is_book_library(l)) for l in data.get("libraries", [])],
         "themes":              data.get("themes", [default_theme()]),
         "active_theme":        user_data.get("active_theme", "Midnight Red"),
         "active_visual_theme":      user_data.get("active_visual_theme", "default"),
@@ -5981,7 +5995,7 @@ def get_manga(request: Request, library_id: int, manga_id: str):
     manga["description_manual"] = bool(dims.get("description_manual"))
     # Which Fetch Metadata sources the popup offers (Settings -> Libraries).
     library = next((l for l in load_app_data_cached().get("libraries", []) if l.get("id") == library_id), {})
-    manga["book_library"] = bool(library.get("book_library"))
+    manga["book_library"] = _is_book_library(library)
     # The series' publication status, for linked manga only (SERIES STATUS).
     manga["series_status"] = (dims.get("series_status") or {}).get("status") if dims.get("series_link") else None
     return JSONResponse(manga)
@@ -7667,6 +7681,9 @@ async def scan_library_metadata(request: Request, library_id: int):
     #                             cover, more genres/tags);
     #   only 1 ticked          -> whichever of the other two has more data.
     # (then, as a last resort, the provider not ticked at all.)
+    this_lib = next((l for l in data.get("libraries", []) if l.get("id") == library_id), {})
+    if _is_book_library(this_lib):
+        return JSONResponse({"error": "This is a book library: the automatic fetch only knows the manga sources. Use Fetch metadata on each book (Google Books / Open Library)."}, status_code=400)
     sources = _metadata_sources(data)
     if not sources:
         return JSONResponse({"error": "Tick at least one box in Automatic fetch sources first."}, status_code=400)
