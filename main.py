@@ -5955,7 +5955,9 @@ def get_mangas_for_search(request: Request, library_id: int):
             continue
         result.append(m)
  
-    return JSONResponse({"mangas": result})
+    lib_name = next((l.get("name") for l in data.get("libraries", []) if l.get("id") == library_id), "") or ""
+    return JSONResponse({"mangas": result, "library_name": lib_name})
+
 
 @app.get("/api/manga/{library_id}/{manga_id}")
 def get_manga(request: Request, library_id: int, manga_id: str):
@@ -7382,6 +7384,8 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
             if not allow_adult:
                 results = [c for c in results if not metadata_fetch.is_adult_candidate(c)]
             scored = metadata_fetch.score_all_candidates(metadata_fetch.split_book_query(query)[0] if provider in ("googlebooks", "openlibrary") else query, results)
+            if provider in ("googlebooks", "openlibrary"):
+                scored = metadata_fetch.rank_book_candidates(scored)
             for c in scored:
                 c["preview_cover_url"] = c.get("cover_url")
             return JSONResponse({"candidates": scored})

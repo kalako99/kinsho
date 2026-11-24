@@ -454,7 +454,7 @@
     </div>
 
     <div v-if="loading" class="state-msg">Loading…</div>
-    <div v-else-if="filteredMangas.length === 0" class="state-msg">No manga found.</div>
+    <div v-else-if="filteredMangas.length === 0" class="state-msg">No {{ libraryNoun }} found.</div>
     <div class="manga-grid" v-else>
       <div
         class="manga-thumb"
@@ -527,6 +527,7 @@ createApp({
     const saved = (preGenre || preTag) ? null : readSearchState(libraryId);
     return {
       libraryId:      libraryId,
+      libraryName:    '',
       advancedOpen:   false,
       query:          saved ? saved.query : '',
       allGenres:      [],
@@ -598,6 +599,12 @@ createApp({
     oneshotCollectionId() {
       return this.oneshotManga ? this.collectionMembership[`${this.libraryId}:${this.oneshotManga.id}`] || null : null;
     },
+    // "No books found" / "No webtoons found" / "No manga found": the library's own name.
+    libraryNoun() {
+      const n = (this.libraryName || '').trim().toLowerCase();
+      if (!n) return 'manga';
+      return /(s|manga|manhwa|manhua|anime)$/.test(n) ? n : n + 's';
+    },
     filteredMangas() {
       const q = this.liveQuery.trim().toLowerCase();
       return this.mangas.filter(m => {
@@ -668,6 +675,7 @@ createApp({
       try {
         const res = await fetch(apiUrl(`/api/mangas/${this.libraryId}/search`));
         const data = await res.json();
+        this.libraryName = data.library_name || '';
         this.mangas = (data.mangas || []).map(m => ({
           id:          m.id,
           title:       m.name,

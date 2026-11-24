@@ -775,6 +775,26 @@ def score_all_candidates(query: str, candidates: list[dict]) -> list[dict]:
     return scored
 
 
+def rank_book_candidates(scored: list[dict]) -> list[dict]:
+    """Book search results: among the same match score the entry with the
+    most data (cover, description, tags/genres) comes first, and a repeat of
+    the same title + authors that has no cover, no description and no tags
+    is dropped (Open Library lists a book once per work: the empty twins gave
+    the popup rows with nothing to fetch). 2026-11-24."""
+    def richness(c):
+        return (bool(c.get("cover_url")) * 2 + bool(c.get("description")) * 2
+                + bool(c.get("tags")) + bool(c.get("genres")))
+    ranked = sorted(scored, key=lambda c: (round(c.get("match_score") or 0, 2), richness(c)), reverse=True)
+    seen, out = set(), []
+    for c in ranked:
+        key = (_normalize_title(c.get("title_english") or ""), (c.get("subtitle") or "").split("·")[0].strip().lower())
+        if key in seen and richness(c) == 0:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
 def is_exact_name(query: str, candidate: dict, include_synonyms: bool = False) -> bool:
     """True when `query` equals one of the candidate's titles after normalization
     (a 100% match). include_synonyms also accepts its alternative titles: used
