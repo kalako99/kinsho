@@ -517,8 +517,21 @@ def is_adult_candidate(candidate: dict) -> bool:
     return any((g or "").strip().lower() in ADULT_GENRES for g in candidate.get("genres") or [])
 
 
+def split_book_query(query: str) -> tuple[str, str]:
+    """"Think and Grow Rich (Napoleon Hill)" -> ("Think and Grow Rich",
+    "Napoleon Hill"): book folders are named Title (Author), and the whole
+    string as a title search finds study guides and summaries instead of the
+    book (2026-11-24). No trailing (...) = (query, "")."""
+    m = re.match(r"^(.*?)\s*\(([^()]{3,})\)\s*$", (query or "").strip())
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2).strip()
+    return (query or "").strip(), ""
+
+
 async def search_google_books(title: str, api_key: str | None = None, per_page: int = 8) -> list[dict]:
-    params = {"q": f"intitle:{title}", "maxResults": per_page, "printType": "books"}
+    title, author = split_book_query(title)
+    q = f"intitle:{title}" + (f"+inauthor:{author}" if author else "")
+    params = {"q": q, "maxResults": per_page, "printType": "books"}
     if api_key:
         params["key"] = api_key
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -566,13 +579,19 @@ async def _openlibrary_work(client: httpx.AsyncClient, key: str) -> dict:
 
 
 async def search_openlibrary(title: str, per_page: int = 8) -> list[dict]:
+    title, author = split_book_query(title)
+    fields = "key,title,subtitle,author_name,first_publish_year,subject,cover_i"
     async with httpx.AsyncClient(timeout=20.0, headers=_UA, follow_redirects=True) as client:
-        r = await client.get(f"{OPENLIBRARY_URL}/search.json", params={
-            "title": title, "limit": per_page,
-            "fields": "key,title,subtitle,author_name,first_publish_year,subject,cover_i",
-        })
-        r.raise_for_status()
-        docs = r.json().get("docs") or []
+        docs = []
+        # Title + author first, then the plain text search; the "Title (Author)"
+        # string itself as the title found only guides and summaries.
+        for params in ({"title": title, **({"author": author} if author else {})},
+                       {"q": f"{title} {author}".strip()}):
+            r = await client.get(f"{OPENLIBRARY_URL}/search.json", params={**params, "limit": per_page, "fields": fields})
+            r.raise_for_status()
+            docs = r.json().get("docs") or []
+            if docs:
+                break
         works = await asyncio.gather(*(_openlibrary_work(client, d.get("key", "")) for d in docs))
     results = []
     for d, w in zip(docs, works):
@@ -590,7 +609,7 @@ async def search_openlibrary(title: str, per_page: int = 8) -> list[dict]:
             "synonyms":        [],
             "description":     _markdown_to_text(desc) if isinstance(desc, str) else "",
             "genres":          [],
-            "tags":            (d.get("subject") or [])[:12],
+            "tags":            (d.get("subject") or w.get("subjects") or [])[:12],
             "status":          None,
             "format":          "BOOK",
             "cover_url":       f"https://covers.openlibrary.org/b/id/{d['cover_i']}-L.jpg" if d.get("cover_i") else None,

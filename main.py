@@ -7381,7 +7381,7 @@ async def search_metadata_endpoint(request: Request, library_id: int, manga_id: 
                 results = await metadata_fetch.search_openlibrary(query)
             if not allow_adult:
                 results = [c for c in results if not metadata_fetch.is_adult_candidate(c)]
-            scored = metadata_fetch.score_all_candidates(query, results)
+            scored = metadata_fetch.score_all_candidates(metadata_fetch.split_book_query(query)[0] if provider in ("googlebooks", "openlibrary") else query, results)
             for c in scored:
                 c["preview_cover_url"] = c.get("cover_url")
             return JSONResponse({"candidates": scored})
